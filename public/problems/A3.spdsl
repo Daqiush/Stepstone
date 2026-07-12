@@ -1,0 +1,19 @@
+# A3 - 池上
+# Contract: 3NT by S, W leads, NONE vul
+# 剧本：W首攻H3；S引小黑桃时W跟最小；EW进手续出红桃（E出最大，W3张时出最小，W2张时出最大）；红桃出完改方片
+
+DIST base {
+  E: S3 S2 HK HT H3 DT D9 D6 D3 CQ CJ CT C5
+  W: SK S9 S7 S5 HQ H9 H7 H3 DJ D7 D4 CK C3
+}
+
+SCRIPT opening_lead {
+  W: H3
+  N: ANY
+  E: H_MAX
+  S: ANY
+}
+
+TESTCASES {
+  TC main dist=base from=0 script=opening_lead
+}

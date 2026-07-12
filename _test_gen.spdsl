@@ -1,0 +1,31 @@
+DIST base {
+  E: HQ HJ HT H5 DQ DJ DT D9 C8 C7 C6 C5 C4
+  W: SJ ST S9 H6 D8 D7 D6 D5 CK CQ CJ CT C9
+}
+
+GEN extract {
+  DIST base
+
+  PREFIX {
+    W: CK  N: C2  E: C4  S: CA
+  }
+
+  TRICK {
+    S: HIGH(S)
+    W: FOLLOW(S)
+    N: FOLLOW(S)
+    E: DISCARD(C)
+  }
+  TRICK {
+    S: HIGH(S)
+    W: FOLLOW(S)
+    N: FOLLOW(S)
+    E: DISCARD(C)
+  }
+  TRICK {
+    N: HIGH(S)
+    W: FOLLOW(S)
+    S: FOLLOW(S)
+    E: DISCARD(C)
+  }
+}

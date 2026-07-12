@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Stepstone — 大招对局</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"/>
+  <link rel="stylesheet" href="css/main.css"/>
+  <link rel="stylesheet" href="css/ult.css"/>
+</head>
+<body class="ult-body">
+
+<!-- ══════════════ 顶栏 ══════════════ -->
+<header id="ult-top-bar">
+  <div class="ult-brand">♠ Stepstone <span class="ult-mode-badge">大招</span></div>
+  <div id="ult-trick-counter" class="ult-counter">墩 0 / 13</div>
+  <div id="ult-score-row" class="ult-score">NS: 0 &nbsp;|&nbsp; EW: 0</div>
+</header>
+
+<!-- ══════════════ 主桌面 ══════════════ -->
+<div id="ult-table">
+
+  <!-- 顶部（视觉N，同伴位置） -->
+  <div id="ult-area-N" class="ult-player-area ult-north">
+    <div class="ult-seat-num" id="ult-num-N"></div>
+    <div class="ult-nameplate" id="ult-name-N">—</div>
+    <div class="ult-char-badge" id="ult-char-N"></div>
+    <div class="ult-hand-back" id="ult-hand-back-N"></div>
+    <div class="ult-hand-size" id="ult-size-N">0</div>
+  </div>
+
+  <!-- 左侧（视觉W） -->
+  <div id="ult-area-W" class="ult-player-area ult-west">
+    <div class="ult-seat-num" id="ult-num-W"></div>
+    <div class="ult-nameplate" id="ult-name-W">—</div>
+    <div class="ult-char-badge" id="ult-char-W"></div>
+    <div class="ult-hand-back" id="ult-hand-back-W"></div>
+    <div class="ult-hand-size" id="ult-size-W">0</div>
+  </div>
+
+  <!-- 中央 -->
+  <div id="ult-center">
+    <div id="ult-trick-area"></div>
+    <div id="ult-deck-display">
+      <span class="ult-deck-label">牌堆</span>
+      <span class="ult-deck-icon">🂠</span>
+    </div>
+    <div id="ult-turn-label"></div>
+  </div>
+
+  <!-- 右侧（视觉E） -->
+  <div id="ult-area-E" class="ult-player-area ult-east">
+    <div class="ult-seat-num" id="ult-num-E"></div>
+    <div class="ult-nameplate" id="ult-name-E">—</div>
+    <div class="ult-char-badge" id="ult-char-E"></div>
+    <div class="ult-hand-back" id="ult-hand-back-E"></div>
+    <div class="ult-hand-size" id="ult-size-E">0</div>
+  </div>
+
+  <!-- 底部（视觉S，始终是自己） -->
+  <div id="ult-area-S" class="ult-player-area ult-south">
+    <div class="ult-seat-num" id="ult-num-S"></div>
+    <div class="ult-nameplate" id="ult-name-S">—</div>
+    <div class="ult-char-badge" id="ult-char-S"></div>
+    <div id="ult-hand-self"></div>
+  </div>
+
+</div><!-- #ult-table -->
+
+<!-- 技能消息滚动区 -->
+<div id="ult-log"></div>
+
+<!-- Toast -->
+<div class="toast hidden" id="ult-toast"></div>
+
+<!-- ══════════════ 相位全屏面板 ══════════════ -->
+<!-- 1. 选角色 -->
+<div class="ult-phase-screen hidden" id="ult-screen-char">
+  <div class="ult-phase-card">
+    <h2 class="ult-phase-title">选择角色</h2>
+    <p class="ult-phase-sub" id="ult-char-vul"></p>
+    <div id="ult-char-options" class="ult-char-opts"></div>
+    <p class="ult-char-wait hidden" id="ult-char-wait">已选择，等待其他玩家…</p>
+  </div>
+</div>
+
+<!-- 2. 叫牌准备阶段 -->
+<div class="ult-phase-screen hidden" id="ult-screen-bid-prep">
+  <div class="ult-phase-card ult-bid-prep-card">
+    <h2 class="ult-phase-title">叫牌准备 <span id="ult-bid-prep-vul" class="ult-vul-badge"></span></h2>
+    <div id="ult-bid-prep-hand" class="ult-phase-hand"></div>
+    <div id="ult-bid-prep-skills" class="ult-skill-list"></div>
+
+    <!-- 诸葛亮尽瘁：牌堆预览 -->
+    <div id="ult-peek-panel" class="ult-peek-panel hidden">
+      <p class="ult-peek-title">尽瘁 — 牌堆顶 7 张（点击选择保留，拖拽排序）</p>
+      <div id="ult-peek-cards" class="ult-peek-cards"></div>
+      <div id="ult-peek-selected" class="ult-peek-selected">
+        <p class="ult-peek-sub">放回顺序（先出先在顶）：</p>
+        <div id="ult-peek-ordered" class="ult-peek-cards"></div>
+      </div>
+      <div class="modal-btn-row">
+        <button class="btn btn-primary" onclick="confirmPeek()">确认放回</button>
+        <button class="btn btn-ghost"   onclick="cancelPeek()">全部烧毁</button>
+      </div>
+    </div>
+
+    <div class="ult-ready-row">
+      <div id="ult-bid-prep-ready-status" class="ult-ready-status"></div>
+      <button class="btn btn-ghost hidden" id="ult-btn-skill-skip" onclick="skipSkill()">跳过</button>
+    </div>
+  </div>
+</div>
+
+<!-- 3. 叫牌阶段 -->
+<div class="ult-phase-screen hidden" id="ult-screen-bidding">
+  <div class="ult-phase-card ult-bid-card">
+    <h2 class="ult-phase-title">
+      叫牌 <span id="ult-bid-vul" class="ult-vul-badge"></span>
+      <span class="ult-bid-dealer-label">庄：<span id="ult-bid-dealer"></span></span>
+    </h2>
+    <div id="ult-bid-hand" class="ult-phase-hand"></div>
+    <div id="ult-bid-contract" class="ult-bid-contract-display"></div>
+    <div id="ult-bid-history-wrap" class="ult-bid-history-wrap">
+      <table id="ult-bid-history-table" class="ult-bid-hist-table">
+        <thead><tr id="ult-bid-hist-header"></tr></thead>
+        <tbody id="ult-bid-hist-body"></tbody>
+      </table>
+    </div>
+    <div id="ult-bid-turn" class="ult-bid-turn-label"></div>
+    <div id="ult-bid-buttons" class="ult-bid-buttons"></div>
+  </div>
+</div>
+
+<!-- 4. 叫牌结束阶段 -->
+<div class="ult-phase-screen hidden" id="ult-screen-bid-end">
+  <div class="ult-phase-card ult-bid-prep-card">
+    <h2 class="ult-phase-title">叫牌结束 — 技能发动</h2>
+    <div id="ult-bid-end-contract" class="ult-bid-contract-display" style="margin-bottom:.6rem"></div>
+    <div id="ult-bid-end-hand" class="ult-phase-hand"></div>
+    <div id="ult-bid-end-skills" class="ult-skill-list"></div>
+    <div class="ult-ready-row">
+      <div id="ult-bid-end-ready-status" class="ult-ready-status"></div>
+      <button class="btn btn-ghost hidden" id="ult-btn-skill-skip-end" onclick="skipSkill()">跳过</button>
+    </div>
+  </div>
+</div>
+
+<!-- 出牌阶段：雄乱目标选择 -->
+<div class="modal-overlay hidden" id="ult-modal-hunluan">
+  <div class="modal" style="max-width:320px;text-align:center">
+    <h3 class="modal-title">雄乱</h3>
+    <p style="font-size:.85rem;color:var(--text-muted);margin:.5rem 0">选择一名有牌的角色，令其本墩强制PASS：</p>
+    <div id="ult-hunluan-targets" class="ult-target-list"></div>
+    <div class="modal-btn-row">
+      <button class="btn btn-ghost" onclick="cancelHunluan()">取消</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════ 结算弹窗 ══════════════ -->
+<div class="modal-overlay hidden" id="ult-modal-end">
+  <div class="modal" style="max-width:360px;text-align:center">
+    <h2 class="modal-title" id="ult-end-title">对局结束</h2>
+    <div id="ult-end-body" style="margin:.8rem 0;font-size:.9rem;color:var(--text-muted)"></div>
+    <div id="ult-end-score" style="margin:.4rem 0;font-size:.85rem"></div>
+    <div class="modal-btn-row">
+      <button class="btn btn-primary" onclick="ultNextDeal()">再来一局</button>
+      <button class="btn btn-ghost"   onclick="ultExit()">返回大厅</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<script src="/socket.io/socket.io.js"></script>
+<script src="js/bridge-rules.js"></script>
+<script src="js/ult-game.js"></script>
+<script>lucide.createIcons();</script>
+</body>
+</html>

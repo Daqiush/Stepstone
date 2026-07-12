@@ -1,0 +1,19 @@
+DIST base {
+  E: HQ HJ HT H2 SA SK SQ SJ DA DK CA CK CQ
+  W: H5 H4 H3 ST SJ D9 D8 D7 CJ CT C9 C8 C7
+}
+
+DIST punish extends base {
+  E.H: Q T 5 2
+  W.H: J
+}
+
+SCRIPT s1 {
+  W: HJ
+}
+
+TESTCASES {
+  TC main dist=base from=0 script=s1
+  TC err1 dist=punish from=1 script=s1
+  TC err2 dist=punish from=4 script=s1
+}

@@ -1,0 +1,185 @@
+{
+  "version": "2.0",
+  "note": "大招模式角色。trigger: bid_start|bid_end|on_trick_lose|on_trick_win_set|play_time。type: passive|interactive。cooldown(boards): 0=无CD, 1=本副用完下副可用, 2=用完后两副可用。",
+  "characters": [
+    {
+      "id": "liubei",
+      "name": "刘备",
+      "faction": "蜀汉",
+      "description": "仁德(叫牌结束)：将至多2张手牌交给同伴，交出的牌点数+1。",
+      "skills": [
+        {
+          "id": "liubei_ren",
+          "name": "仁德",
+          "trigger": "bid_end",
+          "type": "interactive",
+          "cooldown": 0,
+          "description": "叫牌阶段结束后，你可以将至多2张手牌交给同伴，并令其点数+1。",
+          "interaction": { "type": "pick_give_partner", "max": 2, "rank_add": 1 }
+        }
+      ]
+    },
+    {
+      "id": "zhugeliang",
+      "name": "诸葛亮",
+      "faction": "蜀汉",
+      "description": "尽瘁(叫牌开始)：观看牌堆顶7张，任意安排顺序放回，烧毁其余。智哲(叫牌结束)：复制手牌中1张。",
+      "skills": [
+        {
+          "id": "zgl_jincui",
+          "name": "尽瘁",
+          "trigger": "bid_start",
+          "type": "interactive",
+          "cooldown": 0,
+          "description": "叫牌开始时，你可以观看牌堆顶的7张牌，将其中任意张以任意顺序放回牌堆顶，烧毁其余。",
+          "interaction": { "type": "peek_deck", "count": 7 }
+        },
+        {
+          "id": "zgl_zhizhe",
+          "name": "智哲",
+          "trigger": "bid_end",
+          "type": "interactive",
+          "cooldown": 0,
+          "description": "叫牌结束时，你可以复制手牌中的1张牌（获得其副本加入手牌）。",
+          "interaction": { "type": "copy_card", "max": 1 }
+        }
+      ]
+    },
+    {
+      "id": "caocao",
+      "name": "曹操",
+      "faction": "魏国",
+      "description": "奸雄(CD:2)：你方输墩后，你获得赢墩者打出的牌，赢墩者获得你打出的牌。",
+      "skills": [
+        {
+          "id": "caocao_jxiong",
+          "name": "奸雄",
+          "trigger": "on_trick_lose",
+          "type": "passive",
+          "cooldown": 2,
+          "description": "CD:2。当你方输掉一墩后，你可获得赢得这墩的角色打出的牌，然后赢得这墩的角色可获得你在这墩打出的牌。",
+          "interaction": null
+        }
+      ]
+    },
+    {
+      "id": "zhangliao",
+      "name": "张辽",
+      "faction": "魏国",
+      "description": "突袭(叫牌结束)：从两名对手各随机获得1张手牌。",
+      "skills": [
+        {
+          "id": "zhangliao_tuxi",
+          "name": "突袭",
+          "trigger": "bid_end",
+          "type": "interactive",
+          "cooldown": 0,
+          "description": "叫牌结束后，你可以从两名对手各随机获得1张手牌。",
+          "interaction": { "type": "confirm_steal_both_opp" }
+        }
+      ]
+    },
+    {
+      "id": "sunquan",
+      "name": "孙权",
+      "faction": "吴国",
+      "description": "制衡(叫牌开始)：弃置至多4张牌，然后摸等量的牌。",
+      "skills": [
+        {
+          "id": "sunquan_zhiheng",
+          "name": "制衡",
+          "trigger": "bid_start",
+          "type": "interactive",
+          "cooldown": 0,
+          "description": "叫牌开始时，你可以弃置至多4张牌，然后摸等量的牌。",
+          "interaction": { "type": "discard_draw", "max": 4 }
+        }
+      ]
+    },
+    {
+      "id": "lvmeng",
+      "name": "吕蒙",
+      "faction": "吴国",
+      "description": "克己(CD:1)：你可以在有手牌的情况下跟出PASS（保留手牌）。",
+      "skills": [
+        {
+          "id": "lvmeng_keji",
+          "name": "克己",
+          "trigger": "play_time",
+          "type": "interactive",
+          "cooldown": 1,
+          "description": "CD:1。你可以在有手牌的情况下跟出PASS，手牌不消耗。",
+          "interaction": { "type": "play_pass_with_cards" }
+        }
+      ]
+    },
+    {
+      "id": "dongzhuo",
+      "name": "董卓",
+      "faction": "群雄",
+      "description": "酒池(CD:1)：你打出♠牌时，可令此牌点数+3.141592（最大到A）。",
+      "skills": [
+        {
+          "id": "dongzhuo_jiuchi",
+          "name": "酒池",
+          "trigger": "play_time",
+          "type": "interactive",
+          "cooldown": 1,
+          "description": "CD:1。你打出♠牌时，可令此牌点数+3.141592（最大到A=14）。",
+          "interaction": { "type": "boost_spade_rank", "amount": 3141592, "divisor": 1000000 }
+        }
+      ]
+    },
+    {
+      "id": "zhangxiu",
+      "name": "张绣",
+      "faction": "群雄",
+      "description": "雄乱(CD:2)：你引出牌前，可以令一名有牌的角色本墩强制跟出PASS。",
+      "skills": [
+        {
+          "id": "zhangxiu_hunluan",
+          "name": "雄乱",
+          "trigger": "play_time",
+          "type": "interactive",
+          "cooldown": 2,
+          "description": "CD:2。你引出牌前，可以选择一名有手牌的角色，令其本墩强制跟出PASS。",
+          "interaction": { "type": "force_pass_target" }
+        }
+      ]
+    },
+    {
+      "id": "liuxie",
+      "name": "刘协",
+      "faction": "汉朝",
+      "description": "密诏(CD:2)：叫牌结束时，你可将所有手牌交给同伴。",
+      "skills": [
+        {
+          "id": "liuxie_mizha",
+          "name": "密诏",
+          "trigger": "bid_end",
+          "type": "interactive",
+          "cooldown": 2,
+          "description": "CD:2。叫牌结束时，你可将所有手牌交给同伴。",
+          "interaction": { "type": "give_all_to_partner" }
+        }
+      ]
+    },
+    {
+      "id": "hetaihou",
+      "name": "何太后",
+      "faction": "汉朝",
+      "description": "戚乱(CD:1)：当你方赢得击宕敌方的一墩时，你可以摸3张牌。",
+      "skills": [
+        {
+          "id": "hetaihou_qiluan",
+          "name": "戚乱",
+          "trigger": "on_trick_win_set",
+          "type": "passive",
+          "cooldown": 1,
+          "description": "CD:1。当你方赢得恰好击宕敌方定约的那一墩时，你摸3张牌。（击宕定义：如定约方需X墩，守方赢到13-X+1墩时击宕。）",
+          "interaction": null
+        }
+      ]
+    }
+  ]
+}

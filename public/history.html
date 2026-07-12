@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Stepstone — 对局历史</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"/>
+  <link rel="stylesheet" href="css/main.css"/>
+  <style>
+    body { background: var(--bg); color: var(--text); font-family: var(--font); min-height: 100vh; padding: 1.2rem; box-sizing: border-box; }
+    h1 { font-size: 1.3rem; font-weight: 800; color: var(--gold); margin-bottom: 1.2rem; }
+    .board-block { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 1.2rem; overflow: hidden; }
+    .board-header { background: var(--surface-2); padding: .55rem 1rem; display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; border-bottom: 1px solid var(--border); }
+    .board-num { font-weight: 800; font-size: 1rem; color: var(--gold-light); }
+    .board-contract { font-size: .9rem; font-weight: 700; }
+    .board-result { font-size: .82rem; }
+    .pos { color: var(--green, #4ecb80); }
+    .neg { color: var(--red-soft, #e07070); }
+    .board-sections { display: flex; gap: 1rem; padding: .8rem 1rem; flex-wrap: wrap; }
+    .section { flex: 1 1 200px; min-width: 0; }
+    .section-title { font-size: .72rem; font-weight: 700; color: var(--text-muted); letter-spacing: .06em; text-transform: uppercase; margin-bottom: .45rem; }
+    table.hist-table { border-collapse: collapse; font-size: .78rem; width: 100%; }
+    table.hist-table th { text-align: center; padding: .18rem .35rem; color: var(--text-muted); font-size: .7rem; border-bottom: 1px solid var(--border); }
+    table.hist-table td { text-align: center; padding: .16rem .35rem; }
+    table.hist-table tr:nth-child(even) td { background: rgba(255,255,255,.025); }
+    .suit-red { color: var(--red, #e07070); }
+    .suit-black { color: #ddd; }
+    .bh-pass { color: var(--text-muted); font-size: .75rem; }
+    .bh-dbl  { color: var(--red-soft, #e07070); font-weight: 700; }
+    .bh-rdbl { color: #b88af0; font-weight: 700; }
+    .trick-row { display: flex; flex-wrap: wrap; gap: .3rem; margin-bottom: .25rem; align-items: center; }
+    .trick-idx { font-size: .68rem; color: var(--text-muted); width: 1.4em; flex-shrink: 0; }
+    .trick-card { font-size: .78rem; padding: .1rem .3rem; border-radius: 4px; background: var(--surface-2); border: 1px solid var(--border); white-space: nowrap; }
+    .trick-card.winner { border-color: var(--gold); color: var(--gold-light); }
+    .card-suit-red { color: var(--red, #e07070); }
+    .no-data { color: var(--text-muted); font-size: .82rem; padding: .8rem 0; }
+    .summary-table { border-collapse: collapse; font-size: .8rem; width: 100%; }
+    .summary-table th, .summary-table td { padding: .3rem .6rem; text-align: center; }
+    .summary-table th { border-bottom: 1px solid var(--border); color: var(--text-muted); font-size: .72rem; }
+    .summary-table tr:nth-child(even) td { background: rgba(255,255,255,.025); }
+    .page-header { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; }
+    .back-btn { background: var(--surface-2); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: .3rem .7rem; font-size: .82rem; cursor: pointer; }
+    .back-btn:hover { border-color: var(--gold); color: var(--gold-light); }
+  </style>
+</head>
+<body>
+<div class="page-header">
+  <button class="back-btn" onclick="window.close()">✕ 关闭</button>
+  <h1>♠ 对局历史记录</h1>
+</div>
+<div id="root"></div>
+
+<script src="js/bridge-rules.js"></script>
+<script>
+const SUIT_SYM = { S:'♠', H:'♥', D:'♦', C:'♣' };
+const SUIT_CLS = { S:'', H:'card-suit-red', D:'card-suit-red', C:'' };
+const SEAT_LBL = { N:'北', E:'东', S:'南', W:'西' };
+const SEATS    = ['N','E','S','W'];
+
+function rankDisp(r) { return r === 'T' ? '10' : r; }
+
+function contractHtml(cc) {
+  if (!cc) return '—';
+  const col  = (cc.suit === 'H' || cc.suit === 'D') ? 'suit-red' : 'suit-black';
+  const sym  = cc.suit === 'NT' ? 'NT' : SUIT_SYM[cc.suit];
+  const dbl  = cc.redoubled ? 'XX' : cc.doubled ? 'X' : '';
+  return `${cc.level}<span class="${col}">${sym}</span>${dbl}`;
+}
+
+function bidHtml(bid) {
+  if (bid === 'Pass')     return `<span class="bh-pass">PASS</span>`;
+  if (bid === 'Double')   return `<span class="bh-dbl">X</span>`;
+  if (bid === 'Redouble') return `<span class="bh-rdbl">XX</span>`;
+  const lv  = bid[0];
+  const suit = bid.slice(1);
+  const col  = (suit === 'H' || suit === 'D') ? 'suit-red' : 'suit-black';
+  const sym  = suit === 'NT' ? 'NT' : SUIT_SYM[suit];
+  return `<span>${lv}<span class="${col}">${sym}</span></span>`;
+}
+
+function renderBiddingHistory(history, dealer) {
+  const order = SEATS;
+  const startIdx = order.indexOf(dealer || 'N');
+  let html = '<table class="hist-table"><thead><tr>';
+  for (let i = 0; i < 4; i++) {
+    const s = order[(startIdx + i) % 4];
+    html += `<th>${SEAT_LBL[s]}</th>`;
+  }
+  html += '</tr></thead><tbody>';
+
+  let row = ''; let colIdx = startIdx;
+  history.forEach(({ seat, bid }) => {
+    const col = order.indexOf(seat);
+    if (col === startIdx || row === '') {
+      if (row) html += `<tr>${row}</tr>`;
+      row = '';
+      if (col !== startIdx) {
+        for (let i = startIdx; i < col; i++) row += '<td></td>';
+      }
+      colIdx = col;
+    }
+    row += `<td>${bidHtml(bid)}</td>`;
+    colIdx = (colIdx + 1) % 4;
+    if (colIdx === startIdx) { html += `<tr>${row}</tr>`; row = ''; }
+  });
+  if (row) html += `<tr>${row}</tr>`;
+  html += '</tbody></table>';
+  return html;
+}
+
+function renderTricks(completedTricks, dummy, declarer) {
+  if (!completedTricks || !completedTricks.length) return '<div class="no-data">无打牌记录</div>';
+  let html = '';
+  completedTricks.forEach((trick, i) => {
+    html += `<div class="trick-row"><span class="trick-idx">${i+1}.</span>`;
+    trick.cards.forEach(({ seat, card }) => {
+      const isWinner = seat === trick.winner;
+      const col = (card.suit === 'H' || card.suit === 'D') ? 'card-suit-red' : '';
+      const seatLbl = seat === dummy ? '<small style="color:var(--text-muted)">明</small>' : SEAT_LBL[seat];
+      html += `<div class="trick-card${isWinner ? ' winner' : ''}">${seatLbl}<span class="${col}">${SUIT_SYM[card.suit]}${rankDisp(card.rank)}</span></div>`;
+    });
+    html += `<span style="font-size:.68rem;color:var(--text-muted);margin-left:.2rem">→${SEAT_LBL[trick.winner]}</span>`;
+    html += '</div>';
+  });
+  return html;
+}
+
+function render() {
+  const root = document.getElementById('root');
+  let raw;
+  try { raw = sessionStorage.getItem('ss_history'); } catch(e) {}
+  if (!raw) {
+    root.innerHTML = '<div class="no-data" style="padding:2rem;text-align:center">暂无历史数据。请先完成一局游戏。</div>';
+    return;
+  }
+  const boards = JSON.parse(raw);
+
+  // Summary table
+  let html = '<div class="board-block"><div class="board-header"><span class="board-num">汇总</span></div><div style="padding:.8rem 1rem">';
+  html += '<table class="summary-table"><thead><tr><th>副</th><th>板</th><th>定约</th><th>庄</th><th>结果</th><th>得分</th></tr></thead><tbody>';
+  boards.forEach(s => {
+    if (s.passedOut) {
+      html += `<tr><td>${s.dealNumber}</td><td>-</td><td colspan="4" style="color:var(--text-muted)">全不叫</td></tr>`;
+    } else {
+      const diff = s.diff ?? (s.declarerTricks - s.needed);
+      const cls  = s.score > 0 ? 'pos' : s.score < 0 ? 'neg' : '';
+      const dTxt = diff > 0 ? `+${diff}` : diff < 0 ? `${diff}` : '=';
+      html += `<tr><td>${s.dealNumber}</td><td>${s.boardNumber}</td><td>${contractHtml(s.contract)}</td><td>${SEAT_LBL[s.declarer]}</td><td class="${cls}">${dTxt}</td><td class="${cls}">${s.score > 0 ? '+' : ''}${s.score}</td></tr>`;
+    }
+  });
+  html += '</tbody></table></div></div>';
+
+  // Per-board detail
+  boards.forEach(s => {
+    if (s.passedOut) {
+      html += `<div class="board-block"><div class="board-header"><span class="board-num">第${s.dealNumber}副</span><span class="board-result" style="color:var(--text-muted)">全不叫 · 0分</span></div></div>`;
+      return;
+    }
+    const diff  = s.diff ?? (s.declarerTricks - s.needed);
+    const cls   = s.score > 0 ? 'pos' : s.score < 0 ? 'neg' : '';
+    const dTxt  = diff > 0 ? `+${diff}` : diff < 0 ? `${diff}` : '=';
+    const madeStr = s.made ? `成约 ${dTxt}` : `宕${Math.abs(diff)}`;
+    html += `<div class="board-block">
+      <div class="board-header">
+        <span class="board-num">第${s.dealNumber}副 · 板${s.boardNumber}</span>
+        <span class="board-contract">${contractHtml(s.contract)} 庄：${SEAT_LBL[s.declarer]}</span>
+        <span class="board-result ${cls}">${madeStr} · ${s.score > 0 ? '+' : ''}${s.score}分</span>
+      </div>
+      <div class="board-sections">
+        <div class="section">
+          <div class="section-title">叫牌过程</div>
+          ${s.biddingHistory?.length ? renderBiddingHistory(s.biddingHistory, s.biddingHistory[0]?.seat) : '<div class="no-data">无记录</div>'}
+        </div>
+        <div class="section" style="flex:2">
+          <div class="section-title">打牌过程（共${s.completedTricks?.length ?? 0}墩）</div>
+          ${renderTricks(s.completedTricks, s.dummy, s.declarer)}
+        </div>
+      </div>
+    </div>`;
+  });
+
+  root.innerHTML = html;
+}
+
+render();
+</script>
+</body>
+</html>

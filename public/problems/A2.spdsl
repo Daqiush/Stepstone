@@ -1,0 +1,19 @@
+# A2 - 小池
+# Contract: 3NT by S, W leads, NONE vul
+# 剧本：W首攻SJ；定约方打梅花时，若DA+DK均已出且CA未出，把E♣A换给W（S引时）或换给E自己保留（N引时），出C_MAX；其余DDS
+
+DIST base {
+  E: S7 S4 S3 S2 HK HQ H6 H4 H2 D4 CA C6 C3
+  W: SQ SJ ST S8 S5 HJ H8 DQ DJ DT D9 D3 CT
+}
+
+SCRIPT opening_lead {
+  W: SJ
+  N: ANY
+  E: ANY
+  S: ANY
+}
+
+TESTCASES {
+  TC main dist=base from=0 script=opening_lead
+}

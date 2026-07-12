@@ -1,0 +1,744 @@
+/* ult.css — 大招模式专用样式 */
+
+/* ── 变量 ─────────────────────────────────────────────────────── */
+:root {
+  --ult-bg:       #0f1a10;
+  --ult-surface:  #1a2b1c;
+  --ult-border:   #2a4a2c;
+  --ult-accent:   #4caf50;
+  --ult-gold:     #ffd700;
+  --ult-red:      #e53935;
+  --ult-blue:     #1e88e5;
+  --text:         #e8f5e9;
+  --text-muted:   #81a984;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+.ult-body {
+  background: var(--ult-bg);
+  color: var(--text);
+  font-family: 'Inter', sans-serif;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── 顶栏 ────────────────────────────────────────────────────── */
+#ult-top-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: .5rem 1.2rem;
+  background: var(--ult-surface);
+  border-bottom: 1px solid var(--ult-border);
+  height: 3rem;
+  flex-shrink: 0;
+}
+
+.ult-brand {
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: .03em;
+}
+
+.ult-mode-badge {
+  display: inline-block;
+  background: var(--ult-gold);
+  color: #000;
+  font-size: .65rem;
+  font-weight: 800;
+  padding: .1em .45em;
+  border-radius: 3px;
+  margin-left: .4em;
+  vertical-align: middle;
+  letter-spacing: .05em;
+}
+
+.ult-counter {
+  font-size: .95rem;
+  font-weight: 600;
+  color: var(--ult-gold);
+}
+
+.ult-score {
+  font-size: .85rem;
+  color: var(--text-muted);
+}
+
+/* ── 主桌面：3×3 grid ─────────────────────────────────────────── */
+#ult-table {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, min(22%, 80px)) minmax(0, 1fr) minmax(0, min(22%, 80px));
+  grid-template-rows: minmax(0, min(18%, 70px)) minmax(0, 1fr) minmax(min-content, min(38%, 140px));
+  gap: 3px;
+  padding: 3px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.ult-north  { grid-column: 2; grid-row: 1; }
+.ult-west   { grid-column: 1; grid-row: 2; }
+#ult-center { grid-column: 2; grid-row: 2; }
+.ult-east   { grid-column: 3; grid-row: 2; }
+.ult-south  { grid-column: 2; grid-row: 3; }
+
+/* ── 玩家区 ───────────────────────────────────────────────────── */
+.ult-player-area {
+  background: var(--ult-surface);
+  border: 1px solid var(--ult-border);
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: .3rem;
+  gap: .2rem;
+  overflow: hidden;
+  min-width: 0;
+  min-height: 0;
+}
+
+.ult-south {
+  justify-content: flex-start;
+  padding-top: .4rem;
+  overflow-y: auto;
+}
+
+.ult-nameplate {
+  font-size: clamp(.6rem, 1.5vw, .8rem);
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.ult-char-badge {
+  font-size: clamp(.55rem, 1.3vw, .7rem);
+  color: var(--ult-gold);
+  font-weight: 600;
+  min-height: .8rem;
+}
+
+.ult-hand-size {
+  font-size: clamp(.55rem, 1.2vw, .75rem);
+  color: var(--text-muted);
+}
+
+/* 背面手牌堆叠效果 */
+.ult-hand-back {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1px;
+  justify-content: center;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.ult-card-back {
+  width: clamp(8px, 2vw, 16px);
+  height: clamp(11px, 2.8vw, 22px);
+  background: linear-gradient(135deg, #2e4a30 0%, #1a3a1c 100%);
+  border: 1px solid var(--ult-border);
+  border-radius: 2px;
+}
+
+/* ── 中央区 ───────────────────────────────────────────────────── */
+#ult-center {
+  background: #0d1a0e;
+  border: 1px solid var(--ult-border);
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: .3rem;
+  padding: .4rem;
+  overflow: hidden;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* 墩显示 3×3格grid */
+.ult-trick-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-rows: 1fr 1fr 1fr;
+  gap: 3px;
+  width: min(140px, 18vw, 18vh);
+  height: min(140px, 18vw, 18vh);
+}
+
+.ult-trick-cell { display: flex; align-items: center; justify-content: center; }
+.ult-trick-n    { grid-column: 2; grid-row: 1; }
+.ult-trick-w    { grid-column: 1; grid-row: 2; }
+.ult-trick-e    { grid-column: 3; grid-row: 2; }
+.ult-trick-s    { grid-column: 2; grid-row: 3; }
+
+.ult-trick-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: min(40px, 5.5vw, 5.5vh);
+  height: min(54px, 7.5vw, 7.5vh);
+  border-radius: 4px;
+  border: 1px solid rgba(255,255,255,.2);
+  background: #f5f0e8;
+  color: #222;
+  font-weight: 700;
+  font-size: clamp(.55rem, 1.4vw, .75rem);
+  box-shadow: 0 2px 4px rgba(0,0,0,.4);
+}
+
+.ult-trick-card.ult-pass {
+  background: #444;
+  color: #aaa;
+  font-size: clamp(.5rem, 1.2vw, .65rem);
+}
+
+.tc-suit { font-size: clamp(.7rem, 1.6vw, 1rem); line-height: 1; }
+.tc-rank { font-size: clamp(.5rem, 1.2vw, .7rem); }
+
+.ult-deck-display {
+  display: flex;
+  align-items: center;
+  gap: .3rem;
+  font-size: clamp(.6rem, 1.4vw, .75rem);
+  color: var(--text-muted);
+}
+.ult-deck-icon { font-size: clamp(1rem, 2.5vw, 1.4rem); }
+
+.ult-turn-label {
+  font-size: clamp(.65rem, 1.5vw, .8rem);
+  color: var(--text-muted);
+  text-align: center;
+}
+.ult-turn-label.my-turn {
+  color: var(--ult-gold);
+  font-weight: 700;
+  animation: pulse 1s ease-in-out infinite alternate;
+}
+@keyframes pulse {
+  from { opacity: .7; } to { opacity: 1; }
+}
+
+/* ── 南方手牌区（自己）─────────────────────────────────────────── */
+#ult-hand-self {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .2rem .35rem;
+  justify-content: center;
+  align-items: flex-start;
+  width: 100%;
+  padding: 0 .2rem;
+  overflow-y: auto;
+  max-height: 100%;
+}
+
+.ult-suit-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  background: rgba(255,255,255,.04);
+  border-radius: 5px;
+  padding: 2px 4px;
+  flex-wrap: nowrap;
+}
+
+.ult-suit-label {
+  font-size: clamp(.65rem, 1.5vw, .85rem);
+  font-weight: 700;
+  margin-right: 1px;
+  flex-shrink: 0;
+}
+
+/* 花色颜色 */
+.suit-S { color: #c0d4ff; }
+.suit-H { color: #ff6b6b; }
+.suit-D { color: #ff9944; }
+.suit-C { color: #66cc66; }
+
+.ult-card {
+  background: #f5f0e8;
+  color: #222;
+  border: 1px solid rgba(0,0,0,.3);
+  border-radius: 4px;
+  font-size: clamp(.62rem, 1.5vw, .8rem);
+  font-weight: 700;
+  padding: .15rem .25rem;
+  cursor: pointer;
+  transition: transform .1s, box-shadow .1s;
+  min-width: 1.5rem;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.ult-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 4px 10px rgba(0,0,0,.5);
+}
+
+.ult-card.selected {
+  transform: translateY(-8px);
+  box-shadow: 0 6px 16px rgba(255,215,0,.5);
+  outline: 2px solid var(--ult-gold);
+}
+
+/* suit colors on face-up cards */
+.ult-card.suit-H, .ult-card.suit-D { color: #cc2222; }
+.ult-card.suit-S, .ult-card.suit-C { color: #111; }
+
+.ult-play-btn {
+  display: block;
+  width: 100%;
+  margin-top: .5rem;
+  font-size: .85rem;
+  padding: .4rem .8rem;
+  border-radius: 6px;
+}
+
+/* ── 技能日志 ────────────────────────────────────────────────── */
+#ult-log {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  width: min(180px, 35vw);
+  max-height: 120px;
+  overflow-y: auto;
+  background: rgba(0,0,0,.65);
+  backdrop-filter: blur(4px);
+  border-top: 1px solid var(--ult-border);
+  border-right: 1px solid var(--ult-border);
+  border-radius: 0 8px 0 0;
+  padding: .3rem .5rem;
+  font-size: .68rem;
+  color: var(--text-muted);
+  pointer-events: none;
+  z-index: 50;
+}
+
+.ult-log-line { line-height: 1.5; }
+
+/* ── Toast ─────────────────────────────────────────────────────── */
+.toast {
+  position: fixed;
+  top: 3.8rem;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(30,40,32,.92);
+  color: var(--text);
+  padding: .5rem 1.2rem;
+  border-radius: 20px;
+  border: 1px solid var(--ult-border);
+  font-size: .85rem;
+  z-index: 200;
+  pointer-events: none;
+}
+.toast.hidden { display: none; }
+
+/* ── 结算弹窗 ─────────────────────────────────────────────────── */
+.modal-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,.7);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 300;
+}
+.modal-overlay.hidden { display: none; }
+
+.modal {
+  background: var(--ult-surface);
+  border: 1px solid var(--ult-border);
+  border-radius: 12px;
+  padding: 1.5rem;
+  width: 90%;
+}
+
+.modal-title {
+  font-size: 1.2rem;
+  font-weight: 700;
+  margin-bottom: .5rem;
+  color: var(--ult-gold);
+}
+
+.modal-btn-row {
+  display: flex;
+  gap: .8rem;
+  justify-content: center;
+  margin-top: 1rem;
+}
+
+/* re-use .btn from main.css; add ult overrides if needed */
+.btn { cursor: pointer; border: none; border-radius: 6px; font-weight: 600; padding: .45rem 1rem; font-size: .85rem; }
+.btn-primary { background: var(--ult-accent); color: #000; }
+.btn-primary:hover { filter: brightness(1.1); }
+.btn-ghost { background: transparent; color: var(--text-muted); border: 1px solid var(--ult-border); }
+.btn-ghost:hover { background: rgba(255,255,255,.06); }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+
+/* ── 相位全屏覆盖层 ──────────────────────────────────────────── */
+.ult-phase-screen {
+  position: fixed; inset: 0;
+  background: rgba(8, 14, 9, .94);
+  backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  overflow-y: auto;
+  padding: 1rem;
+}
+.ult-phase-screen.hidden { display: none; }
+
+.ult-phase-card {
+  background: var(--ult-surface);
+  border: 1px solid var(--ult-border);
+  border-radius: 14px;
+  padding: 1.4rem 1.6rem;
+  width: 100%;
+  max-width: 560px;
+  display: flex;
+  flex-direction: column;
+  gap: .8rem;
+}
+
+.ult-bid-card {
+  max-width: 640px;
+}
+
+.ult-bid-prep-card {
+  max-width: 580px;
+}
+
+.ult-phase-title {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--ult-gold);
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  flex-wrap: wrap;
+}
+
+.ult-phase-sub {
+  font-size: .82rem;
+  color: var(--text-muted);
+}
+
+/* ── 局情标签 ──────────────────────────────────────────────────── */
+.ult-vul-badge {
+  font-size: .72rem;
+  font-weight: 600;
+  background: rgba(255,215,0,.15);
+  color: var(--ult-gold);
+  border: 1px solid rgba(255,215,0,.3);
+  border-radius: 4px;
+  padding: .1em .45em;
+}
+
+.ult-bid-dealer-label {
+  font-size: .75rem;
+  color: var(--text-muted);
+  font-weight: 400;
+  margin-left: auto;
+}
+
+/* ── 选角色 ────────────────────────────────────────────────────── */
+.ult-char-opts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: .6rem;
+}
+
+.ult-char-opt-btn {
+  background: rgba(255,255,255,.05);
+  border: 1px solid var(--ult-border);
+  border-radius: 8px;
+  padding: .7rem .8rem;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color .15s, background .15s;
+}
+
+.ult-char-opt-btn:hover {
+  border-color: var(--ult-accent);
+  background: rgba(76,175,80,.1);
+}
+
+.ult-char-opt-btn.chosen {
+  border-color: var(--ult-gold);
+  background: rgba(255,215,0,.12);
+}
+
+.ult-opt-name {
+  display: block;
+  font-size: .95rem;
+  font-weight: 700;
+}
+
+.ult-opt-faction {
+  display: block;
+  font-size: .72rem;
+  color: var(--text-muted);
+  margin-top: .1em;
+}
+
+.ult-opt-desc {
+  display: block;
+  font-size: .75rem;
+  color: var(--text-muted);
+  margin-top: .15em;
+  line-height: 1.4;
+}
+
+.ult-char-wait {
+  font-size: .85rem;
+  color: var(--text-muted);
+  text-align: center;
+  padding: .5rem;
+}
+.ult-char-wait.hidden { display: none; }
+
+/* ── 叫牌准备 / 结束 — 手牌只读 ───────────────────────────────── */
+.ult-phase-hand {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .3rem .5rem;
+  background: rgba(0,0,0,.2);
+  border-radius: 8px;
+  padding: .5rem .6rem;
+  min-height: 2.4rem;
+}
+
+.ult-card-static {
+  background: #f5f0e8;
+  border-radius: 3px;
+  font-size: .78rem;
+  font-weight: 700;
+  padding: .15rem .3rem;
+  min-width: 1.5rem;
+  text-align: center;
+}
+
+.ult-card-static.suit-H, .ult-card-static.suit-D { color: #cc2222; }
+.ult-card-static.suit-S, .ult-card-static.suit-C { color: #111; }
+
+/* ── 技能列表 ──────────────────────────────────────────────────── */
+.ult-skill-list {
+  display: flex;
+  flex-direction: column;
+  gap: .5rem;
+}
+
+.ult-skill-item {
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+  background: rgba(255,255,255,.04);
+  border: 1px solid var(--ult-border);
+  border-radius: 8px;
+  padding: .55rem .7rem;
+}
+
+.ult-skill-name {
+  font-weight: 700;
+  font-size: .88rem;
+  color: var(--ult-gold);
+  min-width: 3.5rem;
+}
+
+.ult-skill-desc {
+  font-size: .78rem;
+  color: var(--text-muted);
+  flex: 1;
+  line-height: 1.4;
+}
+
+.ult-skill-use-btn {
+  flex-shrink: 0;
+  padding: .3rem .7rem;
+  font-size: .78rem;
+}
+
+.ult-no-skill {
+  font-size: .82rem;
+  color: var(--text-muted);
+  text-align: center;
+  padding: .4rem;
+}
+
+/* 出牌阶段的技能按钮（手牌区内联） */
+.ult-skill-play-btn {
+  font-size: .78rem;
+  padding: .3rem .7rem;
+  border-radius: 6px;
+}
+
+/* ── 就绪行 ────────────────────────────────────────────────────── */
+.ult-ready-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .8rem;
+  margin-top: .2rem;
+  padding-top: .6rem;
+  border-top: 1px solid var(--ult-border);
+}
+
+.ult-ready-status {
+  font-size: .8rem;
+  color: var(--text-muted);
+  flex: 1;
+}
+
+/* ── 尽瘁牌堆预览 ──────────────────────────────────────────────── */
+.ult-peek-panel {
+  background: rgba(255,215,0,.06);
+  border: 1px solid rgba(255,215,0,.25);
+  border-radius: 10px;
+  padding: .8rem;
+  display: flex;
+  flex-direction: column;
+  gap: .5rem;
+}
+.ult-peek-panel.hidden { display: none; }
+
+.ult-peek-title {
+  font-size: .82rem;
+  color: var(--ult-gold);
+  font-weight: 600;
+}
+
+.ult-peek-sub {
+  font-size: .78rem;
+  color: var(--text-muted);
+}
+
+.ult-peek-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .25rem;
+  min-height: 2.2rem;
+}
+
+/* ── 叫牌阶段 ──────────────────────────────────────────────────── */
+.ult-bid-history-wrap {
+  max-height: 140px;
+  overflow-y: auto;
+  border: 1px solid var(--ult-border);
+  border-radius: 6px;
+  background: rgba(0,0,0,.2);
+}
+
+.ult-bid-hist-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: .78rem;
+}
+
+.ult-bid-hist-table th {
+  padding: .25rem .4rem;
+  text-align: center;
+  font-weight: 600;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--ult-border);
+  background: rgba(0,0,0,.3);
+  position: sticky; top: 0;
+}
+
+.ult-bid-hist-table th.bid-hist-me { color: var(--ult-gold); }
+
+.ult-bid-hist-table td {
+  padding: .2rem .4rem;
+  text-align: center;
+  border-bottom: 1px solid rgba(255,255,255,.04);
+}
+
+.bid-pass { color: var(--text-muted); }
+.bid-x    { color: #f87171; font-weight: 700; }
+.bid-xx   { color: #fb923c; font-weight: 700; }
+.bid-c    { color: #86efac; font-weight: 600; }
+.bid-d    { color: #fcd34d; font-weight: 600; }
+.bid-h    { color: #f87171; font-weight: 600; }
+.bid-s    { color: #93c5fd; font-weight: 600; }
+.bid-nt   { color: #e2e8f0; font-weight: 600; }
+
+.ult-bid-contract-display {
+  font-size: .85rem;
+  color: var(--text-muted);
+  min-height: 1.4rem;
+}
+
+.ult-bid-turn-label {
+  font-size: .88rem;
+  color: var(--text-muted);
+  min-height: 1.3rem;
+}
+
+.ult-bid-turn-label.my-turn {
+  color: var(--ult-gold);
+  font-weight: 700;
+  animation: pulse 1s ease-in-out infinite alternate;
+}
+
+.ult-bid-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: .4rem;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.ult-bid-btn {
+  font-size: .8rem;
+  padding: .3rem .6rem;
+  border-radius: 5px;
+}
+
+.bid-pass-btn { background: rgba(100,120,100,.4); color: #bbb; }
+.bid-x-btn    { background: rgba(248,113,113,.2); color: #f87171; border: 1px solid #f87171; }
+.bid-xx-btn   { background: rgba(251,146,60,.2);  color: #fb923c; border: 1px solid #fb923c; }
+
+.ult-bid-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 3px;
+}
+
+.ult-bid-grid .bid-c  { background: rgba(134,239,172,.15); color: #86efac; border: 1px solid rgba(134,239,172,.3); }
+.ult-bid-grid .bid-d  { background: rgba(252,211,77,.15);  color: #fcd34d; border: 1px solid rgba(252,211,77,.3); }
+.ult-bid-grid .bid-h  { background: rgba(248,113,113,.15); color: #f87171; border: 1px solid rgba(248,113,113,.3); }
+.ult-bid-grid .bid-s  { background: rgba(147,197,253,.15); color: #93c5fd; border: 1px solid rgba(147,197,253,.3); }
+.ult-bid-grid .bid-nt { background: rgba(226,232,240,.12); color: #e2e8f0; border: 1px solid rgba(226,232,240,.2); }
+
+/* ── 张绣目标列表 ─────────────────────────────────────────────── */
+.ult-target-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .4rem;
+  justify-content: center;
+  margin: .4rem 0;
+}
+
+/* ── 出牌区动作行 ─────────────────────────────────────────────── */
+.ult-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .4rem;
+  align-items: center;
+  width: 100%;
+  margin-top: .4rem;
+}
+
+.ult-play-btn {
+  flex: 1;
+  min-width: 8rem;
+  font-size: .85rem;
+  padding: .4rem .8rem;
+  border-radius: 6px;
+}

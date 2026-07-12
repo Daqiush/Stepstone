@@ -1,0 +1,832 @@
+/* ── 做题模式样式 ─────────────────────────────────────────── */
+:root {
+  --prob-bg:      #0f1b12;
+  --prob-felt:    #1a3020;
+  --prob-felt-2:  #1e3825;
+  --prob-surface: #1e2a22;
+  --prob-border:  #2e4535;
+  --prob-accent:  #4caf72;
+  --prob-gold:    #f0c040;
+  --prob-red:     #e05555;
+  --prob-blue:    #5599ee;
+  --prob-gray:    #8ea899;
+  --text:         #e8f0ea;
+  --text-muted:   #7fa894;
+}
+
+.prob-body {
+  margin: 0;
+  background: var(--prob-bg);
+  color: var(--text);
+  font-family: 'Inter', sans-serif;
+}
+
+.prob-screen { display: flex; flex-direction: column; }
+.prob-screen.hidden { display: none !important; }
+
+/* ── 选题界面 ────────────────────────────────────────────── */
+.prob-select-wrap {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 2rem 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.2rem;
+  flex: 1;
+  overflow-y: auto;
+}
+
+.prob-select-title {
+  font-size: 1.8rem;
+  font-weight: 800;
+  color: var(--prob-gold);
+  text-align: center;
+  margin: 0;
+}
+.prob-title-icon { margin-right: .3rem; }
+
+.prob-select-hint {
+  text-align: center;
+  color: var(--text-muted);
+  margin: 0;
+  font-size: .9rem;
+}
+
+.prob-room-pill {
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: .35rem;
+  min-height: 28px;
+  padding: .2rem .65rem;
+  border: 1px solid var(--prob-border);
+  border-radius: 6px;
+  background: var(--prob-felt);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: .78rem;
+  cursor: pointer;
+}
+.prob-room-pill span {
+  color: var(--prob-gold);
+  font-family: monospace;
+  font-size: .9rem;
+  font-weight: 800;
+}
+.prob-room-pill:hover { border-color: var(--prob-accent); color: var(--text); }
+.prob-room-pill-top {
+  align-self: auto;
+  min-height: 24px;
+  padding: .1rem .45rem;
+}
+
+.prob-list {
+  display: flex;
+  flex-direction: column;
+  gap: .7rem;
+}
+
+.prob-list-item {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  background: var(--prob-surface);
+  border: 1px solid var(--prob-border);
+  border-radius: 10px;
+  padding: .9rem 1.1rem;
+  cursor: pointer;
+  transition: background .15s, border-color .15s;
+}
+.prob-list-item:hover { background: var(--prob-felt-2); border-color: var(--prob-accent); }
+
+.prob-list-id {
+  font-weight: 700;
+  color: var(--prob-gold);
+  font-size: .85rem;
+  min-width: 2.2rem;
+}
+.prob-list-info { flex: 1; }
+.prob-list-name { font-weight: 600; font-size: 1rem; }
+.prob-list-contract { font-size: .8rem; color: var(--text-muted); margin-top: .15rem; }
+.prob-list-btn { margin-left: auto; }
+
+.prob-select-footer {
+  display: flex;
+  justify-content: center;
+  padding-top: .5rem;
+}
+
+/* ── 旁观界面 ────────────────────────────────────────────── */
+.prob-spectate-msg {
+  margin: auto;
+  text-align: center;
+  color: var(--text-muted);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: .8rem;
+}
+.prob-spec-icon { font-size: 3rem; opacity: .5; }
+
+/* ── 游戏界面 ─────────────────────────────────────────────────
+   整体布局：顶栏 + 桌面 + 底部操作栏
+*/
+#screen-game {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  overflow: hidden;
+  background: var(--prob-bg);
+}
+
+/* 顶部状态栏 */
+.prob-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 1rem;
+  background: var(--prob-surface);
+  border-bottom: 1px solid var(--prob-border);
+  font-size: .85rem;
+  gap: .5rem;
+  flex-shrink: 0;
+  min-height: 44px;
+}
+.prob-topbar-left { display: flex; align-items: center; gap: .6rem; }
+.prob-topbar-right { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; justify-content: flex-end; max-width: 40%; }
+.prob-topbar-center { font-weight: 600; color: var(--prob-gold); flex: 1; text-align: center; font-size: .9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.prob-contract-badge {
+  background: var(--prob-felt);
+  border: 1px solid var(--prob-border);
+  border-radius: 5px;
+  padding: .15rem .5rem;
+  font-weight: 700;
+  color: var(--prob-gold);
+  font-size: .8rem;
+}
+.prob-vul-badge {
+  font-size: .75rem;
+  color: var(--text-muted);
+}
+.prob-timer {
+  font-family: monospace;
+  font-size: .85rem;
+  color: var(--text-muted);
+}
+.prob-timer.prob-timer-warn { color: var(--prob-gold); }
+.prob-timer.prob-timer-over { color: var(--prob-red); }
+.prob-mem-badge {
+  font-size: .78rem;
+  padding: .15rem .45rem;
+  border-radius: 4px;
+  background: var(--prob-felt);
+  border: 1px solid var(--prob-border);
+}
+.prob-mem-badge.prob-mem-warn { color: #d4a017; border-color: #d4a017; }
+.prob-mem-badge.prob-mem-over { color: var(--prob-red); border-color: var(--prob-red); }
+/* ── 迷你叫牌历史（桌面左下角浮层） ─────────────────────────── */
+#prob-mini-auction {
+  position: absolute;
+  left: .4rem;
+  bottom: .4rem;
+  z-index: 5;
+  background: rgba(0,0,0,.55);
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 6px;
+  padding: .25rem .3rem;
+  min-width: 0;
+  max-width: 46%;
+  pointer-events: none;
+}
+.prob-mini-auction-title {
+  font-size: .58rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  text-align: center;
+  margin-bottom: .2rem;
+}
+#prob-auction-body {
+  max-height: calc(5 * 1.45em + .5rem);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,.15) transparent;
+}
+#prob-auction-body::-webkit-scrollbar { width: 3px; }
+#prob-auction-body::-webkit-scrollbar-thumb { background: rgba(255,255,255,.18); border-radius: 2px; }
+.prob-mini-auction-table {
+  border-collapse: collapse;
+  font-size: clamp(.55rem, 1.8vw, .7rem);
+  width: 100%;
+}
+.prob-mini-auction-table th {
+  padding: .1rem .2rem;
+  color: var(--text-muted);
+  font-weight: 600;
+  text-align: center;
+  border-bottom: 1px solid rgba(255,255,255,.06);
+  font-size: clamp(.52rem, 1.6vw, .64rem);
+}
+.prob-mini-auction-table td {
+  padding: .08rem .18rem;
+  text-align: center;
+}
+.prob-auction-bid { color: var(--prob-gold); font-weight: 600; }
+.prob-auction-pass { color: var(--text-muted); }
+.prob-auction-suit-red { color: var(--prob-red); }
+
+/* ── 主桌面区域 ───────────────────────────────────────────── */
+.prob-table-area {
+  position: relative;
+  display: grid;
+  grid-template-areas:
+    "north north north"
+    "west center east"
+    "south south south";
+  grid-template-columns: 1fr 2fr 1fr;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  background: var(--prob-felt);
+  overflow: hidden;
+  height: 100%;
+  gap: .3rem;
+  padding: .4rem;
+  box-sizing: border-box;
+}
+
+.prob-flavor-bg {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.1rem;
+  color: rgba(255,255,255,.07);
+  white-space: pre-line;
+  text-align: center;
+  padding: 1rem;
+  pointer-events: none;
+  z-index: 0;
+  font-style: italic;
+}
+
+.trick-collect-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  background: transparent;
+  color: var(--prob-gold);
+  font-size: 1rem;
+  font-weight: 700;
+  cursor: pointer;
+  user-select: none;
+  padding: .6rem .7rem;
+  text-shadow: 0 2px 6px rgba(0,0,0,1);
+  letter-spacing: .05em;
+}
+.trick-collect-overlay.hidden {
+  display: none !important;
+}
+
+.prob-hand-area {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: .3rem;
+}
+.prob-hand-north { grid-area: north; z-index: 3; }
+.prob-hand-west  { grid-area: west;  justify-content: center; }
+.prob-hand-east  { grid-area: east;  justify-content: center; }
+.prob-hand-south { grid-area: south; z-index: 3; }
+
+.prob-seat-label {
+  font-size: .72rem;
+  color: var(--text-muted);
+  margin-bottom: .25rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+
+/* 手牌排列 */
+.prob-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .25rem .1rem;
+  justify-content: center;
+}
+.prob-card-group {
+  display: flex;
+  align-items: center;
+  gap: .1rem;
+  margin-right: .4rem;
+}
+.prob-group-label { display: none; }
+.prob-empty-hand { font-size: .8rem; color: var(--text-muted); font-style: italic; }
+
+/* 牌面 */
+.prob-card {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: clamp(14px, 3.2vw, 44px);
+  height: clamp(22px, 4.8vw, 66px);
+  background: #fff;
+  color: #111;
+  border-radius: clamp(2px, .4vw, 6px);
+  padding: clamp(.02rem, .2vw, .2rem);
+  font-size: clamp(.45rem, .9vw, 1.1rem);
+  font-weight: 800;
+  cursor: pointer;
+  user-select: none;
+  border: 2px solid transparent;
+  transition: transform .1s, border-color .1s, box-shadow .1s;
+  white-space: nowrap;
+  box-sizing: border-box;
+}
+.prob-card:hover { transform: translateY(-3px); box-shadow: 0 4px 8px rgba(0,0,0,.4); }
+.prob-card-red { color: var(--prob-red); }
+.prob-card-back {
+  background: #2244aa;
+  color: rgba(255,255,255,.7);
+  font-size: 2.2rem;
+  cursor: default;
+}
+.prob-card-back:hover { transform: none; box-shadow: none; }
+.prob-card-selected {
+  border-color: var(--prob-gold) !important;
+  transform: translateY(-5px);
+  box-shadow: 0 4px 12px rgba(240,192,64,.5);
+}
+.prob-card-inactive { cursor: default; opacity: .75; }
+.prob-card-inactive:hover { transform: none; box-shadow: none; }
+.prob-card-suit { font-size: 1.1rem; line-height: 1; margin-bottom: 2px; }
+.prob-card-rank { font-size: 1.2rem; line-height: 1; }
+
+/* 对手背面堆叠 — 横向单行叠放，溢出隐藏不换行 */
+.prob-opponent-backs {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  justify-content: center;
+  gap: 1px;
+  max-width: 100%;
+  overflow: hidden;
+}
+.prob-opponent-backs.prob-opponent-visible {
+  flex-wrap: wrap;
+  gap: .14rem;
+  max-width: min(26vw, 220px);
+  overflow: visible;
+}
+.prob-opponent-visible .prob-card-group {
+  margin-right: .2rem;
+  gap: .06rem;
+}
+.prob-hand-west .prob-opponent-visible .prob-card,
+.prob-hand-east .prob-opponent-visible .prob-card {
+  width: clamp(16px, 2.2vw, 30px);
+  height: clamp(24px, 3.3vw, 45px);
+  font-size: clamp(.5rem, .72vw, .85rem);
+  border-width: 1px;
+}
+.prob-hand-west .prob-opponent-visible .prob-card-suit,
+.prob-hand-east .prob-opponent-visible .prob-card-suit,
+.prob-hand-west .prob-opponent-visible .prob-card-rank,
+.prob-hand-east .prob-opponent-visible .prob-card-rank {
+  font-size: 1em;
+}
+/* 每张背面牌在侧方格子里缩小一些 */
+.prob-hand-west .prob-card-back,
+.prob-hand-east .prob-card-back {
+  width: 22px;
+  height: 33px;
+  font-size: 1.2rem;
+  padding: 0;
+  border-radius: 3px;
+  min-width: unset;
+}
+.prob-hand-size {
+  font-size: .78rem;
+  color: var(--text-muted);
+  margin-top: .2rem;
+}
+
+/* ── 中央墩区 ────────────────────────────────────────────── */
+.prob-center {
+  grid-area: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: .5rem;
+  z-index: 1;
+}
+
+.prob-trick-area {
+  display: grid;
+  grid-template-areas:
+    ". tN ."
+    "tW .  tE"
+    ". tS .";
+  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-rows: 1fr 1fr 1fr;
+  gap: .25rem;
+  width: 240px;
+  height: 200px;
+}
+.prob-trick-slot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 42px;
+}
+.prob-trick-N { grid-area: tN; }
+.prob-trick-W { grid-area: tW; }
+.prob-trick-E { grid-area: tE; }
+.prob-trick-S { grid-area: tS; }
+
+.prob-score-row {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  font-size: .85rem;
+}
+.prob-score-ns { color: var(--prob-accent); font-weight: 700; }
+.prob-score-ew { color: var(--prob-red); font-weight: 700; }
+.prob-score-sep { color: var(--text-muted); }
+
+/* ── 底部操作栏 ──────────────────────────────────────────── */
+.prob-actionbar {
+  display: flex;
+  align-items: center;
+  padding: 0 .8rem;
+  background: var(--prob-surface);
+  border-top: 1px solid var(--prob-border);
+  gap: .5rem;
+  font-size: .82rem;
+  flex-shrink: 0;
+  min-height: 44px;
+}
+.prob-action-left {
+  display: flex;
+  gap: .4rem;
+  flex-shrink: 0;
+}
+.prob-action-center {
+  flex: 1;
+  text-align: center;
+  color: var(--prob-gold);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.prob-action-right { flex-shrink: 0; }
+
+.prob-tool-btn {
+  background: var(--prob-felt);
+  border: 1px solid var(--prob-border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: .3rem .6rem;
+  font-size: .75rem;
+  cursor: pointer;
+  transition: background .15s;
+}
+.prob-tool-btn:hover { background: var(--prob-felt-2); border-color: var(--prob-accent); }
+.prob-tool-btn:disabled,
+.prob-giveup-btn:disabled {
+  opacity: .45;
+  cursor: default;
+}
+.prob-tool-btn:disabled:hover { background: var(--prob-felt); border-color: var(--prob-border); }
+.prob-giveup-btn {
+  background: transparent;
+  border: 1px solid var(--prob-red);
+  color: var(--prob-red);
+  border-radius: 6px;
+  padding: .3rem .7rem;
+  font-size: .78rem;
+  cursor: pointer;
+  transition: background .15s;
+}
+.prob-giveup-btn:hover { background: rgba(224,85,85,.15); }
+
+/* ── CG 宕台遮罩 ──────────────────────────────────────────── */
+.prob-cg-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0,0,0,.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+  backdrop-filter: blur(6px);
+  animation: cgFadeIn .5s ease;
+}
+.prob-cg-overlay.hidden { display: none; }
+@keyframes cgFadeIn { from { opacity: 0; } to { opacity: 1; } }
+.prob-cg-verdict-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.6rem;
+}
+.prob-cg-verdict-text {
+  font-size: 2.2rem;
+  font-weight: 800;
+  color: var(--prob-red);
+  letter-spacing: .1em;
+  text-shadow: 0 0 32px rgba(224,85,85,.7);
+}
+.prob-post-cg-panel { max-width: 480px; }
+.prob-post-cg-text {
+  font-size: .95rem;
+  color: rgba(255,255,255,.75);
+  line-height: 1.8;
+  text-align: center;
+  max-width: 400px;
+}
+/* 叫牌中 GARBLED 用模糊块 */
+.cg-bid-garbled {
+  display: inline-block;
+  background: var(--text-faint);
+  border-radius: 2px;
+  width: 2.4em;
+  height: .9em;
+  vertical-align: middle;
+  opacity: .4;
+  filter: blur(1.5px);
+}
+
+/* ── 结算界面 ────────────────────────────────────────────── */
+#screen-result {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.prob-result-wrap {
+  background: var(--prob-surface);
+  border: 1px solid var(--prob-border);
+  border-radius: 16px;
+  padding: 2.5rem 3rem;
+  text-align: center;
+  max-width: 560px;
+  width: 94%;
+  max-height: 90vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1.2rem;
+}
+.prob-result-badge {
+  font-size: 3.5rem;
+  font-weight: 900;
+  letter-spacing: .05em;
+  border-radius: 12px;
+  padding: .3rem 1.2rem;
+  display: inline-block;
+  margin: 0 auto;
+}
+.result-ac  { color: #22cc66; border: 3px solid #22cc66; text-shadow: 0 0 20px rgba(34,204,102,.5); }
+.result-wa  { color: var(--prob-red); border: 3px solid var(--prob-red); }
+.result-tle { color: var(--prob-gold); border: 3px solid var(--prob-gold); }
+.result-mle { color: var(--prob-blue); border: 3px solid var(--prob-blue); }
+
+.result-sub { font-size: .85rem; color: var(--text-muted); margin-bottom: .3rem; }
+.result-msg { font-size: 1rem; color: var(--text); }
+
+.prob-result-stats {
+  display: flex;
+  flex-direction: column;
+  gap: .4rem;
+  font-size: .9rem;
+  color: var(--text-muted);
+}
+.result-stat b { color: var(--text); }
+
+.prob-result-hands {
+  width: 100%;
+  font-size: .78rem;
+  line-height: 1.55;
+}
+.prob-result-tricks {
+  width: 100%;
+  max-height: 220px;
+  overflow-y: auto;
+  font-size: .82rem;
+  line-height: 1.6;
+  text-align: left;
+}
+/* 指南针手牌布局 */
+.rh-compass {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-rows: auto auto auto;
+  width: 100%;
+}
+.rh-cell { padding: .3rem .5rem; text-align: left; }
+.rh-north { grid-column: 2; grid-row: 1; border-bottom: 1px solid rgba(255,255,255,.08); }
+.rh-west  { grid-column: 1; grid-row: 2; border-right:  1px solid rgba(255,255,255,.08); }
+.rh-east  { grid-column: 3; grid-row: 2; }
+.rh-south { grid-column: 2; grid-row: 3; border-top:    1px solid rgba(255,255,255,.08); }
+.rh-seat-label {
+  font-weight: 700;
+  font-size: .7rem;
+  color: var(--prob-gold);
+  letter-spacing: .06em;
+  margin-bottom: .1rem;
+}
+.rh-suit { color: var(--text); white-space: nowrap; }
+.rh-suit.red { color: var(--prob-red); }
+.result-void { color: var(--text-faint); }
+/* 旧样式兼容 */
+.result-section-title {
+  font-size: .72rem;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: var(--text-faint);
+  margin-bottom: .35rem;
+}
+.result-hand-row { display: flex; align-items: baseline; gap: .5rem; padding: .1rem 0; }
+.result-seat-label { width: 1.2rem; font-weight: 700; color: var(--prob-gold); flex-shrink: 0; }
+.result-suit { display: inline-flex; gap: .15rem; margin-right: .3rem; color: var(--text); }
+.result-suit.red { color: var(--prob-red); }
+.result-trick-row {
+  display: flex;
+  align-items: baseline;
+  gap: .4rem;
+  padding: .1rem 0;
+  border-bottom: 1px solid rgba(255,255,255,.04);
+}
+.result-trick-num {
+  width: 3rem;
+  flex-shrink: 0;
+  color: var(--text-faint);
+  font-size: .75rem;
+}
+.result-trick-card { color: var(--text); }
+.result-trick-card.red { color: var(--prob-red); }
+.result-trick-win { font-weight: 700; margin-left: auto; flex-shrink: 0; }
+.result-trick-win.ns { color: var(--prob-gold); }
+.result-trick-win.ew { color: var(--text-muted); }
+
+.prob-result-btns {
+  display: flex;
+  gap: .8rem;
+  justify-content: center;
+}
+
+/* ── 面板（历史墩 & 记牌器）────────────────────────────── */
+.prob-panel-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.5);
+  z-index: 50;
+}
+.prob-panel-overlay.hidden { display: none; }
+
+.prob-panel {
+  position: fixed;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 320px;
+  background: var(--prob-surface);
+  border-left: 1px solid var(--prob-border);
+  z-index: 51;
+  display: flex;
+  flex-direction: column;
+  box-shadow: -4px 0 20px rgba(0,0,0,.5);
+}
+.prob-panel.hidden { display: none; }
+
+.prob-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: .85rem 1rem;
+  font-weight: 700;
+  border-bottom: 1px solid var(--prob-border);
+  font-size: .9rem;
+}
+.prob-panel-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 1.1rem;
+  cursor: pointer;
+  padding: .2rem .4rem;
+}
+.prob-panel-close:hover { color: var(--text); }
+.prob-panel-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: .75rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: .6rem;
+}
+
+/* 历史墩列表 */
+.prob-history-row {
+  font-size: .82rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: .3rem;
+  align-items: center;
+  padding: .45rem .5rem;
+  background: var(--prob-felt);
+  border-radius: 6px;
+}
+.prob-hist-idx { font-weight: 700; color: var(--text-muted); min-width: 3.5rem; }
+.prob-hist-seat { color: var(--text-muted); font-size: .75rem; margin-right: .1rem; }
+.prob-hist-card { font-weight: 700; margin-right: .3rem; }
+.prob-hist-card.red { color: var(--prob-red); }
+.prob-hist-winner { color: var(--prob-accent); margin-left: auto; font-size: .78rem; font-weight: 600; }
+
+/* 记牌器：剩余张数 */
+.prob-counter-row {
+  display: flex;
+  align-items: center;
+  gap: .7rem;
+}
+.prob-counter-suit {
+  font-size: 1.1rem;
+  font-weight: 700;
+  width: 1.2rem;
+  text-align: center;
+}
+.prob-counter-suit.red { color: var(--prob-red); }
+.prob-counter-bar-wrap {
+  flex: 1;
+  height: 8px;
+  background: var(--prob-felt);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.prob-counter-bar {
+  height: 100%;
+  background: var(--prob-accent);
+  border-radius: 4px;
+  transition: width .3s;
+  min-width: 4px;
+}
+.prob-counter-num { font-weight: 700; min-width: 1.5rem; text-align: right; }
+
+/* 记牌器：大牌状态 */
+.prob-honor-row {
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+}
+.prob-honor-cells { display: flex; gap: .3rem; flex-wrap: wrap; }
+.prob-honor-cell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 4px;
+  font-size: .8rem;
+  font-weight: 700;
+  border: 1px solid var(--prob-border);
+  background: var(--prob-felt);
+}
+.prob-honor-ew    { background: #2244aa44; border-color: var(--prob-blue); color: var(--prob-blue); }
+.prob-honor-ns    { background: #22cc6622; border-color: var(--prob-accent); color: var(--prob-accent); }
+.prob-honor-played { background: var(--prob-felt); border-color: #444; color: #555; text-decoration: line-through; }
+.prob-honor-legend {
+  margin-top: .5rem;
+  font-size: .75rem;
+  color: var(--text-muted);
+  display: flex;
+  gap: .8rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+/* ── 响应式 ──────────────────────────────────────────────── */
+@media (max-width: 600px) {
+  .prob-actionbar { flex-wrap: wrap; padding: .4rem .6rem; height: auto; }
+  .prob-action-left { gap: .25rem; }
+  .prob-tool-btn { padding: .25rem .4rem; font-size: .7rem; }
+  .prob-panel { width: 100vw; }
+  .prob-table-area { grid-template-columns: 64px 1fr 64px; }
+  .prob-card-back { font-size: clamp(1rem, 3.5vw, 1.8rem); }
+  .prob-card-suit { font-size: clamp(.5rem, 1vw, .9rem); }
+  .prob-card-rank { font-size: clamp(.55rem, 1.1vw, 1rem); }
+  .prob-result-wrap { padding: 1.8rem 1.5rem; }
+  .prob-result-badge { font-size: 2.5rem; }
+  .prob-trick-area { width: 200px; height: 160px; }
+}

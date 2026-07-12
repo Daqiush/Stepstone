@@ -1,0 +1,71 @@
+# A1 — 测试题目
+# 合同：6♠ by S，openingLeader: W，tricksNeeded: 12
+
+# ── 手牌分布 ────────────────────────────────────────────────────────
+
+DIST base {
+  E: HQ HJ HT H5 DQ DJ DT D9 C8 C7 C6 C5 C4
+  W: SJ ST S9 H6 D8 D7 D6 D5 CK CQ CJ CT C9
+}
+
+# 西♥6 ↔ 东♥J（北出小♥、南打非♥A 触发）
+DIST punish_heart extends base {
+  W.H: J
+  E.H: Q T 6 5
+}
+
+# 东♥QJT ↔ 西♣T♣9♦8（末局5张时，南向北引牌触发）
+DIST end_game extends base {
+  E.H: 5
+  E.D: Q J T 9 8
+  E.C: T 9 8 7 6 5 4
+  W.H: Q J T 6
+  W.D: 7 6 5
+  W.C: K Q J
+}
+
+# ── 剧本 ────────────────────────────────────────────────────────────
+
+# TC0：主线防守
+# 清将时东依次垫♣5♣6♣7；4墩后转双明手
+SCRIPT main_defense {
+  W: CK    # 西首攻♣K
+  N: C_MIN # 北垫最小♣（任意小♣均有效）
+  E: C4
+  S: CA    # 南吃♣A，南引
+  S: S_MAX # 清将1（南出任意♠均有效，仅验证花色）
+  W: SJ
+  N: S_MAX # 北跟♠（任意）
+  E: C_MIN # 东垫最小♣
+  S: S_MAX # 清将2（南出任意♠均有效）
+  W: ST
+  N: S_MAX # 北跟♠（任意）
+  E: C_MIN # 东垫最小♣
+  S: S_MAX # 清将3（南出任意♠均有效）
+  W: S9
+  N: S_MAX # 北跟♠（任意）
+  E: C_MIN # 东垫最小♣
+}
+
+# TC1：惩罚防守
+# 北出小♥、南打非♥A，西持♥J赢墩；之后转双明手
+SCRIPT punish_heart_script {
+  N: H2    # 北出小♥（被测试的错误尝试）
+  E: H6    # 东跟♥6（已换牌）
+  S: H9    # 南打非♥A（TODO：确认具体牌张）
+  W: HJ    # 西♥J赢墩（已换牌）
+}
+
+# TC2：末局，引♥时东只剩♥5，西跟♥J
+SCRIPT end_game_script {
+  E: H5    # 东唯一♥（被迫跟）
+  W: HJ    # 西♥J（关键线路）
+}
+
+# ── 测试点 ──────────────────────────────────────────────────────────
+
+TESTCASES {
+  TC main   dist=base        from=0 script=main_defense
+  TC punish dist=punish_heart from=4 script=punish_heart_script
+  TC extra1 dist=end_game     from=8 script=end_game_script
+}

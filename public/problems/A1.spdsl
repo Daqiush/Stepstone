@@ -1,0 +1,15 @@
+# 题目 A2 — 山村咏怀（北宋·邵雍）
+# 合同：4NT by S，首攻♠J，后续纯双明手防守
+
+DIST base {
+  E: S5 S2 HQ HJ HT H9 H7 DJ D9 D8 D3 C6 C3
+  W: SJ ST S9 S6 S3 H6 DQ DT D6 CJ CT C8 C4
+}
+
+SCRIPT main_defense {
+  W: SJ
+}
+
+TESTCASES {
+  TC main dist=base from=0 script=main_defense
+}

@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Stepstone — 桥牌对局</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"/>
+  <link rel="stylesheet" href="css/main.css"/>
+  <link rel="stylesheet" href="css/game.css"/>
+</head>
+<body class="game-body">
+
+<!-- ══════════════════════ 顶栏 ══════════════════════ -->
+<header id="top-bar">
+  <div id="top-left">
+    <span class="app-brand">♠ Stepstone</span>
+    <span id="board-badge" class="board-badge"></span>
+    <span id="teaching-badge" class="teach-badge hidden">教学</span>
+  </div>
+  <div id="top-center">
+    <div id="vul-display"></div>
+  </div>
+  <div id="top-right">
+    <div id="dealer-display"></div>
+    <div id="trick-counter"></div>
+    <div id="contract-display"></div>
+    <button id="btn-topbar-history" class="btn btn-ghost btn-topbar-hist hidden"
+            onclick="openHistoryModal()" title="历史记录">
+      <i data-lucide="book-open"></i> 历史
+    </button>
+  </div>
+</header>
+
+<!-- ══════════════════════ 主桌面 ══════════════════════ -->
+<div id="game-table">
+
+  <!-- 迷你叫牌历史（打牌阶段显示在左上角） -->
+  <div id="mini-bid-history" class="hidden">
+    <div class="mini-hist-title">叫牌历史</div>
+    <div id="mini-bid-body"></div>
+  </div>
+
+  <!-- 北方 -->
+  <div id="area-N" class="player-area area-north">
+    <div class="player-nameplate" id="nameplate-N"></div>
+    <div class="hand-wrap" id="hand-N"></div>
+  </div>
+
+  <!-- 西方 -->
+  <div id="area-W" class="player-area area-west">
+    <div class="player-nameplate" id="nameplate-W"></div>
+    <div class="hand-wrap" id="hand-W"></div>
+  </div>
+
+  <!-- 中央墩区 -->
+  <div id="trick-area">
+
+    <!-- 叫牌历史（叫牌阶段显示，居上） -->
+    <div id="bid-hist-center" class="hidden">
+      <table id="bid-hist-c-table">
+        <thead><tr id="bid-hist-c-head"></tr></thead>
+        <tbody id="bid-hist-c-body"></tbody>
+      </table>
+    </div>
+
+    <!-- 叫牌覆层（叫牌阶段显示） -->
+    <div id="bid-overlay" class="hidden">
+      <div id="bid-turn-label"></div>
+      <div id="bid-lv-row"></div>
+      <div id="bid-suit-row" class="hidden"></div>
+      <div id="bid-special-center">
+        <button id="btn-pass-c"  class="bid-sp-btn" onclick="selectSpecial('Pass')">PASS</button>
+        <button id="btn-dbl-c"   class="bid-sp-btn dbl"  onclick="selectSpecial('Double')">X</button>
+        <button id="btn-rdbl-c"  class="bid-sp-btn rdbl" onclick="selectSpecial('Redouble')">XX</button>
+      </div>
+      <div id="bid-pending-row" class="hidden">
+        <span id="bid-pending-display"></span>
+        <button id="btn-bid-confirm" onclick="confirmBid()">确 认</button>
+        <button id="btn-bid-clear"   onclick="cancelBid()">取 消</button>
+        <button id="btn-alert-toggle" class="bid-alert-toggle" onclick="toggleAlertPanel()" title="ALERT">🔔 ALERT</button>
+      </div>
+      <div id="bid-alert-panel" class="hidden">
+        <input id="bid-explain-text" class="bid-alert-input" placeholder="解释（可留空）" maxlength="300"/>
+      </div>
+    </div>
+
+    <!-- 出牌阶段墩显示 -->
+    <div id="trick-grid">
+      <div class="trick-slot" id="ts-N"></div>
+      <div class="trick-slot" id="ts-W"></div>
+      <div class="trick-slot trick-center-cell" id="ts-center">
+        <div id="trick-indicator"></div>
+      </div>
+      <div class="trick-slot" id="ts-E"></div>
+      <div class="trick-slot" id="ts-S"></div>
+    </div>
+  </div>
+
+  <!-- 东方 -->
+  <div id="area-E" class="player-area area-east">
+    <div class="player-nameplate" id="nameplate-E"></div>
+    <div class="hand-wrap" id="hand-E"></div>
+  </div>
+
+  <!-- 南方 -->
+  <div id="area-S" class="player-area area-south">
+    <!-- 悬浮出牌确认遮罩 -->
+    <div id="play-confirm-overlay" class="hidden"></div>
+    <div class="hand-wrap" id="hand-S"></div>
+    <div class="player-nameplate" id="nameplate-S"></div>
+  </div>
+  <!-- 右下角控制区 -->
+  <div id="bottom-right-panel" class="hidden">
+    <div id="tricks-won-row">
+      <span id="ns-tricks-badge" class="side-badge ns-badge">NS: 0</span>
+      <span id="ew-tricks-badge" class="side-badge ew-badge">EW: 0</span>
+    </div>
+    <div id="float-controls">
+      <button class="float-btn" onclick="openClaimModal()">
+        <i data-lucide="flag"></i> 声称
+      </button>
+      <button class="float-btn" onclick="requestViewLast()">
+        <i data-lucide="eye"></i> 查看上一墩
+      </button>
+      <button class="float-btn" onclick="openHistoryModal()">
+        <i data-lucide="book-open"></i> 历史
+      </button>
+    </div>
+  </div>
+
+</div><!-- #game-table -->
+
+<!-- ══════════════════════ 教学面板（教学模式用）══════════════════════ -->
+<div id="teach-panel" class="hidden">
+  <div id="teach-panel-label"></div>
+  <div id="teach-hand-area"></div>
+  <div id="teach-bid-area" class="hidden"></div>
+  <div id="teach-play-confirm" class="hidden">
+    <button class="btn btn-primary" id="teach-btn-play" onclick="teachConfirmPlay()">出牌</button>
+    <button class="btn btn-ghost" onclick="teachCancelCard()">取消</button>
+  </div>
+</div>
+
+<!-- ══════════════════════ 弹窗层 ══════════════════════ -->
+
+<!-- 声称弹窗（发起者） -->
+<div class="modal-overlay hidden" id="modal-claim">
+  <div class="modal">
+    <h3 class="modal-title"><i data-lucide="flag"></i> 摊牌声称</h3>
+    <p class="modal-desc">剩余 <strong id="claim-remaining"></strong> 墩，声称本方赢得：</p>
+    <div id="claim-tricks-row" class="claim-tricks-row"></div>
+    <label class="modal-label">声称理由（可选）</label>
+    <textarea id="claim-reason" class="modal-textarea" rows="2" placeholder="例：剩余全部花色均已建立……"></textarea>
+    <div class="modal-btn-row">
+      <button class="btn btn-ghost" onclick="closeModal('modal-claim')">取消</button>
+      <button class="btn btn-primary" onclick="submitClaim()">
+        <i data-lucide="send"></i> 声称
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- 声称接收弹窗（对手） -->
+<div class="modal-overlay hidden" id="modal-claim-recv">
+  <div class="modal">
+    <h3 class="modal-title"><i data-lucide="alert-triangle"></i> 对方声称</h3>
+    <div id="claim-recv-info"></div>
+    <div id="claim-all-hands" class="claim-hands-grid"></div>
+    <div id="claim-vote-status"></div>
+    <div class="modal-btn-row" id="claim-vote-btns">
+      <button class="btn btn-danger" onclick="voteOnClaim(false)">
+        <i data-lucide="x-circle"></i> 拒绝
+      </button>
+      <button class="btn btn-success" onclick="voteOnClaim(true)">
+        <i data-lucide="check-circle"></i> 同意
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- 声称结果弹窗 -->
+<div class="modal-overlay hidden" id="modal-claim-result">
+  <div class="modal modal-sm">
+    <h3 class="modal-title" id="claim-result-title"></h3>
+    <p id="claim-result-body"></p>
+    <div class="modal-btn-row">
+      <button class="btn btn-primary" onclick="closeModal('modal-claim-result')">确认</button>
+    </div>
+  </div>
+</div>
+
+<!-- 查看上一墩弹窗（展示牌） -->
+<div class="modal-overlay hidden" id="modal-last-trick">
+  <div class="modal modal-sm">
+    <h3 class="modal-title"><i data-lucide="layers"></i> 上一墩</h3>
+    <div id="last-trick-display" class="trick-display-grid"></div>
+    <div class="modal-btn-row">
+      <button class="btn btn-primary" onclick="closeModal('modal-last-trick')">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- 查看上一墩投票弹窗（对手） -->
+<div class="modal-overlay hidden" id="modal-view-vote">
+  <div class="modal modal-sm">
+    <h3 class="modal-title"><i data-lucide="eye"></i> 查看上一墩请求</h3>
+    <p id="view-vote-desc"></p>
+    <div id="view-vote-status"></div>
+    <div class="modal-btn-row" id="view-vote-btns">
+      <button class="btn btn-danger" onclick="voteViewLast(false)">
+        <i data-lucide="x-circle"></i> 拒绝
+      </button>
+      <button class="btn btn-success" onclick="voteViewLast(true)">
+        <i data-lucide="check-circle"></i> 同意
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- 错误/提示 Toast -->
+<div class="toast hidden" id="game-toast" role="status" aria-live="polite" aria-atomic="true"></div>
+
+<!-- 牌局结束大弹窗 -->
+<div class="modal-overlay hidden" id="modal-game-end">
+  <div class="modal modal-wide">
+    <h3 class="modal-title" id="end-title"></h3>
+    <div id="end-content"></div>
+    <div id="end-dd-table"></div>
+    <div id="end-history"></div>
+    <div class="modal-btn-row" style="flex-direction:column;gap:.5rem;align-items:center">
+      <button class="btn btn-primary" id="btn-end-next" onclick="closeEndAndNextDeal()">
+        <i data-lucide="skip-forward"></i> 下一副牌
+      </button>
+      <div id="end-ready-status" style="font-size:.78rem;color:var(--text-muted)"></div>
+    </div>
+    <div style="text-align:center;margin-top:.3rem">
+      <button class="btn btn-ghost" style="font-size:.78rem;padding:.25rem .7rem" onclick="openHistory()">
+        <i data-lucide="book-open"></i> 查看完整历史
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ALERT 询问弹窗（对手点击叫品时出现） -->
+<div class="modal-overlay hidden" id="modal-bid-question">
+  <div class="modal modal-sm">
+    <h3 class="modal-title"><i data-lucide="help-circle"></i> 询问叫品</h3>
+    <p class="modal-desc" id="bid-question-desc"></p>
+    <input id="bid-question-input" class="bid-alert-input" style="width:100%;margin-bottom:1rem" placeholder="输入问题（可留空，直接询问）"/>
+    <div class="modal-btn-row">
+      <button class="btn btn-ghost" onclick="closeModal('modal-bid-question')">取消</button>
+      <button class="btn btn-primary" onclick="submitBidQuestion()"><i data-lucide="send"></i> 发送</button>
+    </div>
+  </div>
+</div>
+
+<!-- ALERT 回复弹窗（叫牌者收到询问时出现） -->
+<div class="modal-overlay hidden" id="modal-bid-answer">
+  <div class="modal modal-sm">
+    <h3 class="modal-title"><i data-lucide="message-circle"></i> 回答询问</h3>
+    <p class="modal-desc" id="bid-answer-desc"></p>
+    <input id="bid-answer-input" class="bid-alert-input" style="width:100%;margin-bottom:1rem" placeholder="输入解释..."/>
+    <div class="modal-btn-row">
+      <button class="btn btn-ghost" onclick="closeModal('modal-bid-answer')">跳过</button>
+      <button class="btn btn-primary" onclick="submitBidAnswer()"><i data-lucide="send"></i> 发送</button>
+    </div>
+  </div>
+</div>
+
+<!-- ALERT 修改弹窗（点击自己的叫品时出现） -->
+<div class="modal-overlay hidden" id="modal-bid-edit">
+  <div class="modal modal-sm">
+    <h3 class="modal-title"><i data-lucide="edit-3"></i> 修改提醒/解释</h3>
+    <p class="modal-desc" id="bid-edit-desc"></p>
+    <label style="display:flex;align-items:center;gap:.5rem;margin-bottom:.5rem;cursor:pointer;font-size:.9rem;color:var(--text)">
+      <input type="checkbox" id="bid-edit-alert" /> 标记为 ALERT
+    </label>
+    <input id="bid-edit-explain" class="bid-alert-input" style="width:100%;margin-bottom:1rem" placeholder="输入解释（可留空）"/>
+    <div class="modal-btn-row">
+      <button class="btn btn-ghost" onclick="closeModal('modal-bid-edit')">取消</button>
+      <button class="btn btn-primary" onclick="submitBidEdit()"><i data-lucide="check"></i> 保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 历史记录弹窗 -->
+<div class="modal-overlay hidden" id="modal-history">
+  <div class="modal modal-history">
+    <div class="modal-history-header">
+      <h3 class="modal-title" style="margin:0"><i data-lucide="book-open"></i> 对局历史</h3>
+      <button class="btn btn-ghost" style="padding:.3rem .7rem; font-size:1.5rem; line-height:1" onclick="closeModal('modal-history')">&times;</button>
+    </div>
+    <div id="modal-history-content" class="modal-history-body"></div>
+  </div>
+</div>
+
+</div><!-- modal-game-end -->
+
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<script src="/socket.io/socket.io.js"></script>
+<script src="js/bridge-rules.js"></script>
+<script src="js/game.js"></script>
+<script>lucide.createIcons();</script>
+</body>
+</html>

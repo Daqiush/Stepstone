@@ -1,0 +1,139 @@
+{
+  "id": "A2",
+  "name": "小池\n——南宋·杨万里",
+  "flavorText": "泉眼无声惜细流，树阴照水爱晴柔。\n小荷才露尖尖角，早有蜻蜓立上头。",
+  "contract": {
+    "level": 3,
+    "suit": "NT",
+    "declarer": "S",
+    "doubled": false,
+    "redoubled": false
+  },
+  "vulnerability": "NONE",
+  "tricksNeeded": 9,
+  "auction": [
+    {"seat": "S", "bid": "1NT"},
+    {"seat": "W", "bid": "PASS"},
+    {"seat": "N", "bid": "2NT"},
+    {"seat": "E", "bid": "PASS"},
+    {"seat": "S", "bid": "3NT"},
+    {"seat": "W", "bid": "PASS"},
+    {"seat": "N", "bid": "PASS"},
+    {"seat": "E", "bid": "PASS"}
+  ],
+  "hands": {
+    "N": [
+      {"suit": "S", "rank": 9},
+      {"suit": "S", "rank": 6},
+      {"suit": "S", "rank": 2},
+      {"suit": "H", "rank": 10},
+      {"suit": "H", "rank": 9},
+      {"suit": "H", "rank": 3},
+      {"suit": "D", "rank": 14},
+      {"suit": "D", "rank": 13},
+      {"suit": "D", "rank": 7},
+      {"suit": "C", "rank": 11},
+      {"suit": "C", "rank": 9},
+      {"suit": "C", "rank": 10},
+      {"suit": "C", "rank": 5}
+    ],
+    "S": [
+      {"suit": "S", "rank": 14},
+      {"suit": "S", "rank": 13},
+      {"suit": "H", "rank": 14},
+      {"suit": "H", "rank": 7},
+      {"suit": "H", "rank": 5},
+      {"suit": "D", "rank": 8},
+      {"suit": "D", "rank": 6},
+      {"suit": "D", "rank": 5},
+      {"suit": "C", "rank": 13},
+      {"suit": "C", "rank": 12},
+      {"suit": "C", "rank": 8},
+      {"suit": "C", "rank": 4},
+      {"suit": "C", "rank": 2}
+    ]
+  },
+  "ewHands": {
+    "E": [
+      {"suit": "S", "rank": 7},
+      {"suit": "S", "rank": 4},
+      {"suit": "H", "rank": 13},
+      {"suit": "H", "rank": 12},
+      {"suit": "H", "rank": 11},
+      {"suit": "H", "rank": 6},
+      {"suit": "H", "rank": 4},
+      {"suit": "H", "rank": 2},
+      {"suit": "D", "rank": 12},
+      {"suit": "D", "rank": 11},
+      {"suit": "D", "rank": 10},
+      {"suit": "D", "rank": 2},
+      {"suit": "C", "rank": 14}
+    ],
+    "W": [
+      {"suit": "S", "rank": 12},
+      {"suit": "S", "rank": 11},
+      {"suit": "S", "rank": 10},
+      {"suit": "S", "rank": 8},
+      {"suit": "S", "rank": 5},
+      {"suit": "S", "rank": 3},
+      {"suit": "H", "rank": 8},
+      {"suit": "D", "rank": 9},
+      {"suit": "D", "rank": 4},
+      {"suit": "D", "rank": 3},
+      {"suit": "C", "rank": 7},
+      {"suit": "C", "rank": 6},
+      {"suit": "C", "rank": 3}
+    ]
+  },
+  "openingLeader": "W",
+  "midTrickTriggers": [
+    {
+      "id": "dh_swap_e",
+      "triggerSeat": "E",
+      "repeatable": false,
+      "condition": {
+        "cardsPlayed": [{"suit": "D", "rank": 14}, {"suit": "D", "rank": 13}]
+      },
+      "swap": {"from": {"seat": "W", "suit": "D", "count": 2, "dir": "min"}, "to": {"seat": "E", "suit": "H"}, "toDir": "min"}
+    },
+    {
+      "id": "dh_swap_w",
+      "triggerSeat": "W",
+      "repeatable": false,
+      "condition": {
+        "cardsPlayed": [{"suit": "D", "rank": 14}, {"suit": "D", "rank": 13}]
+      },
+      "swap": {"from": {"seat": "W", "suit": "D", "count": 2, "dir": "min"}, "to": {"seat": "E", "suit": "H"}, "toDir": "min"}
+    },
+    {
+      "id": "ca_swap_spade_honors_e",
+      "triggerSeat": "E",
+      "repeatable": false,
+      "condition": {
+        "cardsPlayed": [{"suit": "S", "rank": 14}, {"suit": "S", "rank": 13}],
+        "cardNotPlayed": {"suit": "C", "rank": 14}
+      },
+      "swap": {"from": {"seat": "E", "suit": "C", "rank": 14}, "to": {"seat": "W", "suit": "D"}, "toDir": "min"}
+    },
+    {
+      "id": "ca_swap_spade_honors_w",
+      "triggerSeat": "W",
+      "repeatable": false,
+      "condition": {
+        "cardsPlayed": [{"suit": "S", "rank": 14}, {"suit": "S", "rank": 13}],
+        "cardNotPlayed": {"suit": "C", "rank": 14}
+      },
+      "swap": {"from": {"seat": "E", "suit": "C", "rank": 14}, "to": {"seat": "W", "suit": "D"}, "toDir": "min"}
+    }
+  ],
+  "testCases": [
+    {
+      "script": [
+        {"seat": "W", "card": {"suit": "S", "rank": 12}},
+        {"seat": "N", "card": {"suit": null, "rank": "ANY"}},
+        {"seat": "E", "card": {"suit": null, "rank": "ANY"}},
+        {"seat": "S", "card": {"suit": null, "rank": "ANY"}}
+      ]
+    }
+  ]
+}

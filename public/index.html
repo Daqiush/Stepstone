@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Stepstone — 桥牌教学</title>
+  <meta name="description" content="Stepstone：支持局域网/路由侠联机的网页端桥牌教学程序"/>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"/>
+  <link rel="stylesheet" href="css/main.css"/>
+</head>
+<body class="lobby-body">
+
+  <!-- 背景装饰 -->
+  <div class="bg-suits">
+    <span class="bg-suit s1">♠</span>
+    <span class="bg-suit s2">♥</span>
+    <span class="bg-suit s3">♦</span>
+    <span class="bg-suit s4">♣</span>
+  </div>
+
+  <div class="lobby-wrap">
+
+    <!-- LOGO -->
+    <header class="lobby-header">
+      <div class="logo-mark">
+        <span class="logo-suit">♠</span><span class="logo-suit red">♥</span>
+      </div>
+      <h1 class="logo-title">Stepstone</h1>
+      <p class="logo-sub">网页端桥牌教学平台</p>
+    </header>
+
+    <!-- 主面板 -->
+    <main class="lobby-main" id="lobby-main">
+
+      <!-- ① 名字输入 + 模式选择格 -->
+      <section class="card-panel" id="section-name">
+        <h2 class="panel-title">
+          <i data-lucide="user"></i> 你的名字
+        </h2>
+        <input id="input-name" class="text-input" type="text"
+               placeholder="请输入你的名字（最多8字）" maxlength="8" autocomplete="off"/>
+
+        <!-- 四个模式格 -->
+        <div class="mode-grid">
+          <!-- 经典模式 -->
+          <div class="mode-tile">
+            <div class="mode-tile-icon">♠</div>
+            <div class="mode-tile-name">经典模式</div>
+            <div class="mode-tile-desc">标准定约桥牌规则</div>
+            <div class="mode-tile-btns">
+              <button class="btn btn-primary btn-sm" onclick="showCreate('classic')">
+                <i data-lucide="plus-circle"></i> 创建
+              </button>
+              <button class="btn btn-secondary btn-sm" onclick="showJoin()">
+                <i data-lucide="log-in"></i> 加入
+              </button>
+            </div>
+          </div>
+          <!-- 大招模式 -->
+          <div class="mode-tile mode-tile-ult">
+            <div class="mode-tile-icon">⚡</div>
+            <div class="mode-tile-name">大招模式</div>
+            <div class="mode-tile-desc">角色技能·变化手牌</div>
+            <div class="mode-tile-btns">
+              <button class="btn btn-primary btn-sm" onclick="showCreate('ult')">
+                <i data-lucide="plus-circle"></i> 创建
+              </button>
+              <button class="btn btn-secondary btn-sm" onclick="showJoin()">
+                <i data-lucide="log-in"></i> 加入
+              </button>
+            </div>
+          </div>
+          <!-- 教学模式 -->
+          <div class="mode-tile mode-tile-teach">
+            <div class="mode-tile-icon">📖</div>
+            <div class="mode-tile-name">教学模式</div>
+            <div class="mode-tile-desc">房主一人控多角</div>
+            <div class="mode-tile-btns">
+              <button class="btn btn-primary btn-sm" onclick="showCreate('teaching')">
+                <i data-lucide="plus-circle"></i> 创建
+              </button>
+              <button class="btn btn-secondary btn-sm" onclick="showJoin()">
+                <i data-lucide="log-in"></i> 加入
+              </button>
+            </div>
+          </div>
+          <!-- 做题模式 -->
+          <div class="mode-tile mode-tile-quiz">
+            <div class="mode-tile-icon">🎯</div>
+            <div class="mode-tile-name">做题模式</div>
+            <div class="mode-tile-desc">单人练习·判题系统</div>
+            <div class="mode-tile-btns">
+              <button class="btn btn-primary btn-sm" onclick="showCreate('problem')">
+                <i data-lucide="plus-circle"></i> 创建
+              </button>
+              <button class="btn btn-secondary btn-sm" onclick="showJoin()">
+                <i data-lucide="log-in"></i> 加入
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ② 加入房间（输入房间码） -->
+      <section class="card-panel hidden" id="section-join">
+        <h2 class="panel-title">
+          <i data-lucide="hash"></i> 加入房间
+        </h2>
+        <input id="input-room-code" class="text-input text-input-code"
+               type="text" placeholder="输入3位房间号" maxlength="3"
+               autocomplete="off" inputmode="numeric" pattern="[0-9]*"
+               style="letter-spacing:.3em;font-size:1.5rem;text-align:center"/>
+        <div class="btn-row">
+          <button class="btn btn-ghost" onclick="backToMain()">
+            <i data-lucide="arrow-left"></i> 返回
+          </button>
+          <button class="btn btn-primary" onclick="doJoin()">
+            <i data-lucide="check"></i> 确认加入
+          </button>
+        </div>
+      </section>
+
+      <!-- ③ 等候室（选座位） -->
+      <section class="card-panel hidden" id="section-lobby">
+        <div class="room-id-row">
+          <span class="room-label">房间号</span>
+          <span class="room-code" id="display-room-id">----</span>
+          <span class="room-mode-tag" id="display-room-mode"></span>
+          <button class="btn-icon" onclick="copyRoomId()" title="复制房间号">
+            <i data-lucide="copy"></i>
+          </button>
+        </div>
+
+        <!-- 桌位选择 -->
+        <div class="seat-table">
+          <div class="seat-col seat-top">
+            <div class="seat-slot" id="seat-N" onclick="chooseSeat('N')">
+              <div class="seat-icon"><i data-lucide="user"></i></div>
+              <div class="seat-pos">北</div>
+              <div class="seat-name" id="name-N">空位</div>
+            </div>
+          </div>
+          <div class="seat-row-mid">
+            <div class="seat-slot" id="seat-W" onclick="chooseSeat('W')">
+              <div class="seat-icon"><i data-lucide="user"></i></div>
+              <div class="seat-pos">西</div>
+              <div class="seat-name" id="name-W">空位</div>
+            </div>
+            <div class="table-center">
+              <div class="table-felt-mini">
+                <span>♠</span><span class="red">♥</span><br/>
+                <span class="red">♦</span><span>♣</span>
+              </div>
+            </div>
+            <div class="seat-slot" id="seat-E" onclick="chooseSeat('E')">
+              <div class="seat-icon"><i data-lucide="user"></i></div>
+              <div class="seat-pos">东</div>
+              <div class="seat-name" id="name-E">空位</div>
+            </div>
+          </div>
+          <div class="seat-col seat-bottom">
+            <div class="seat-slot" id="seat-S" onclick="chooseSeat('S')">
+              <div class="seat-icon"><i data-lucide="user"></i></div>
+              <div class="seat-pos">南</div>
+              <div class="seat-name" id="name-S">空位</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 教学模式提示 -->
+        <div id="teaching-hint-panel" class="hidden teaching-hint">
+          📖 教学模式：房主不入座，开始游戏时自动填充空位，一人控制多个角色。
+        </div>
+
+        <p class="hint-text" id="lobby-hint">请点击座位入座</p>
+
+        <div class="btn-row" id="lobby-btn-row" style="justify-content:center">
+          <button class="btn btn-ghost" onclick="leaveRoom()">
+            <i data-lucide="log-out"></i> 回大厅
+          </button>
+          <button class="btn btn-primary hidden" id="btn-start-game" onclick="ownerStartGame()">
+            <i data-lucide="play-circle"></i> 开始游戏
+          </button>
+        </div>
+      </section>
+
+    </main>
+
+    <!-- 错误提示 -->
+    <div class="toast hidden" id="toast"></div>
+
+    <footer class="lobby-footer">
+      <p>大野猫，喵一个3000！</p>
+    </footer>
+  </div>
+
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="js/bridge-rules.js"></script>
+  <script src="js/lobby.js"></script>
+  <script>lucide.createIcons();</script>
+</body>
+</html>

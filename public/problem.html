@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Stepstone — 做题模式</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"/>
+  <link rel="stylesheet" href="css/main.css"/>
+  <link rel="stylesheet" href="css/problem.css"/>
+</head>
+<body class="prob-body">
+
+<!-- ── 选题界面 ─────────────────────────────────────────────────── -->
+<div id="screen-select" class="prob-screen hidden">
+  <div class="prob-select-wrap">
+    <h1 class="prob-select-title">
+      <span class="prob-title-icon">🎯</span> 做题模式
+    </h1>
+    <p class="prob-select-hint" id="select-hint">选择一道题目开始练习</p>
+    <button class="prob-room-pill" id="prob-room-pill-select" onclick="copyProbRoomId()" title="复制房间号">
+      房间号 <span id="prob-room-id-select">---</span>
+    </button>
+    <div class="prob-list" id="prob-list"><!-- 动态填充 --></div>
+    <div class="prob-select-footer">
+      <button class="btn btn-ghost" onclick="leaveToLobby()">← 回大厅</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── 旁观等待界面 ──────────────────────────────────────────────── -->
+<div id="screen-spectate" class="prob-screen hidden">
+  <div class="prob-spectate-msg">
+    <div class="prob-spec-icon">👁</div>
+    <h2 id="spec-title">旁观中</h2>
+    <p id="spec-desc">等待房主选题…</p>
+  </div>
+</div>
+
+<!-- ── 游戏界面 ──────────────────────────────────────────────────── -->
+<div id="screen-game" class="prob-screen hidden">
+
+  <!-- 顶部状态栏 -->
+  <div class="prob-topbar">
+    <div class="prob-topbar-left">
+      <span class="prob-contract-badge" id="topbar-contract"></span>
+      <span class="prob-vul-badge" id="topbar-vul"></span>
+      <button class="prob-room-pill prob-room-pill-top" onclick="copyProbRoomId()" title="复制房间号">
+        # <span id="prob-room-id-top">---</span>
+      </button>
+    </div>
+    <div class="prob-topbar-center" id="topbar-name"></div>
+    <div class="prob-topbar-right">
+      <span class="prob-score-ns" id="score-ns">NS: 0</span>
+      <span class="prob-score-sep">/</span>
+      <span class="prob-score-ew" id="score-ew">EW: 0</span>
+      <span class="prob-timer" id="topbar-timer">0s</span>
+      <span class="prob-mem-badge" id="topbar-mem">MEM 0/3</span>
+    </div>
+  </div>
+
+  <!-- 主桌面 -->
+  <div class="prob-table-area">
+
+    <!-- Flavor Text 背景 -->
+    <div class="prob-flavor-bg" id="flavor-bg"></div>
+
+    <!-- 北家（明手）手牌 -->
+    <div class="prob-hand-area prob-hand-north" id="hand-north">
+      <div class="prob-seat-label">北 (明手)</div>
+      <div class="prob-cards" id="cards-N"></div>
+    </div>
+
+    <!-- 左（西）对手 -->
+    <div class="prob-hand-area prob-hand-west">
+      <div class="prob-seat-label">西</div>
+      <div class="prob-opponent-backs" id="backs-W"></div>
+      <div class="prob-hand-size" id="size-W">13</div>
+    </div>
+
+    <!-- 中央墩区 -->
+    <div class="prob-center">
+      <div class="prob-trick-area" id="trick-area">
+        <div class="prob-trick-slot prob-trick-N" id="trick-N"></div>
+        <div class="prob-trick-slot prob-trick-W" id="trick-W"></div>
+        <div class="prob-trick-slot prob-trick-E" id="trick-E"></div>
+        <div class="prob-trick-slot prob-trick-S" id="trick-S"></div>
+      </div>
+    </div>
+
+    <!-- 右（东）对手 -->
+    <div class="prob-hand-area prob-hand-east">
+      <div class="prob-seat-label">东</div>
+      <div class="prob-opponent-backs" id="backs-E"></div>
+      <div class="prob-hand-size" id="size-E">13</div>
+    </div>
+
+    <!-- 南家（庄家）手牌 -->
+    <div class="prob-hand-area prob-hand-south" id="hand-south">
+      <div class="prob-seat-label">南 (庄家)</div>
+      <div class="prob-cards" id="cards-S"></div>
+    </div>
+
+    <!-- 迷你叫牌历史 -->
+    <div id="prob-mini-auction" class="hidden">
+      <div class="prob-mini-auction-title">叫牌</div>
+      <div id="prob-auction-body"></div>
+    </div>
+
+    <!-- 收牌确认层 -->
+    <div class="trick-collect-overlay hidden" id="trick-collect-overlay" onclick="collectTrick()"></div>
+
+  </div><!-- .prob-table-area -->
+
+  <!-- 底部操作栏 -->
+  <div class="prob-actionbar">
+    <div class="prob-action-left">
+      <button class="prob-tool-btn" id="btn-history" onclick="openHistory()">
+        📜 查看历史墩
+      </button>
+      <button class="prob-tool-btn" id="btn-counter-suit" onclick="openCounterSuit()">
+        🔢 剩余张数
+      </button>
+      <button class="prob-tool-btn" id="btn-counter-honor" onclick="openCounterHonor()">
+        👑 大牌状态
+      </button>
+    </div>
+    <div class="prob-action-center" id="action-hint">等待出牌…</div>
+    <div class="prob-action-right">
+      <button class="prob-giveup-btn" id="btn-giveup" onclick="giveUp()">放弃</button>
+    </div>
+  </div>
+
+  <!-- CG 宕台遮罩（覆盖在牌桌上） -->
+  <div id="cg-verdict-overlay" class="prob-cg-overlay hidden">
+    <div class="prob-cg-verdict-panel">
+      <div class="prob-cg-verdict-text">定约宕台</div>
+      <button class="btn btn-primary" onclick="cgProceed()">进入正题 →</button>
+    </div>
+  </div>
+
+  <!-- postCG 宕台遮罩 -->
+  <div id="post-cg-verdict-overlay" class="prob-cg-overlay hidden">
+    <div class="prob-cg-verdict-panel prob-post-cg-panel">
+      <div class="prob-cg-verdict-text">定约宕台</div>
+      <div class="prob-post-cg-text"></div>
+      <button class="btn btn-primary" onclick="postCGProceed()">确认 →</button>
+    </div>
+  </div>
+
+</div><!-- #screen-game -->
+
+<!-- ── 结算界面 ──────────────────────────────────────────────────── -->
+<div id="screen-result" class="prob-screen hidden">
+  <div class="prob-result-wrap">
+    <div class="prob-result-badge" id="result-badge"></div>
+    <div class="prob-result-detail" id="result-detail"></div>
+    <div class="prob-result-stats" id="result-stats"></div>
+    <div class="prob-result-hands" id="result-hands"></div>
+    <div class="prob-result-tricks" id="result-tricks"></div>
+    <div class="prob-result-btns">
+      <button class="btn btn-secondary hidden" id="btn-retry" onclick="retryProblem()">重试本题</button>
+      <button class="btn btn-primary" id="btn-back-select" onclick="backToSelect()">再试一题</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── 历史墩面板（抽屉）────────────────────────────────────────── -->
+<div id="panel-history" class="prob-panel hidden">
+  <div class="prob-panel-header">
+    <span>历史墩</span>
+    <button class="prob-panel-close" onclick="closePanel('panel-history')">✕</button>
+  </div>
+  <div class="prob-panel-body" id="history-list"></div>
+</div>
+
+<!-- ── 记牌器：剩余张数 ──────────────────────────────────────────── -->
+<div id="panel-counter-suit" class="prob-panel hidden">
+  <div class="prob-panel-header">
+    <span>防守方剩余张数</span>
+    <button class="prob-panel-close" onclick="closePanel('panel-counter-suit')">✕</button>
+  </div>
+  <div class="prob-panel-body" id="counter-suit-body"></div>
+</div>
+
+<!-- ── 记牌器：大牌状态 ──────────────────────────────────────────── -->
+<div id="panel-counter-honor" class="prob-panel hidden">
+  <div class="prob-panel-header">
+    <span>大牌在防守方中的状态</span>
+    <button class="prob-panel-close" onclick="closePanel('panel-counter-honor')">✕</button>
+  </div>
+  <div class="prob-panel-body" id="counter-honor-body"></div>
+</div>
+
+<!-- 遮罩 -->
+<div id="panel-overlay" class="prob-panel-overlay hidden" onclick="closeAllPanels()"></div>
+
+<!-- Toast -->
+<div class="toast hidden" id="toast"></div>
+
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<script src="/socket.io/socket.io.js"></script>
+<script src="js/problem-game.js"></script>
+</body>
+</html>

@@ -1,0 +1,41 @@
+# A3 — 静夜思（3NT by S，首攻♠T）
+# 合同：3NT by S，openingLeader: W，tricksNeeded: 9
+
+DIST base {
+  E: SA S5 S4 HQ HJ HT D9 D3 D2 C9 C8 C7 C6
+  W: SK ST S9 S8 S3 H9 H8 H5 H4 DQ DJ DT CT
+}
+
+# 主线防守剧本
+# 首攻♠T；若明手出♠6，东出♠A；
+# 东继续♠5，若庄家出♠7，西出♠9
+SCRIPT main_defense {
+  W: ST    # 西首攻♠T
+  N: S6    # 明手♠6（庄家操作，验证）
+  E: SA    # 东♠A赢墩
+  S: S2    # 庄家♠2（庄家操作，验证）
+  E: S5    # 东继续♠5（东引，E→S→W→N）
+  S: S7    # 庄家♠7（庄家操作，验证）
+  W: S9    # 西♠9
+}
+
+# 惩罚剧本：北第一墩错误出♠Q
+# 东出♠A赢；东回出最小♠；南出牌后西出最小已知赢牌；之后DDS接管
+SCRIPT punish_sq_script {
+  W: ST      # 西首攻♠T
+  N: SQ      # 北错误出♠Q（验证，仅花色+点数匹配）
+  E: SA      # 东♠A赢墩
+  S: S_MAX   # 庄家任意♠（仅验证花色）
+  E: S5      # 东回出♠5
+  S: S_MAX   # 庄家任意♠（仅验证花色）
+  W: S_WIN   # 西出最小已知赢牌（第2墩）
+  W: S_MAX   # 西从大到小引♠（第3墩）
+  W: S_MAX   # 西从大到小引♠（第4墩）
+  W: S_MAX   # 西从大到小引♠（第5墩）
+}
+
+TESTCASES {
+  TC main dist=base from=0 script=main_defense {
+    BRANCH at=1 script=punish_sq_script
+  }
+}

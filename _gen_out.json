@@ -1,0 +1,580 @@
+{
+  "id": "A1",
+  "name": "测试题目",
+  "flavorText": "测试题目。",
+  "contract": {
+    "level": 6,
+    "suit": "S",
+    "declarer": "S",
+    "doubled": false,
+    "redoubled": false
+  },
+  "vulnerability": "NONE",
+  "tricksNeeded": 12,
+  "hands": {
+    "S": [
+      {
+        "suit": "S",
+        "rank": 14
+      },
+      {
+        "suit": "S",
+        "rank": 12
+      },
+      {
+        "suit": "S",
+        "rank": 8
+      },
+      {
+        "suit": "S",
+        "rank": 7
+      },
+      {
+        "suit": "S",
+        "rank": 6
+      },
+      {
+        "suit": "S",
+        "rank": 5
+      },
+      {
+        "suit": "H",
+        "rank": 13
+      },
+      {
+        "suit": "H",
+        "rank": 9
+      },
+      {
+        "suit": "H",
+        "rank": 8
+      },
+      {
+        "suit": "H",
+        "rank": 7
+      },
+      {
+        "suit": "D",
+        "rank": 14
+      },
+      {
+        "suit": "D",
+        "rank": 2
+      },
+      {
+        "suit": "C",
+        "rank": 14
+      }
+    ],
+    "N": [
+      {
+        "suit": "S",
+        "rank": 13
+      },
+      {
+        "suit": "S",
+        "rank": 4
+      },
+      {
+        "suit": "S",
+        "rank": 3
+      },
+      {
+        "suit": "S",
+        "rank": 2
+      },
+      {
+        "suit": "H",
+        "rank": 14
+      },
+      {
+        "suit": "H",
+        "rank": 4
+      },
+      {
+        "suit": "H",
+        "rank": 3
+      },
+      {
+        "suit": "H",
+        "rank": 2
+      },
+      {
+        "suit": "D",
+        "rank": 13
+      },
+      {
+        "suit": "D",
+        "rank": 4
+      },
+      {
+        "suit": "D",
+        "rank": 3
+      },
+      {
+        "suit": "C",
+        "rank": 3
+      },
+      {
+        "suit": "C",
+        "rank": 2
+      }
+    ]
+  },
+  "ewHands": {
+    "E": [
+      {
+        "suit": "H",
+        "rank": 12
+      },
+      {
+        "suit": "H",
+        "rank": 11
+      },
+      {
+        "suit": "H",
+        "rank": 10
+      },
+      {
+        "suit": "H",
+        "rank": 5
+      },
+      {
+        "suit": "D",
+        "rank": 12
+      },
+      {
+        "suit": "D",
+        "rank": 11
+      },
+      {
+        "suit": "D",
+        "rank": 10
+      },
+      {
+        "suit": "D",
+        "rank": 9
+      },
+      {
+        "suit": "C",
+        "rank": 8
+      },
+      {
+        "suit": "C",
+        "rank": 7
+      },
+      {
+        "suit": "C",
+        "rank": 6
+      },
+      {
+        "suit": "C",
+        "rank": 5
+      },
+      {
+        "suit": "C",
+        "rank": 4
+      }
+    ],
+    "W": [
+      {
+        "suit": "S",
+        "rank": 11
+      },
+      {
+        "suit": "S",
+        "rank": 10
+      },
+      {
+        "suit": "S",
+        "rank": 9
+      },
+      {
+        "suit": "H",
+        "rank": 6
+      },
+      {
+        "suit": "D",
+        "rank": 8
+      },
+      {
+        "suit": "D",
+        "rank": 7
+      },
+      {
+        "suit": "D",
+        "rank": 6
+      },
+      {
+        "suit": "D",
+        "rank": 5
+      },
+      {
+        "suit": "C",
+        "rank": 13
+      },
+      {
+        "suit": "C",
+        "rank": 12
+      },
+      {
+        "suit": "C",
+        "rank": 11
+      },
+      {
+        "suit": "C",
+        "rank": 10
+      },
+      {
+        "suit": "C",
+        "rank": 9
+      }
+    ]
+  },
+  "openingLeader": "W",
+  "testCases": [
+    {
+      "script": [
+        {
+          "seat": "W",
+          "card": {
+            "suit": "C",
+            "rank": 13
+          }
+        },
+        {
+          "seat": "N",
+          "card": {
+            "suit": "C",
+            "rank": 2
+          }
+        },
+        {
+          "seat": "E",
+          "card": {
+            "suit": "C",
+            "rank": 4
+          }
+        },
+        {
+          "seat": "S",
+          "card": {
+            "suit": "C",
+            "rank": 14
+          }
+        },
+        {
+          "seat": "S",
+          "card": {
+            "suit": "S",
+            "rank": 14
+          }
+        },
+        {
+          "seat": "W",
+          "card": {
+            "suit": "S",
+            "rank": 9
+          }
+        },
+        {
+          "seat": "N",
+          "card": {
+            "suit": "S",
+            "rank": 2
+          }
+        },
+        {
+          "seat": "E",
+          "card": {
+            "suit": "C",
+            "rank": 5
+          }
+        },
+        {
+          "seat": "S",
+          "card": {
+            "suit": "S",
+            "rank": 12
+          }
+        },
+        {
+          "seat": "W",
+          "card": {
+            "suit": "S",
+            "rank": 10
+          }
+        },
+        {
+          "seat": "N",
+          "card": {
+            "suit": "S",
+            "rank": 3
+          }
+        },
+        {
+          "seat": "E",
+          "card": {
+            "suit": "C",
+            "rank": 6
+          }
+        },
+        {
+          "seat": "N",
+          "card": {
+            "suit": "S",
+            "rank": 13
+          }
+        },
+        {
+          "seat": "W",
+          "card": {
+            "suit": "S",
+            "rank": 11
+          }
+        },
+        {
+          "seat": "S",
+          "card": {
+            "suit": "S",
+            "rank": 5
+          }
+        },
+        {
+          "seat": "E",
+          "card": {
+            "suit": "C",
+            "rank": 7
+          }
+        }
+      ]
+    },
+    {
+      "ewHands": {
+        "E": [
+          {
+            "suit": "H",
+            "rank": 12
+          },
+          {
+            "suit": "H",
+            "rank": 11
+          },
+          {
+            "suit": "H",
+            "rank": 10
+          },
+          {
+            "suit": "H",
+            "rank": 5
+          },
+          {
+            "suit": "D",
+            "rank": 12
+          },
+          {
+            "suit": "D",
+            "rank": 11
+          },
+          {
+            "suit": "D",
+            "rank": 10
+          },
+          {
+            "suit": "D",
+            "rank": 9
+          },
+          {
+            "suit": "C",
+            "rank": 8
+          },
+          {
+            "suit": "C",
+            "rank": 7
+          },
+          {
+            "suit": "C",
+            "rank": 6
+          },
+          {
+            "suit": "C",
+            "rank": 5
+          },
+          {
+            "suit": "C",
+            "rank": 4
+          }
+        ],
+        "W": [
+          {
+            "suit": "S",
+            "rank": 11
+          },
+          {
+            "suit": "S",
+            "rank": 10
+          },
+          {
+            "suit": "S",
+            "rank": 9
+          },
+          {
+            "suit": "H",
+            "rank": 6
+          },
+          {
+            "suit": "D",
+            "rank": 8
+          },
+          {
+            "suit": "D",
+            "rank": 7
+          },
+          {
+            "suit": "D",
+            "rank": 6
+          },
+          {
+            "suit": "D",
+            "rank": 5
+          },
+          {
+            "suit": "C",
+            "rank": 13
+          },
+          {
+            "suit": "C",
+            "rank": 12
+          },
+          {
+            "suit": "C",
+            "rank": 11
+          },
+          {
+            "suit": "C",
+            "rank": 10
+          },
+          {
+            "suit": "C",
+            "rank": 9
+          }
+        ]
+      },
+      "script": [
+        {
+          "seat": "W",
+          "card": {
+            "suit": "C",
+            "rank": 13
+          }
+        },
+        {
+          "seat": "N",
+          "card": {
+            "suit": "C",
+            "rank": 2
+          }
+        },
+        {
+          "seat": "E",
+          "card": {
+            "suit": "C",
+            "rank": 4
+          }
+        },
+        {
+          "seat": "S",
+          "card": {
+            "suit": "C",
+            "rank": 14
+          }
+        },
+        {
+          "seat": "S",
+          "card": {
+            "suit": "S",
+            "rank": 12
+          }
+        },
+        {
+          "seat": "W",
+          "card": {
+            "suit": "S",
+            "rank": 9
+          }
+        },
+        {
+          "seat": "N",
+          "card": {
+            "suit": "S",
+            "rank": 2
+          }
+        },
+        {
+          "seat": "E",
+          "card": {
+            "suit": "C",
+            "rank": 5
+          }
+        },
+        {
+          "seat": "S",
+          "card": {
+            "suit": "S",
+            "rank": 14
+          }
+        },
+        {
+          "seat": "W",
+          "card": {
+            "suit": "S",
+            "rank": 10
+          }
+        },
+        {
+          "seat": "N",
+          "card": {
+            "suit": "S",
+            "rank": 3
+          }
+        },
+        {
+          "seat": "E",
+          "card": {
+            "suit": "C",
+            "rank": 6
+          }
+        },
+        {
+          "seat": "N",
+          "card": {
+            "suit": "S",
+            "rank": 13
+          }
+        },
+        {
+          "seat": "W",
+          "card": {
+            "suit": "S",
+            "rank": 11
+          }
+        },
+        {
+          "seat": "S",
+          "card": {
+            "suit": "S",
+            "rank": 5
+          }
+        },
+        {
+          "seat": "E",
+          "card": {
+            "suit": "C",
+            "rank": 7
+          }
+        }
+      ]
+    }
+  ]
+}
+

@@ -1,0 +1,184 @@
+{
+  "id": "Ω",
+  "name": "踏莎行·郴州旅舍\n──北宋·秦观",
+  "flavorText": "雾失楼台，月迷津渡。\n桃源望断无寻处。\n可堪孤馆闭春寒，杜鹃声里斜阳暮。\n驿寄梅花，鱼传尺素。\n砌成此恨无重数。\n郴江幸自绕郴山，为谁流下潇湘去？\n",
+  "contract": {
+    "level": 6,
+    "suit": "S",
+    "declarer": "S",
+    "doubled": false,
+    "redoubled": false
+  },
+  "vulnerability": "NONE",
+  "tricksNeeded": 12,
+  "auction": [
+  {"seat": "S", "bid": "1S"},
+  {"seat": "W", "bid": "PASS"},
+  {"seat": "N", "bid": "3D"},
+  {"seat": "E", "bid": "PASS"},
+  {"seat": "S", "bid": "4C"},
+  {"seat": "W", "bid": "PASS"},
+  {"seat": "N", "bid": "4NT"},
+  {"seat": "E", "bid": "PASS"},
+  {"seat": "S", "bid": "5S"},
+  {"seat": "W", "bid": "PASS"},
+  {"seat": "N", "bid": "6S"},
+  {"seat": "E", "bid": "PASS"},
+  {"seat": "S", "bid": "PASS"},
+  {"seat": "W", "bid": "PASS"}
+],
+  "hands": {
+    "S": [
+      {"suit":"S","rank":14},
+      {"suit":"S","rank":12},
+      {"suit":"S","rank":8},
+      {"suit":"S","rank":7},
+      {"suit":"S","rank":6},
+      {"suit":"S","rank":5},
+      {"suit":"H","rank":13},
+      {"suit":"H","rank":9},
+      {"suit":"H","rank":8},
+      {"suit":"H","rank":7},
+      {"suit":"D","rank":14},
+      {"suit":"D","rank":2},
+      {"suit":"C","rank":14}
+    ],
+    "N": [
+      {"suit":"S","rank":13},
+      {"suit":"S","rank":4},
+      {"suit":"S","rank":3},
+      {"suit":"S","rank":2},
+      {"suit":"H","rank":14},
+      {"suit":"H","rank":4},
+      {"suit":"H","rank":3},
+      {"suit":"H","rank":2},
+      {"suit":"D","rank":13},
+      {"suit":"D","rank":4},
+      {"suit":"D","rank":3},
+      {"suit":"C","rank":3},
+      {"suit":"C","rank":2}
+    ]
+  },
+  "openingLeader": "W",
+  "midTrickTriggers": [
+    {
+      "id": "diamond_ruff",
+      "triggerSeat": "W",
+      "condition": {
+        "ledBy": "N",
+        "ledSuit": "D",
+        "ruffedBy": {
+          "seat": "S",
+          "ruffSuit": "S",
+          "excludeRanks": [14, 12]
+        },
+        "completedSuitTricksLt": {"suit": "S", "count": 3}
+      },
+      "swap": {
+        "from": {"seat": "W", "suit": "D"},
+        "to": {"seat": "E", "suit": "H"}
+      },
+      "forcedPlay": {"suit": "S", "rank": "MIN"}
+    },
+    {
+      "id": "heart_min_e",
+      "triggerSeat": "E",
+      "repeatable": true,
+      "condition": {
+        "ledBy": "N",
+        "ledSuit": "H",
+        "ledRankLt": 10
+      },
+      "swap": null,
+      "forcedPlay": {"suit": "H", "rank": "MIN"}
+    },
+    {
+      "id": "spade_discard_e",
+      "triggerSeat": "E",
+      "repeatable": true,
+      "condition": {
+        "ledSuit": "S",
+        "mustDiscard": true
+      },
+      "swap": null,
+      "forcedPlay": {"suit": "C", "rank": "MIN"}
+    },
+    {
+      "id": "heart_ten_lead_e",
+      "triggerSeat": "E",
+      "repeatable": false,
+      "condition": {
+        "completedTricksEq": 9
+      },
+      "swap": null,
+      "forcedPlay": {"suit": "H", "rank": 10}
+    },
+    {
+      "id": "heart_hj_w",
+      "triggerSeat": "W",
+      "repeatable": true,
+      "condition": {
+        "ledBy": "N",
+        "ledSuit": "H",
+        "ledRankLt": 10,
+        "playedRankLt": {"seat": "S", "suit": "H", "rank": 10}
+      },
+      "swap": {
+        "from": {"seat": "E", "suit": "H"},
+        "to": {"seat": "W", "suit": "H"}
+      },
+      "forcedPlay": {"suit": "H", "rank": 11}
+    }
+  ],
+  "ewHands": {
+    "E": [
+      {"suit":"H","rank":12},
+      {"suit":"H","rank":11},
+      {"suit":"H","rank":10},
+      {"suit":"H","rank":5},
+      {"suit":"D","rank":12},
+      {"suit":"D","rank":11},
+      {"suit":"D","rank":10},
+      {"suit":"D","rank":9},
+      {"suit":"C","rank":8},
+      {"suit":"C","rank":7},
+      {"suit":"C","rank":6},
+      {"suit":"C","rank":5},
+      {"suit":"C","rank":4}
+    ],
+    "W": [
+      {"suit":"S","rank":11},
+      {"suit":"S","rank":10},
+      {"suit":"S","rank":9},
+      {"suit":"H","rank":6},
+      {"suit":"D","rank":8},
+      {"suit":"D","rank":7},
+      {"suit":"D","rank":6},
+      {"suit":"D","rank":5},
+      {"suit":"C","rank":13},
+      {"suit":"C","rank":12},
+      {"suit":"C","rank":11},
+      {"suit":"C","rank":10},
+      {"suit":"C","rank":9}
+    ]
+  },
+  "testCases": [
+    {
+      "script": [
+        {"seat":"W","card":{"suit":"C","rank":13}},
+        {"seat":"N","card":{"suit":"C","rank":"MIN"}},
+        {"seat":"E","card":{"suit":"C","rank":4}},
+        {"seat":"S","card":{"suit":"C","rank":14}},
+        {"seat":"S","card":{"suit":"S","rank":"MAX"}},
+        {"seat":"W","card":{"suit":"S","rank":11}},
+        {"seat":"N","card":{"suit":"S","rank":"MAX"}},
+        {"seat":"S","card":{"suit":"S","rank":"MAX"}},
+        {"seat":"W","card":{"suit":"S","rank":10}},
+        {"seat":"N","card":{"suit":"S","rank":"MAX"}},
+        {"seat":"S","card":{"suit":"S","rank":"MAX"}},
+        {"seat":"W","card":{"suit":"S","rank":9}},
+        {"seat":"N","card":{"suit":"S","rank":"MAX"}}
+      ]
+    }
+  ]
+}
