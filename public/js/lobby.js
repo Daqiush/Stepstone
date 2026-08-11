@@ -75,6 +75,10 @@ function ownerStartGame() {
   socket.emit('ownerStartGame');
 }
 
+function leaveSeat() {
+  if (mySeat) socket.emit('leaveSeat');
+}
+
 function leaveRoom() {
   socket.disconnect();
   window.location.href = '/';
@@ -199,6 +203,7 @@ function enterLobby(roomId) {
 function updateSeats(playerNames) {
   const SEATS = ['N','E','S','W'];
   let seatedCount = 0;
+  let nextMySeat = null;
   SEATS.forEach(s => {
     const nameEl = document.getElementById('name-' + s);
     const slotEl = document.getElementById('seat-' + s);
@@ -207,8 +212,8 @@ function updateSeats(playerNames) {
       seatedCount++;
       nameEl.textContent = name;
       slotEl.classList.add('occupied');
-      if (name === myName && !mySeat) {
-        mySeat = s;
+      if (name === myName) {
+        if (!nextMySeat) nextMySeat = s;
         slotEl.classList.add('mine');
       }
     } else {
@@ -216,6 +221,7 @@ function updateSeats(playerNames) {
       slotEl.classList.remove('occupied', 'mine');
     }
   });
+  mySeat = nextMySeat;
   updateOwnerUI(seatedCount);
   if (window.lucide) lucide.createIcons();
 }

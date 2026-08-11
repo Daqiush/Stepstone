@@ -33,5 +33,16 @@ assert.deepStrictEqual(
 
 assert.strictEqual(rules.openingLeader('NS'), 'W', 'west opens against a north-south contract');
 assert.strictEqual(rules.openingLeader('EW'), 'S', 'south opens against an east-west contract');
+assert.deepStrictEqual(rules.controlledSeats('N'), ['N', 'S'], 'north controls the complete north-south side');
+assert.deepStrictEqual(rules.controlledSeats('E'), ['E', 'W'], 'east controls the complete east-west side');
+assert.strictEqual(rules.isValidBidTricks(7), true, 'seven tricks is the minimum complex bid');
+assert.strictEqual(rules.isValidBidTricks(6), false, 'six tricks is not a legal complex bid');
+assert.deepStrictEqual(rules.trumpAcePlacement({ axis: 'real', value: 2 }), { zone: 'top', re: 2 }, 'real trump aces sit above the 5i row');
+assert.deepStrictEqual(rules.trumpAcePlacement({ axis: 'imag', value: 4 }), { zone: 'right', im: 4 }, 'imaginary trump aces sit beyond the 5 column');
+const trumpImag3 = { axis: 'imag', value: 3 };
+const realFourImag3 = { kind: 'real', re: 4, im: 3 };
+assert.deepStrictEqual(rules.ledSuit(realFourImag3, trumpImag3), trumpImag3, 'a trump card leads the trump suit instead of its original suit');
+assert.strictEqual(rules.matchesLedSuit(realFourImag3, { kind: 'real', re: 4, im: 1 }, trumpImag3), false, 'a trump card cannot follow its original non-trump suit');
+assert.strictEqual(rules.isTrumpCard({ kind: 'ace', order: 'realFirst' }, trumpImag3), true, 'both aces are trump-only after a trump is chosen');
 
 console.log('complex-bridge tests passed');

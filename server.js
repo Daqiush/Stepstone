@@ -1004,6 +1004,16 @@ io.on('connection', socket => {
       if (room.sockets[first] && room.sockets[first] !== socket.id && !isOwnPageTransition) {
         socket.emit('appError', { msg: '该方已有人操控' }); return;
       }
+      const old = sockSeat[socket.id];
+      if (old && sideOf(old) !== side && room.sockets[old] === socket.id) {
+        const oldSide = sideOf(old);
+        for (const s of complexSideSeats(oldSide)) {
+          room.sockets[s] = null;
+          room.playerNames[s] = null;
+          room.readyStatus[s] = false;
+        }
+        room.complexSides[oldSide] = null;
+      }
       room.complexSides[side] = { socketId: socket.id, name: playerName || room.complexSides?.[side]?.name || side };
       if (wasOwnerController) room.ownerSocketId = socket.id;
       for (const s of [first, second]) {
@@ -1060,9 +1070,19 @@ io.on('connection', socket => {
     // 只允许在 LOBBY 阶段站起来
     if (!room || !seat || room.phase !== 'LOBBY') return;
 
-    room.sockets[seat]     = null;
-    room.playerNames[seat] = null;
-    room.readyStatus[seat] = false;
+    if (room.mode === 'complex') {
+      const side = sideOf(seat);
+      for (const s of complexSideSeats(side)) {
+        room.sockets[s] = null;
+        room.playerNames[s] = null;
+        room.readyStatus[s] = false;
+      }
+      room.complexSides[side] = null;
+    } else {
+      room.sockets[seat]     = null;
+      room.playerNames[seat] = null;
+      room.readyStatus[seat] = false;
+    }
     sockSeat[socket.id]    = null;
 
     io.to(roomId).emit('roomUpdate', roomState(room));
@@ -1137,9 +1157,9 @@ io.on('connection', socket => {
     const side = seat && sideOf(seat);
     if (!side || room.complexSides?.[side]?.socketId !== socket.id) return;
     const bidTricks = Number(tricks);
-    if (!Number.isInteger(bidTricks) || bidTricks < 1 || bidTricks > 13 || !trump ||
+    if (!complexRules.isValidBidTricks(bidTricks) || !trump ||
         trump.axis !== (side === 'NS' ? 'real' : 'imag') || !Number.isInteger(Number(trump.value)) || trump.value < 1 || trump.value > 5) {
-      socket.emit('appError', { msg: '请选择 1–13 墩及本方允许的将牌花色' }); return;
+      socket.emit('appError', { msg: '请选择 7–13 墩及本方允许的将牌花色' }); return;
     }
     if (room.complexBids[side]) { socket.emit('appError', { msg: '本方已提交叫牌' }); return; }
     room.complexBids[side] = { tricks: bidTricks, trump: { axis: trump.axis, value: Number(trump.value) } };
@@ -3673,7 +3693,7 @@ function startProblemGame(room, problemId) {
 
 // 做题模式 Socket 事件
 // ── 复数桥牌 ────────────────────────────────────────────────────
-function complexSideSeats(side) { return side === 'NS' ? ['N', 'S'] : ['E', 'W']; }
+function complexSideSeats(side) { return complexRules.controlledSeats(side === 'NS' ? 'N' : 'E'); }
 function complexSideForLobbySeat(seat) { return seat === 'N' ? 'NS' : seat === 'E' ? 'EW' : null; }
 
 function complexSnapshot(room, side) {

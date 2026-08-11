@@ -87,6 +87,19 @@
           </div>
           <!-- 做题模式 -->
           <div class="mode-tile mode-tile-complex">
+            <details class="complex-info">
+              <summary aria-label="查看复数桥牌规则" title="复数桥牌规则">ⓘ</summary>
+              <div class="complex-info-panel">
+                <strong>复数桥牌规则摘要</strong>
+                <p><b>牌组</b>：25 张虚牌 bi+a、25 张实牌 a+bi，以及 A+Ai、Ai+A，共 52 张。</p>
+                <p><b>对局</b>：两名玩家分别控制南北与东西两手；北、东、南、西各持 13 张，按顺时针独立出牌。</p>
+                <p><b>叫牌</b>：双方同时叫 7–13 墩与将牌。南北选实部纵列，东西选虚部横行；墩数高者优先，再比花色数字，相同抽签。</p>
+                <p><b>首攻</b>：南北做庄由西家首攻；东西做庄由南家首攻。之后每墩赢家引出下一墩。</p>
+                <p><b>花色与将牌</b>：非将牌按引出方向的行或列跟牌；同坐标时引出方向的牌较大。例如引出实部 2 时，顺序为 2+5i ＞ 5i+2 ＞ … ＞ 2+3i ＞ 3i+2 ＞ … ＞ 2+1i ＞ 1i+2。确定将牌后，将牌线上的牌与两张 Ace 都只属于将牌，不能再跟随原花色。实部将牌时 A+Ai 高于 Ai+A；虚部将牌时相反。</p>
+                <p><b>胜负</b>：共 13 墩，庄方获得不少于所叫墩数即成约。</p>
+                <p><b>标识</b>：虚牌红色左右边框，实牌蓝色上下边框；将牌只显示紫色菱形边框。</p>
+              </div>
+            </details>
             <div class="mode-tile-icon">ℂ</div>
             <div class="mode-tile-name">复数模式</div>
             <div class="mode-tile-desc">复数麻将即将推出 · 复数桥牌可玩</div>
@@ -146,6 +159,7 @@
         <div class="seat-table">
           <div class="seat-col seat-top">
             <div class="seat-slot" id="seat-N" onclick="chooseSeat('N')">
+              <button class="seat-leave" onclick="event.stopPropagation(); leaveSeat()" title="离开座位" aria-label="离开座位">×</button>
               <div class="seat-icon"><i data-lucide="user"></i></div>
               <div class="seat-pos">北</div>
               <div class="seat-name" id="name-N">空位</div>
@@ -153,6 +167,7 @@
           </div>
           <div class="seat-row-mid">
             <div class="seat-slot" id="seat-W" onclick="chooseSeat('W')">
+              <button class="seat-leave" onclick="event.stopPropagation(); leaveSeat()" title="离开座位" aria-label="离开座位">×</button>
               <div class="seat-icon"><i data-lucide="user"></i></div>
               <div class="seat-pos">西</div>
               <div class="seat-name" id="name-W">空位</div>
@@ -164,6 +179,7 @@
               </div>
             </div>
             <div class="seat-slot" id="seat-E" onclick="chooseSeat('E')">
+              <button class="seat-leave" onclick="event.stopPropagation(); leaveSeat()" title="离开座位" aria-label="离开座位">×</button>
               <div class="seat-icon"><i data-lucide="user"></i></div>
               <div class="seat-pos">东</div>
               <div class="seat-name" id="name-E">空位</div>
@@ -171,6 +187,7 @@
           </div>
           <div class="seat-col seat-bottom">
             <div class="seat-slot" id="seat-S" onclick="chooseSeat('S')">
+              <button class="seat-leave" onclick="event.stopPropagation(); leaveSeat()" title="离开座位" aria-label="离开座位">×</button>
               <div class="seat-icon"><i data-lucide="user"></i></div>
               <div class="seat-pos">南</div>
               <div class="seat-name" id="name-S">空位</div>

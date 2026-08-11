@@ -11,7 +11,7 @@
   <header class="complex-header">
     <a href="index.html" class="complex-home">← 大厅</a>
     <div><strong>ℂ 复数桥牌</strong><span id="complex-side" class="complex-side"></span></div>
-    <div id="complex-score">南北 0 · 0 东西</div>
+    <div id="complex-score" class="complex-win-record"><span>赢墩记录</span><strong id="complex-ns-wins">南北 0</strong><strong id="complex-ew-wins">东西 0</strong></div>
   </header>
   <main class="complex-main">
     <section class="complex-status">
@@ -30,6 +30,13 @@
     <section id="complex-trick" class="complex-trick"></section>
     <section id="complex-hands" class="complex-hands"></section>
   </main>
+  <div id="complex-contract-modal" class="complex-contract-modal hidden" role="dialog" aria-modal="true" aria-labelledby="complex-contract-title">
+    <div>
+      <h2 id="complex-contract-title">定约确定</h2>
+      <p id="complex-contract-modal-text"></p>
+      <button id="complex-contract-ack" class="btn btn-primary">开始出牌</button>
+    </div>
+  </div>
   <div id="complex-result" class="complex-result hidden"></div>
   <div id="complex-toast" class="complex-toast hidden"></div>
   <script src="/socket.io/socket.io.js"></script>

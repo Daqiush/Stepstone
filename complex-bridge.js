@@ -19,7 +19,7 @@ function cardId(card) {
 }
 
 function ledSuit(card, trump) {
-  if (card.kind === 'ace') return trump || null;
+  if (isTrumpCard(card, trump)) return trump;
   return { axis: card.kind, value: card.kind === 'real' ? card.re : card.im };
 }
 
@@ -30,8 +30,15 @@ function sameSuit(a, b) {
 function matchesLedSuit(card, leadCard, trump) {
   const suit = leadCard?.axis ? leadCard : ledSuit(leadCard, trump);
   if (!suit) return false;
-  if (card.kind === 'ace') return sameSuit(suit, trump);
+  if (sameSuit(suit, trump)) return isTrumpCard(card, trump);
+  if (isTrumpCard(card, trump)) return false;
   return suit.axis === 'real' ? card.re === suit.value : card.im === suit.value;
+}
+
+function isTrumpCard(card, trump) {
+  if (!trump) return false;
+  if (card.kind === 'ace') return true;
+  return trump.axis === 'real' ? card.re === trump.value : card.im === trump.value;
 }
 
 function cardStrength(card, suit) {
@@ -79,14 +86,32 @@ function openingLeader(declarerSide) {
   return declarerSide === 'NS' ? 'W' : 'S';
 }
 
+function controlledSeats(seat) {
+  if (seat === 'N' || seat === 'S') return ['N', 'S'];
+  if (seat === 'E' || seat === 'W') return ['E', 'W'];
+  return [];
+}
+
+function isValidBidTricks(tricks) {
+  return Number.isInteger(tricks) && tricks >= 7 && tricks <= 13;
+}
+
+function trumpAcePlacement(trump) {
+  return trump.axis === 'real' ? { zone: 'top', re: trump.value } : { zone: 'right', im: trump.value };
+}
+
 module.exports = {
   createComplexDeck,
   cardId,
   ledSuit,
   matchesLedSuit,
+  isTrumpCard,
   trickWinner,
   hasFollowingCard,
   isLegalPlay,
   resolveComplexBids,
   openingLeader,
+  controlledSeats,
+  isValidBidTricks,
+  trumpAcePlacement,
 };
