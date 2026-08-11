@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Stepstone · 复数桥牌</title>
+  <link rel="stylesheet" href="css/main.css">
+  <link rel="stylesheet" href="css/complex.css">
+</head>
+<body class="complex-body">
+  <header class="complex-header">
+    <a href="index.html" class="complex-home">← 大厅</a>
+    <div><strong>ℂ 复数桥牌</strong><span id="complex-side" class="complex-side"></span></div>
+    <div id="complex-score">南北 0 · 0 东西</div>
+  </header>
+  <main class="complex-main">
+    <section class="complex-status">
+      <div id="complex-message">正在恢复房间…</div>
+      <div id="complex-contract"></div>
+    </section>
+    <section id="complex-bid-panel" class="complex-bid-panel hidden">
+      <h2>同时叫牌</h2>
+      <p id="complex-bid-hint"></p>
+      <div class="complex-bid-controls">
+        <label>墩数 <select id="complex-tricks"></select></label>
+        <label>将牌 <select id="complex-trump"></select></label>
+        <button id="complex-submit-bid" class="btn btn-primary">提交叫牌</button>
+      </div>
+    </section>
+    <section id="complex-trick" class="complex-trick"></section>
+    <section id="complex-hands" class="complex-hands"></section>
+  </main>
+  <div id="complex-result" class="complex-result hidden"></div>
+  <div id="complex-toast" class="complex-toast hidden"></div>
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="js/complex-game.js"></script>
+</body>
+</html>

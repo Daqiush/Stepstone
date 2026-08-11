@@ -4,6 +4,7 @@ const http    = require('http');
 const { Server } = require('socket.io');
 const path    = require('path');
 const fs      = require('fs');
+const complexRules = require('./complex-bridge');
 
 let calcDDTable = null;
 let solveBoard  = null;
@@ -290,6 +291,9 @@ function makeRoom(id) {
     ownerName:            '',
     ownerControlledSeats: [],
     declarerControlledBy: null,
+    // 复数桥牌：两名玩家分别操控 NS / EW 两个座位
+    complexSides: null,
+    complexBids:  null,
   };
 }
 
@@ -414,6 +418,10 @@ function sendUltReconnectState(room, seat, sock) {
 // 重连状态恢复
 // ────────────────────────────────────────────────────────────────
 function sendReconnectState(room, seat, sock) {
+  if (room.mode === 'complex') {
+    sendComplexReconnectState(room, seat, sock);
+    return;
+  }
   // 大招模式：独立重连流程
   if (room.mode === 'ult') {
     sendUltReconnectState(room, seat, sock);
@@ -936,6 +944,7 @@ io.on('connection', socket => {
     if (mode === 'ult')           { room.mode = 'ult'; }
     else if (mode === 'teaching') { room.mode = 'classic'; room.teachingMode = true; }
     else if (mode === 'problem')  { room.mode = 'problem'; room.phase = 'PROB_SELECT'; }
+    else if (mode === 'complex')  { room.mode = 'complex'; room.complexSides = { NS: null, EW: null }; }
     rooms[id] = room;
     sockRoom[socket.id] = id;
     socket.join(id);
@@ -986,6 +995,27 @@ io.on('connection', socket => {
     const roomId = sockRoom[socket.id];
     const room   = rooms[roomId];
     if (!room) return;
+    if (room.mode === 'complex') {
+      const side = complexSideForLobbySeat(seat);
+      if (!side) { socket.emit('appError', { msg: '复数桥牌请选择南北方或东西方' }); return; }
+      const [first, second] = complexSideSeats(side);
+      const wasOwnerController = room.sockets[first] === room.ownerSocketId;
+      const isOwnPageTransition = room.phase !== 'LOBBY' && room.playerNames[first] === playerName;
+      if (room.sockets[first] && room.sockets[first] !== socket.id && !isOwnPageTransition) {
+        socket.emit('appError', { msg: '该方已有人操控' }); return;
+      }
+      room.complexSides[side] = { socketId: socket.id, name: playerName || room.complexSides?.[side]?.name || side };
+      if (wasOwnerController) room.ownerSocketId = socket.id;
+      for (const s of [first, second]) {
+        room.sockets[s] = socket.id;
+        room.playerNames[s] = playerName;
+        room.readyStatus[s] = false;
+      }
+      sockSeat[socket.id] = first;
+      if (room.phase === 'LOBBY') io.to(roomId).emit('roomUpdate', roomState(room));
+      else sendComplexReconnectState(room, first, socket);
+      return;
+    }
     // 教学模式：房主重连 — 恢复所有控制座位
     if (room.teachingMode && room.ownerControlledSeats.includes(seat)
         && (room.ownerSocketId === socket.id || !room.sockets[seat])) {
@@ -1085,7 +1115,13 @@ io.on('connection', socket => {
       }
     }
 
-    if (room.mode === 'ult') startUltGame(room);
+    if (room.mode === 'complex') {
+      if (!room.complexSides?.NS?.socketId || !room.complexSides?.EW?.socketId) {
+        socket.emit('appError', { msg: '需要南北、东西两方均就位后才能开始' }); return;
+      }
+      startComplexGame(room);
+    }
+    else if (room.mode === 'ult') startUltGame(room);
     else if (room.mode === 'problem') {
       room.phase = 'PROB_SELECT';
       socket.emit('probSelectStart', { problems: PROBLEM_LIST });
@@ -1094,6 +1130,56 @@ io.on('connection', socket => {
   });
 
   // ── 叫牌 ─────────────────────────────────────────────
+  socket.on('complexBid', ({ tricks, trump }) => {
+    const room = rooms[sockRoom[socket.id]];
+    if (!room || room.mode !== 'complex' || room.phase !== 'COMPLEX_BIDDING') return;
+    const seat = sockSeat[socket.id];
+    const side = seat && sideOf(seat);
+    if (!side || room.complexSides?.[side]?.socketId !== socket.id) return;
+    const bidTricks = Number(tricks);
+    if (!Number.isInteger(bidTricks) || bidTricks < 1 || bidTricks > 13 || !trump ||
+        trump.axis !== (side === 'NS' ? 'real' : 'imag') || !Number.isInteger(Number(trump.value)) || trump.value < 1 || trump.value > 5) {
+      socket.emit('appError', { msg: '请选择 1–13 墩及本方允许的将牌花色' }); return;
+    }
+    if (room.complexBids[side]) { socket.emit('appError', { msg: '本方已提交叫牌' }); return; }
+    room.complexBids[side] = { tricks: bidTricks, trump: { axis: trump.axis, value: Number(trump.value) } };
+    emitComplexState(room);
+    if (room.complexBids.NS && room.complexBids.EW) finishComplexBidding(room);
+  });
+
+  socket.on('complexPlayCard', ({ seat, card }) => {
+    const room = rooms[sockRoom[socket.id]];
+    if (!room || room.mode !== 'complex' || room.phase !== 'COMPLEX_PLAYING') return;
+    const controller = sockSeat[socket.id];
+    if (!controller || sideOf(controller) !== sideOf(seat) || room.currentPlayer !== seat) return;
+    const hand = room.hands[seat];
+    const chosen = hand.find(c => complexRules.cardId(c) === complexRules.cardId(card));
+    const leadCard = room.currentTrick[0]?.card;
+    if (!chosen || !complexRules.isLegalPlay(hand, chosen, leadCard, room.currentContract.trump)) {
+      socket.emit('appError', { msg: '必须跟随本墩花色' }); return;
+    }
+    room.hands[seat] = hand.filter(c => complexRules.cardId(c) !== complexRules.cardId(chosen));
+    room.currentTrick.push({ seat, card: chosen });
+    if (room.currentTrick.length === 4) {
+      const winner = complexRules.trickWinner(room.currentTrick, room.currentContract.trump);
+      room.completedTricks.push({ cards: [...room.currentTrick], winner });
+      if (sideOf(winner) === 'NS') room.nsTricks++; else room.ewTricks++;
+      room.currentTrick = [];
+      room.currentPlayer = winner;
+      if (room.completedTricks.length === 13) { endComplexGame(room); return; }
+    } else {
+      room.currentPlayer = nextSeat(seat);
+    }
+    emitComplexState(room);
+  });
+
+  socket.on('complexNextDeal', () => {
+    const room = rooms[sockRoom[socket.id]];
+    if (!room || room.mode !== 'complex' || room.phase !== 'COMPLEX_SCORING' || room.ownerSocketId !== socket.id) return;
+    room.dealNumber++;
+    startComplexGame(room);
+  });
+
   socket.on('bid', ({ bid, alert, explain }) => {
     const roomId = sockRoom[socket.id];
     const room   = rooms[roomId];
@@ -1464,10 +1550,23 @@ io.on('connection', socket => {
     const seat   = sockSeat[socket.id];
     const room   = rooms[roomId];
     if (room && seat) {
+      if (room.mode === 'complex') {
+        if (room.sockets[seat] === socket.id) {
+          const side = sideOf(seat);
+          for (const s of complexSideSeats(side)) {
+            room.sockets[s] = null;
+            room.playerNames[s] = null;
+            room.readyStatus[s] = false;
+          }
+          if (room.complexSides?.[side]) room.complexSides[side].socketId = null;
+          io.to(roomId).emit('roomUpdate', roomState(room));
+        }
+      } else {
       room.sockets[seat]     = null;
       room.playerNames[seat] = null;
       room.readyStatus[seat] = false;
       io.to(roomId).emit('playerDisconnected', { seat });
+      }
       if (room.phase === 'LOBBY' && SEATS.every(s => !room.sockets[s])) {
         delete rooms[roomId];
         console.log(`房间 ${roomId} 已清空删除`);
@@ -3573,6 +3672,85 @@ function startProblemGame(room, problemId) {
 }
 
 // 做题模式 Socket 事件
+// ── 复数桥牌 ────────────────────────────────────────────────────
+function complexSideSeats(side) { return side === 'NS' ? ['N', 'S'] : ['E', 'W']; }
+function complexSideForLobbySeat(seat) { return seat === 'N' ? 'NS' : seat === 'E' ? 'EW' : null; }
+
+function complexSnapshot(room, side) {
+  const seats = complexSideSeats(side);
+  return {
+    side,
+    phase: room.phase,
+    hands: { [seats[0]]: room.hands?.[seats[0]] || [], [seats[1]]: room.hands?.[seats[1]] || [] },
+    playerNames: room.playerNames,
+    bids: room.complexBids?.NS && room.complexBids?.EW
+      ? room.complexBids
+      : (room.complexBids?.[side] ? { [side]: room.complexBids[side] } : {}),
+    contract: room.currentContract,
+    declarer: room.declarer,
+    leader: room.leader,
+    currentPlayer: room.currentPlayer,
+    currentTrick: room.currentTrick || [],
+    completedCount: room.completedTricks?.length || 0,
+    nsTricks: room.nsTricks || 0,
+    ewTricks: room.ewTricks || 0,
+  };
+}
+
+function emitComplexState(room, event = 'complexState') {
+  for (const side of ['NS', 'EW']) {
+    const socketId = room.complexSides?.[side]?.socketId;
+    if (socketId) io.to(socketId).emit(event, complexSnapshot(room, side));
+  }
+}
+
+function sendComplexReconnectState(room, seat, sock) {
+  const side = sideOf(seat);
+  sock.emit('complexState', complexSnapshot(room, side));
+  if (room.phase === 'COMPLEX_SCORING' && room.complexResult) sock.emit('complexGameEnd', room.complexResult);
+}
+
+function startComplexGame(room) {
+  const deck = shuffle(complexRules.createComplexDeck());
+  room.hands = { N: deck.slice(0, 13), E: deck.slice(13, 26), S: deck.slice(26, 39), W: deck.slice(39, 52) };
+  room.initialHands = { N: [...room.hands.N], E: [...room.hands.E], S: [...room.hands.S], W: [...room.hands.W] };
+  room.phase = 'COMPLEX_BIDDING';
+  room.complexBids = {};
+  room.currentContract = null;
+  room.declarer = room.leader = room.currentPlayer = null;
+  room.currentTrick = [];
+  room.completedTricks = [];
+  room.nsTricks = room.ewTricks = 0;
+  room.complexResult = null;
+  emitComplexState(room, 'complexGameStart');
+}
+
+function finishComplexBidding(room) {
+  const winner = complexRules.resolveComplexBids(room.complexBids.NS, room.complexBids.EW);
+  // 叫牌以方为单位；首攻按复数桥牌规则固定为对方的西/南家。
+  room.declarer = winner.side === 'NS' ? 'N' : 'E';
+  room.currentContract = { side: winner.side, tricks: winner.tricks, trump: winner.trump, decidedBy: winner.decidedBy };
+  room.phase = 'COMPLEX_PLAYING';
+  room.leader = complexRules.openingLeader(winner.side);
+  room.currentPlayer = room.leader;
+  emitComplexState(room);
+}
+
+function endComplexGame(room) {
+  const declarerTricks = room.currentContract.side === 'NS' ? room.nsTricks : room.ewTricks;
+  room.phase = 'COMPLEX_SCORING';
+  room.complexResult = {
+    contract: room.currentContract,
+    declarer: room.declarer,
+    nsTricks: room.nsTricks,
+    ewTricks: room.ewTricks,
+    declarerTricks,
+    made: declarerTricks >= room.currentContract.tricks,
+  };
+  emitComplexState(room);
+  io.to(room.id).emit('complexGameEnd', room.complexResult);
+}
+
 io.on('connection', (socket) => {
   // ── 做题模式：选题 ───────────────────────────────────────────
   socket.on('probChooseProblem', ({ problemId }) => {

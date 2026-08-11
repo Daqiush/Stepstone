@@ -60,6 +60,9 @@ function copyRoomId() {
 }
 
 function chooseSeat(seat) {
+  if (roomMode === 'complex' && !['N', 'E'].includes(seat)) {
+    showToast('复数桥牌中请选择南北方或东西方'); return;
+  }
   if (!myRoomId) return;
   if (seat === mySeat) {
     socket.emit('leaveSeat');
@@ -178,6 +181,13 @@ socket.on('ultGameStart', ({ seat }) => {
   window.location.href = 'ult.html';
 });
 
+socket.on('complexGameStart', ({ side }) => {
+  sessionStorage.setItem('ss_complex_roomId', myRoomId);
+  sessionStorage.setItem('ss_complex_side', side);
+  sessionStorage.setItem('ss_complex_name', myName);
+  window.location.href = 'complex.html';
+});
+
 // ─── UI 工具 ───────────────────────────────────────────────────
 function enterLobby(roomId) {
   hide('section-name');
@@ -214,8 +224,8 @@ function updateSeats(playerNames) {
 function renderModeTag() {
   const el = document.getElementById('display-room-mode');
   if (!el) return;
-  const labels = { classic: '经典', ult: '大招', teaching: '教学', problem: '做题' };
-  const cls    = { classic: '', ult: 'mode-tag-ult', teaching: 'mode-tag-teach', problem: 'mode-tag-quiz' };
+  const labels = { classic: '经典', ult: '大招', teaching: '教学', problem: '做题', complex: '复数' };
+  const cls    = { classic: '', ult: 'mode-tag-ult', teaching: 'mode-tag-teach', problem: 'mode-tag-quiz', complex: 'mode-tag-complex' };
   el.textContent = labels[roomMode] || roomMode;
   el.className   = 'room-mode-tag ' + (cls[roomMode] || '');
 }
