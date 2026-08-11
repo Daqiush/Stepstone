@@ -383,14 +383,26 @@
   overflow: hidden;
 }
 .prob-opponent-backs.prob-opponent-visible {
-  flex-wrap: wrap;
-  gap: .14rem;
+  flex-direction: column;
+  align-items: flex-start;
+  flex-wrap: nowrap;
+  gap: .12rem;
   max-width: min(26vw, 220px);
   overflow: visible;
 }
 .prob-opponent-visible .prob-card-group {
-  margin-right: .2rem;
+  min-height: clamp(24px, 3.3vw, 45px);
+  margin-right: 0;
   gap: .06rem;
+}
+.prob-opponent-visible .prob-group-label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1em;
+  font-size: .78rem;
+  font-weight: 800;
+  opacity: .7;
 }
 .prob-hand-west .prob-opponent-visible .prob-card,
 .prob-hand-east .prob-opponent-visible .prob-card {

@@ -300,9 +300,12 @@ function renderVisibleOpponentHand(seat) {
   hand.forEach(c => groups[c.suit].push(c));
   getSuitOrder().forEach(suit => {
     groups[suit].sort((a, b) => b.rank - a.rank);
-    if (groups[suit].length === 0) return;
     const groupEl = document.createElement('div');
     groupEl.className = 'prob-card-group';
+    const labelEl = document.createElement('span');
+    labelEl.className = 'prob-group-label';
+    labelEl.textContent = SUIT_SYMBOL[suit];
+    groupEl.appendChild(labelEl);
     groups[suit].forEach(c => {
       const el = makeCardEl(c.suit, c.rank);
       el.classList.add('prob-card-inactive');
@@ -933,7 +936,14 @@ socket.on('probTCStart', (data) => {
 // 游戏结束（若有未收墩则延迟到收牌后显示）
 socket.on('probGameEnd', (data) => {
   G.memoryUses = data.memoryUses;
-  if (G.pendingTrickCollect) {
+  if (data.gaveUp) {
+    G.pendingTrickCollect = null;
+    G.pendingTCPassed = null;
+    G.pendingGameEnd = null;
+    const overlay = $('trick-collect-overlay');
+    if (overlay) overlay.classList.add('hidden');
+    showResult(data);
+  } else if (G.pendingTrickCollect) {
     G.pendingGameEnd = data;
   } else {
     showResult(data);

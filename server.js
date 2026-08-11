@@ -2510,6 +2510,18 @@ function checkMidTrickTrigger(trig, ps) {
     ];
     if (allCards.some(c => c.suit === suit && c.rank === rank)) return false;
   }
+  if (cond.cardsHeldBySide) {
+    const { side, cards } = cond.cardsHeldBySide;
+    const seats = side === 'NS' ? ['N', 'S'] : side === 'EW' ? ['E', 'W'] : [];
+    if (seats.length === 0 || !Array.isArray(cards)) return false;
+    for (const needed of cards) {
+      const held = seats.some(seat => {
+        const hand = side === 'NS' ? ps.hands[seat] : ps.ewHands[seat];
+        return (hand || []).some(c => c.suit === needed.suit && c.rank === needed.rank);
+      });
+      if (!held) return false;
+    }
+  }
   // 若有换牌配置，from 座位必须仍持有足够的待换出牌
   if (trig.swap) {
     const { from } = trig.swap;
@@ -2667,7 +2679,12 @@ function pickBestConsecutiveCard(candidates, seat, ewHands, nsHands, currentTric
   const scored = candidates.map(c => ({
     card: c,
     wins: ewWins(c) ? 1 : 0,
-    cashRun: cashRunAfterLead(c),
+    cashRun: currentTrick.length === 0
+      ? 1 + countEwSafeCashTricks(
+          removeCardFromSeat(ewHands, seat, c),
+          nsHands,
+          trumpSuit)
+      : cashRunAfterLead(c),
     cashTop: isHighestRemaining(c) ? 1 : 0,
     nonTrump: !isTrumpContract || c.suit !== trumpSuit ? 1 : 0,
     tops: seqTops(c.suit),
@@ -2682,6 +2699,115 @@ function pickBestConsecutiveCard(candidates, seat, ewHands, nsHands, currentTric
     b.rank - a.rank
   );
   return scored[0].card;
+}
+
+function removeCardFromSeat(hands, seat, card) {
+  return {
+    N: hands.N ? hands.N.map(c => ({ ...c })) : [],
+    S: hands.S ? hands.S.map(c => ({ ...c })) : [],
+    E: hands.E ? hands.E.map(c => ({ ...c })) : [],
+    W: hands.W ? hands.W.map(c => ({ ...c })) : [],
+    [seat]: removeCard(hands[seat] || [], card),
+  };
+}
+
+function legalCardsForSeat(hand, currentTrick) {
+  if (!currentTrick || currentTrick.length === 0) return hand || [];
+  const ledSuit = currentTrick[0].card.suit;
+  const follows = (hand || []).filter(c => c.suit === ledSuit);
+  return follows.length > 0 ? follows : (hand || []);
+}
+
+function cardSurelyWinsCurrentTrick(seat, card, currentTrick, hands, trumpSuit) {
+  const afterPlay = [...currentTrick, { seat, card }];
+  if (trickWinner2(afterPlay, trumpSuit) !== seat) return false;
+
+  let probe = afterPlay;
+  let next = nextSeat(seat);
+  while (probe.length < 4) {
+    const hand = hands[next] || [];
+    if (next === 'N' || next === 'S') {
+      const legal = legalCardsForSeat(hand, probe);
+      if (legal.some(c => trickWinner2([...probe, { seat: next, card: c }], trumpSuit) === next)) {
+        return false;
+      }
+    }
+    probe = [...probe, { seat: next, card: legalCardsForSeat(hand, probe)[0] || { suit: 'C', rank: 2 } }];
+    next = nextSeat(next);
+  }
+  return true;
+}
+
+function countEwSafeCashTricks(ewHands, nsHands, trumpSuit) {
+  const isTrumpContract = trumpSuit && trumpSuit !== 'NT';
+  const workEw = {
+    E: (ewHands.E || []).map(c => ({ ...c })),
+    W: (ewHands.W || []).map(c => ({ ...c })),
+  };
+  const workNs = {
+    N: (nsHands.N || []).map(c => ({ ...c })),
+    S: (nsHands.S || []).map(c => ({ ...c })),
+  };
+
+  function forcedFollow(hand, suit, ewRank) {
+    const cards = hand.filter(c => c.suit === suit);
+    if (cards.length === 0) return null;
+    const under = cards.filter(c => c.rank < ewRank).sort((a, b) => a.rank - b.rank);
+    if (under.length > 0) return under[0];
+    return cards.sort((a, b) => a.rank - b.rank)[0];
+  }
+
+  function safeCashCards() {
+    const cards = [
+      ...workEw.E.map(c => ({ seat: 'E', card: c })),
+      ...workEw.W.map(c => ({ seat: 'W', card: c })),
+    ];
+    return cards.filter(({ card }) => {
+      if (isTrumpContract && card.suit !== trumpSuit) {
+        if (workNs.N.every(c => c.suit !== card.suit)) return false;
+        if (workNs.S.every(c => c.suit !== card.suit)) return false;
+      }
+      const nPlay = forcedFollow(workNs.N, card.suit, card.rank);
+      const sPlay = forcedFollow(workNs.S, card.suit, card.rank);
+      return !(nPlay && nPlay.rank > card.rank) && !(sPlay && sPlay.rank > card.rank);
+    });
+  }
+
+  let tricks = 0;
+  while (true) {
+    const safe = safeCashCards().sort((a, b) =>
+      b.card.rank - a.card.rank ||
+      (a.card.suit === trumpSuit ? -1 : 0) - (b.card.suit === trumpSuit ? -1 : 0)
+    );
+    if (safe.length === 0) break;
+    const { seat, card } = safe[0];
+    workEw[seat] = removeCard(workEw[seat], card);
+    const nPlay = forcedFollow(workNs.N, card.suit, card.rank);
+    const sPlay = forcedFollow(workNs.S, card.suit, card.rank);
+    if (nPlay) workNs.N = removeCard(workNs.N, nPlay);
+    if (sPlay) workNs.S = removeCard(workNs.S, sPlay);
+    tricks++;
+  }
+  return tricks;
+}
+
+function pickWinThenCashCard(seat, ewHands, nsHands, currentTrick, trumpSuit, ewTricks, ewNeeded) {
+  if (!currentTrick || currentTrick.length === 0) return null;
+  const hands = { N: nsHands.N, S: nsHands.S, E: ewHands.E, W: ewHands.W };
+  const legal = legalCardsForSeat(ewHands[seat] || [], currentTrick);
+  const winners = legal.filter(card =>
+    cardSurelyWinsCurrentTrick(seat, card, currentTrick, hands, trumpSuit)
+  );
+  const scored = winners.map(card => {
+    const nextEwHands = removeCardFromSeat(ewHands, seat, card);
+    return {
+      card,
+      total: ewTricks + 1 + countEwSafeCashTricks(nextEwHands, nsHands, trumpSuit),
+      rank: card.rank,
+    };
+  }).filter(x => x.total >= ewNeeded);
+  scored.sort((a, b) => b.total - a.total || a.rank - b.rank);
+  return scored[0]?.card || null;
 }
 
 // 防守方桥牌启发式选牌（DDS 不可用时的回退）
@@ -2881,6 +3007,20 @@ async function probAutoDefense(room) {
   // 但不得覆盖剧本/触发器已指定的防守行为。
   if (!card && !scriptHasPlayHere && solveBoard) {
     try {
+      const ewNeeded = 14 - ps.tricksNeeded;
+      if (currentTrick.length > 0) {
+        card = pickWinThenCashCard(
+          seat,
+          ps.ewHands,
+          ps.hands,
+          currentTrick,
+          trumpSuit,
+          ps.ewTricks,
+          ewNeeded);
+        if (card) {
+          console.log(`[PROB] cash-defense follow-win seat=${seat} card=${card.suit}${card.rank}`);
+        }
+      }
       const trickLeader0 = currentTrick.length > 0 ? currentTrick[0].seat : seat;
       const ddsCheck = await solveBoard({
         trump:       trumpSuit,
@@ -2888,8 +3028,7 @@ async function probAutoDefense(room) {
         trickPlayed: currentTrick.map(e => e.card),
         hands: { N: ps.hands.N, S: ps.hands.S, E: ps.ewHands.E, W: ps.ewHands.W },
       });
-      const ewNeeded = 14 - ps.tricksNeeded;
-      if (ddsCheck && ps.ewTricks + ddsCheck.score >= ewNeeded) {
+      if (!card && ddsCheck && ps.ewTricks + ddsCheck.score >= ewNeeded) {
         const cands = ddsCheck.cards.filter(c => handHasCard(ps.ewHands[seat], c));
         card = pickBestConsecutiveCard(cands, seat, ps.ewHands, ps.hands, currentTrick, trumpSuit);
       }
@@ -2938,6 +3077,7 @@ async function probAutoDefense(room) {
     currentTrick: ps.currentTrick,
     handSizes: { E: ps.ewHands.E.length, W: ps.ewHands.W.length },
   });
+  emitProblemSpectatorHands(room);
 
   if (ps.currentTrick.length === 4) {
     probFinishTrick(room);

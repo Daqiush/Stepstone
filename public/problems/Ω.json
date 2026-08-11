@@ -121,7 +121,14 @@
         "ledBy": "N",
         "ledSuit": "H",
         "ledRankLt": 10,
-        "playedRankLt": {"seat": "S", "suit": "H", "rank": 10}
+        "playedRankLt": {"seat": "S", "suit": "H", "rank": 10},
+        "cardsHeldBySide": {
+          "side": "NS",
+          "cards": [
+            {"suit": "H", "rank": 14},
+            {"suit": "H", "rank": 13}
+          ]
+        }
       },
       "swap": {
         "from": {"seat": "E", "suit": "H"},
