@@ -1,0 +1,235 @@
+{
+  "id": "A9",
+  "name": "",
+  "flavorText": "",
+  "contract": {
+    "level": 6,
+    "suit": "H",
+    "declarer": "S",
+    "doubled": false,
+    "redoubled": false
+  },
+  "vulnerability": "NONE",
+  "tricksNeeded": 12,
+  "auction": [
+    {"seat": "S", "bid": "1NT"},
+    {"seat": "W", "bid": "PASS"},
+    {"seat": "N", "bid": "2C"},
+    {"seat": "E", "bid": "PASS"},
+    {"seat": "S", "bid": "2H"},
+    {"seat": "W", "bid": "PASS"},
+    {"seat": "N", "bid": "6H"},
+    {"seat": "E", "bid": "PASS"},
+    {"seat": "S", "bid": "PASS"},
+    {"seat": "W", "bid": "PASS"}
+  ],
+  "hands": {
+    "N": [
+      {"suit": "S", "rank": 13},
+      {"suit": "S", "rank": 12},
+      {"suit": "H", "rank": 11},
+      {"suit": "H", "rank": 10},
+      {"suit": "H", "rank": 9},
+      {"suit": "H", "rank": 8},
+      {"suit": "D", "rank": 13},
+      {"suit": "D", "rank": 9},
+      {"suit": "D", "rank": 8},
+      {"suit": "D", "rank": 7},
+      {"suit": "C", "rank": 14},
+      {"suit": "C", "rank": 13},
+      {"suit": "C", "rank": 11}
+    ],
+    "S": [
+      {"suit": "S", "rank": 3},
+      {"suit": "S", "rank": 2},
+      {"suit": "H", "rank": 14},
+      {"suit": "H", "rank": 13},
+      {"suit": "H", "rank": 3},
+      {"suit": "H", "rank": 2},
+      {"suit": "D", "rank": 14},
+      {"suit": "D", "rank": 12},
+      {"suit": "D", "rank": 11},
+      {"suit": "D", "rank": 10},
+      {"suit": "C", "rank": 12},
+      {"suit": "C", "rank": 10},
+      {"suit": "C", "rank": 7}
+    ]
+  },
+  "ewHands": {
+    "E": [
+      {"suit": "S", "rank": 14},
+      {"suit": "S", "rank": 11},
+      {"suit": "S", "rank": 9},
+      {"suit": "S", "rank": 6},
+      {"suit": "S", "rank": 4},
+      {"suit": "H", "rank": 12},
+      {"suit": "H", "rank": 7},
+      {"suit": "H", "rank": 6},
+      {"suit": "D", "rank": 4},
+      {"suit": "D", "rank": 2},
+      {"suit": "C", "rank": 4},
+      {"suit": "C", "rank": 3},
+      {"suit": "C", "rank": 2}
+    ],
+    "W": [
+      {"suit": "S", "rank": 10},
+      {"suit": "S", "rank": 8},
+      {"suit": "S", "rank": 7},
+      {"suit": "S", "rank": 5},
+      {"suit": "H", "rank": 5},
+      {"suit": "H", "rank": 4},
+      {"suit": "D", "rank": 6},
+      {"suit": "D", "rank": 5},
+      {"suit": "D", "rank": 3},
+      {"suit": "C", "rank": 9},
+      {"suit": "C", "rank": 8},
+      {"suit": "C", "rank": 6},
+      {"suit": "C", "rank": 5}
+    ]
+  },
+  "openingLeader": "W",
+  "testCases": [
+    {
+      "script": [
+        {"seat": "W", "card": {"suit": "S", "rank": "MIN"}},
+        {"seat": "E", "card": {"suit": "S", "rank": 14}},
+        {"seat": "E", "card": {"suit": "S", "rank": "MAX"}}
+      ],
+      "midTrickTriggers": [
+        {
+          "id": "tc1-e-h-min",
+          "triggerSeat": "E",
+          "repeatable": true,
+          "condition": { "ledBy": "N", "ledSuit": "H" },
+          "forcedPlay": { "suit": "H", "rank": "MIN" }
+        },
+        {
+          "id": "tc1-w-swap-on-duck",
+          "triggerSeat": "W",
+          "repeatable": true,
+          "condition": {
+            "ledBy": "N",
+            "ledSuit": "H",
+            "playedRankLt": { "seat": "S", "suit": "H", "rank": 13 },
+            "cardsHeldBy": { "seat": "S", "cards": [ {"suit": "H", "rank": 14}, {"suit": "H", "rank": 13} ] }
+          },
+          "swap": {
+            "from": [
+              { "seat": "E", "suit": "H", "rank": 12 },
+              { "seat": "E", "suit": "S", "count": 1, "dir": "min" }
+            ],
+            "to": { "seat": "W", "suit": "H" },
+            "toDir": "min"
+          }
+        }
+      ]
+    },
+    {
+      "auction": [
+        {"seat": "N", "bid": "1D"},
+        {"seat": "E", "bid": "PASS"},
+        {"seat": "S", "bid": "1H"},
+        {"seat": "W", "bid": "PASS"},
+        {"seat": "N", "bid": "4H"},
+        {"seat": "E", "bid": "PASS"},
+        {"seat": "S", "bid": "6H"},
+        {"seat": "W", "bid": "PASS"},
+        {"seat": "N", "bid": "PASS"},
+        {"seat": "E", "bid": "PASS"}
+      ],
+      "nsHands": {
+        "N": [
+          {"suit": "S", "rank": 13},
+          {"suit": "S", "rank": 12},
+          {"suit": "H", "rank": 11},
+          {"suit": "H", "rank": 10},
+          {"suit": "H", "rank": 9},
+          {"suit": "H", "rank": 8},
+          {"suit": "D", "rank": 13},
+          {"suit": "D", "rank": 9},
+          {"suit": "D", "rank": 8},
+          {"suit": "D", "rank": 7},
+          {"suit": "C", "rank": 14},
+          {"suit": "C", "rank": 13},
+          {"suit": "C", "rank": 12}
+        ],
+        "S": [
+          {"suit": "S", "rank": 3},
+          {"suit": "S", "rank": 2},
+          {"suit": "H", "rank": 14},
+          {"suit": "H", "rank": 13},
+          {"suit": "H", "rank": 7},
+          {"suit": "H", "rank": 3},
+          {"suit": "H", "rank": 2},
+          {"suit": "D", "rank": 14},
+          {"suit": "D", "rank": 12},
+          {"suit": "D", "rank": 11},
+          {"suit": "D", "rank": 10},
+          {"suit": "C", "rank": 10},
+          {"suit": "C", "rank": 7}
+        ]
+      },
+      "ewHands": {
+        "E": [
+          {"suit": "S", "rank": 14},
+          {"suit": "S", "rank": 11},
+          {"suit": "S", "rank": 9},
+          {"suit": "S", "rank": 6},
+          {"suit": "S", "rank": 4},
+          {"suit": "H", "rank": 6},
+          {"suit": "H", "rank": 4},
+          {"suit": "D", "rank": 4},
+          {"suit": "D", "rank": 2},
+          {"suit": "C", "rank": 11},
+          {"suit": "C", "rank": 4},
+          {"suit": "C", "rank": 3},
+          {"suit": "C", "rank": 2}
+        ],
+        "W": [
+          {"suit": "S", "rank": 10},
+          {"suit": "S", "rank": 8},
+          {"suit": "S", "rank": 7},
+          {"suit": "S", "rank": 5},
+          {"suit": "H", "rank": 12},
+          {"suit": "H", "rank": 5},
+          {"suit": "D", "rank": 6},
+          {"suit": "D", "rank": 5},
+          {"suit": "D", "rank": 3},
+          {"suit": "C", "rank": 9},
+          {"suit": "C", "rank": 8},
+          {"suit": "C", "rank": 6},
+          {"suit": "C", "rank": 5}
+        ]
+      },
+      "script": [
+        {"seat": "W", "card": {"suit": "S", "rank": "MIN"}},
+        {"seat": "E", "card": {"suit": "S", "rank": 14}},
+        {"seat": "E", "card": {"suit": "S", "rank": "MAX"}}
+      ],
+      "midTrickTriggers": [
+        {
+          "id": "tc2-w-h-q-win",
+          "triggerSeat": "W",
+          "repeatable": true,
+          "condition": {
+            "ledBy": "N",
+            "ledSuit": "H",
+            "cardWouldWin": { "seat": "W", "suit": "H", "rank": 12, "win": true }
+          },
+          "forcedPlay": { "suit": "H", "rank": 12 }
+        },
+        {
+          "id": "tc2-w-h-min",
+          "triggerSeat": "W",
+          "repeatable": true,
+          "condition": {
+            "ledBy": "N",
+            "ledSuit": "H",
+            "cardWouldWin": { "seat": "W", "suit": "H", "rank": 12, "win": false }
+          },
+          "forcedPlay": { "suit": "H", "rank": "MIN" }
+        }
+      ]
+    }
+  ]
+}

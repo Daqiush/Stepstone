@@ -2641,16 +2641,37 @@ function checkMidTrickTrigger(trig, ps) {
       if (!held) return false;
     }
   }
-  // 若有换牌配置，from 座位必须仍持有足够的待换出牌
+  if (cond.cardsHeldBy) {
+    // 指定座位仍持有所有指定牌（NS 用 ps.hands，EW 用 ps.ewHands）
+    const { seat, cards } = cond.cardsHeldBy;
+    if (!Array.isArray(cards)) return false;
+    const hand = (seat === 'N' || seat === 'S') ? ps.hands[seat] : ps.ewHands[seat];
+    for (const needed of cards) {
+      if (!(hand || []).some(c => c.suit === needed.suit && c.rank === needed.rank)) return false;
+    }
+  }
+  if (cond.cardWouldWin) {
+    // 指定座位若此刻打出该牌，能否确定赢下当前墩（win: true/false）
+    const cw = cond.cardWouldWin;
+    const hand = (cw.seat === 'N' || cw.seat === 'S') ? ps.hands[cw.seat] : ps.ewHands[cw.seat];
+    if (!(hand || []).some(c => c.suit === cw.suit && c.rank === cw.rank)) return false;
+    const wins = cardSurelyWinsCurrentTrick(cw.seat, { suit: cw.suit, rank: cw.rank }, ct, {
+      N: ps.hands.N, S: ps.hands.S, E: ps.ewHands.E, W: ps.ewHands.W,
+    }, ps.contract.suit);
+    if (wins !== !!cw.win) return false;
+  }
+  // 若有换牌配置，from 座位必须仍持有足够的待换出牌（from 可为数组：多组来源）
   if (trig.swap) {
-    const { from } = trig.swap;
-    const suitCards = ps.ewHands[from.seat].filter(c => c.suit === from.suit);
-    if (from.rank !== undefined) {
-      if (!suitCards.some(c => c.rank === from.rank)) return false;
-    } else if (from.count !== undefined) {
-      if (suitCards.length < from.count) return false;
-    } else {
-      if (suitCards.length === 0) return false;
+    const fromGroups = Array.isArray(trig.swap.from) ? trig.swap.from : [trig.swap.from];
+    for (const from of fromGroups) {
+      const suitCards = ps.ewHands[from.seat].filter(c => c.suit === from.suit);
+      if (from.rank !== undefined) {
+        if (!suitCards.some(c => c.rank === from.rank)) return false;
+      } else if (from.count !== undefined) {
+        if (suitCards.length < from.count) return false;
+      } else {
+        if (suitCards.length === 0) return false;
+      }
     }
   }
   return true;
@@ -2669,35 +2690,44 @@ function hasShownVoid(ps, seat, suit) {
 }
 
 // 执行中途触发器换牌：将 from 座位的指定牌移给 to 座位，以 to 座位的 N 张指定花色为对价
-// from 支持：rank（单张）、count+dir（取最小/大N张）、否则整个花色
+// from 支持：rank（单张）、count+dir（取最小/大N张）、否则整个花色；可为数组（多组来源，均移给 to 座位）
+// 对价全部回到第一个 from 组的座位；对价不会包含刚换入的牌
 function applyMidTrickTriggerSwap(trig, ps) {
   const { from, to } = trig.swap;
-  const suitCards = ps.ewHands[from.seat].filter(c => c.suit === from.suit);
-  let moveCards;
-  if (from.rank !== undefined) {
-    moveCards = suitCards.filter(c => c.rank === from.rank);
-  } else if (from.count !== undefined) {
-    const dir = from.dir || 'min';
-    moveCards = [...suitCards]
-      .sort(dir === 'min' ? (a, b) => a.rank - b.rank : (a, b) => b.rank - a.rank)
-      .slice(0, from.count);
-  } else {
-    moveCards = suitCards;
+  const fromGroups = Array.isArray(from) ? from : [from];
+  const returnSeat = fromGroups[0].seat;
+
+  let moved = [];
+  for (const fg of fromGroups) {
+    const suitCards = ps.ewHands[fg.seat].filter(c => c.suit === fg.suit);
+    let group;
+    if (fg.rank !== undefined) {
+      group = suitCards.filter(c => c.rank === fg.rank);
+    } else if (fg.count !== undefined) {
+      const dir = fg.dir || 'min';
+      group = [...suitCards]
+        .sort(dir === 'min' ? (a, b) => a.rank - b.rank : (a, b) => b.rank - a.rank)
+        .slice(0, fg.count);
+    } else {
+      group = suitCards;
+    }
+    for (const c of group) {
+      ps.ewHands[fg.seat] = removeCard(ps.ewHands[fg.seat], c);
+    }
+    moved = moved.concat(group);
   }
-  if (moveCards.length === 0) return;
-  const count = moveCards.length;
-  const compensate = [...ps.ewHands[to.seat].filter(c => c.suit === to.suit)]
+  if (moved.length === 0) return;
+
+  ps.ewHands[to.seat] = [...ps.ewHands[to.seat], ...moved];
+
+  // 对价：to 座位的 to.suit 牌（排除刚换入的），取 moved 数量，移回 returnSeat
+  const movedKeys = new Set(moved.map(c => c.suit + c.rank));
+  const compensate = [...ps.ewHands[to.seat].filter(c => c.suit === to.suit && !movedKeys.has(c.suit + c.rank))]
     .sort(trig.swap.toDir === 'min' ? (a, b) => a.rank - b.rank : (a, b) => b.rank - a.rank)
-    .slice(0, count);
-  // 逐张移出 moveCards
-  for (const c of moveCards) {
-    ps.ewHands[from.seat] = removeCard(ps.ewHands[from.seat], c);
-  }
-  ps.ewHands[to.seat] = [...ps.ewHands[to.seat], ...moveCards];
-  // 对价移回
+    .slice(0, moved.length);
   for (const c of compensate) {
     ps.ewHands[to.seat]   = removeCard(ps.ewHands[to.seat], c);
-    ps.ewHands[from.seat] = [...ps.ewHands[from.seat], c];
+    ps.ewHands[returnSeat] = [...ps.ewHands[returnSeat], c];
   }
 }
 
@@ -3391,11 +3421,13 @@ function probEndGame(room, forcedResult, gaveUp = false) {
 
   const elapsed = (Date.now() - ps.startTime) / 1000;
   const needed  = ps.tricksNeeded;
+  // 多测试点：时间限制按测试点数量等比放宽（每测试点 400s）
+  const timeLimit = 400 * (Array.isArray(ps.testCases) ? Math.max(1, ps.testCases.length) : 1);
 
   let result = forcedResult;
   if (!result) {
     if (ps.nsTricks < needed)  result = 'WA';
-    else if (elapsed > 400)    result = 'TLE';
+    else if (elapsed > timeLimit) result = 'TLE';
     else if (ps.memoryUses > 3) result = 'MLE';
     else                        result = 'AC';
   }
@@ -3663,7 +3695,8 @@ function startProblemGame(room, problemId) {
     activeScript:    tc0 ? tc0.script : null,
     scriptPtr:        0,
     scriptAbandoned:  false,
-    midTrickTriggers: prob.midTrickTriggers || [],
+    // 优先使用第一个测试点自带的触发器；否则退回题目顶级配置
+    midTrickTriggers: (tc0 && tc0.midTrickTriggers !== undefined) ? tc0.midTrickTriggers : (prob.midTrickTriggers || []),
     firedTriggers:    new Set(),
     dummyRevealed:    false,
     finished:         false,

@@ -371,13 +371,17 @@ function updateMemBadge() {
 function startTimer(serverStartTime) {
   stopTimer();
   G.startTime = serverStartTime || Date.now();
+  // 多测试点：时间限制与黄/红阈值按测试点数量等比放宽
+  const factor    = Math.max(1, G.totalTCs || 1);
+  const timeLimit = 400 * factor;
+  const warnAt    = 350 * factor;
   G.timerHandle = setInterval(() => {
     const s = Math.floor((Date.now() - G.startTime) / 1000);
     const el = $('topbar-timer');
     if (el) {
       el.textContent = s + 's';
       el.className = 'prob-timer' +
-        (s > 400 ? ' prob-timer-over' : s >= 350 ? ' prob-timer-warn' : '');
+        (s > timeLimit ? ' prob-timer-over' : s >= warnAt ? ' prob-timer-warn' : '');
     }
   }, 1000);
 }
