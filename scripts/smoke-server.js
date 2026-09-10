@@ -38,6 +38,7 @@ async function smokeServer({
     let decodersEnded = false;
     let exited = false;
     let closed = false;
+    let detached = false;
     let settled = false;
     let outcome = null;
     let startupTimer = null;
@@ -67,15 +68,39 @@ async function smokeServer({
     );
 
     const removeProcessListeners = () => {
-      child.stdout.removeListener('data', onStdoutData);
-      child.stderr.removeListener('data', onStderrData);
+      child.stdout?.removeListener?.('data', onStdoutData);
+      child.stderr?.removeListener?.('data', onStderrData);
       child.removeListener('error', onChildError);
       child.removeListener('exit', onExit);
       child.removeListener('close', onClose);
-      if (!closed) {
+      if (!closed && !detached) {
         const ignoreLateError = () => {};
         child.on('error', ignoreLateError);
         child.once('close', () => child.removeListener('error', ignoreLateError));
+      }
+    };
+
+    const detachChild = () => {
+      if (detached) return;
+      detached = true;
+      for (const [name, stream] of [['stdout', child.stdout], ['stderr', child.stderr]]) {
+        if (!stream) continue;
+        stream.removeAllListeners?.('data');
+        stream.removeAllListeners?.('error');
+        stream.removeAllListeners?.('close');
+        try {
+          stream.destroy?.();
+        } catch (error) {
+          killErrors.push(`${name}.destroy(): ${error.message}`);
+        }
+      }
+      child.removeAllListeners('error');
+      child.removeAllListeners('exit');
+      child.removeAllListeners('close');
+      try {
+        child.unref?.();
+      } catch (error) {
+        killErrors.push(`child.unref(): ${error.message}`);
       }
     };
 
@@ -99,7 +124,7 @@ async function smokeServer({
 
     const attemptKill = (signal) => {
       try {
-        child.kill(signal);
+        if (child.kill(signal) === false) killErrors.push(`${signal}: child.kill() returned false`);
       } catch (error) {
         killErrors.push(`${signal}: ${error.message}`);
       }
@@ -121,6 +146,7 @@ async function smokeServer({
       clearHandle('force');
       if (finalTimer === null) {
         finalTimer = setTimer(() => {
+          detachChild();
           settle(noCloseMessage('after exiting'));
         }, killGraceMs);
       }
@@ -154,6 +180,7 @@ async function smokeServer({
           return;
         }
         finalTimer = setTimer(() => {
+          detachChild();
           settle(noCloseMessage('after SIGTERM and SIGKILL'));
         }, killGraceMs);
       }, killGraceMs);

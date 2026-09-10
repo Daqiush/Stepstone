@@ -3,18 +3,23 @@
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const path = require('node:path');
+const { PassThrough } = require('node:stream');
 const test = require('node:test');
 
 const { smokeServer } = require('../scripts/smoke-server');
 
 function fakeChild(killImpl = () => true) {
   const child = new EventEmitter();
-  child.stdout = new EventEmitter();
-  child.stderr = new EventEmitter();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
   child.signals = [];
+  child.unrefCalls = 0;
   child.kill = (signal) => {
     child.signals.push(signal);
     return killImpl(signal, child);
+  };
+  child.unref = () => {
+    child.unrefCalls += 1;
   };
   return child;
 }
@@ -136,8 +141,22 @@ test('server startup detection is UTF-8 safe and cleanup is bounded', async (t) 
     clock.fireNext(5);
     clock.fireNext(5);
 
-    await assert.rejects(promise, /did not close.*SIGTERM.*SIGKILL/i);
+    await assert.rejects(promise, (error) => {
+      assert.match(error.message, /did not close.*SIGTERM.*SIGKILL/i);
+      assert.match(error.message, /SIGTERM.*returned false/i);
+      assert.match(error.message, /SIGKILL.*returned false/i);
+      return true;
+    });
     assert.deepEqual(child.signals, ['SIGTERM', 'SIGKILL']);
+    assert.equal(child.stdout.destroyed, true);
+    assert.equal(child.stderr.destroyed, true);
+    assert.equal(child.unrefCalls, 1);
+    for (const emitter of [child, child.stdout, child.stderr]) {
+      for (const event of ['data', 'error', 'close']) {
+        assert.equal(emitter.listenerCount(event), 0, `${event} listener remained`);
+      }
+    }
+    assert.equal(child.listenerCount('exit'), 0);
     assert.deepEqual(clock.active(), []);
   });
 
