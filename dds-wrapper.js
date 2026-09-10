@@ -29,6 +29,20 @@ function handsToBitmasks(hands) {
   return rc;
 }
 
+function outputTokens(output) {
+  return output.match(/\S+/g) || [];
+}
+
+function parseIntegerTokens(tokens, sourceName) {
+  return tokens.map((token, index) => {
+    const value = Number(token);
+    if (!Number.isFinite(value) || !Number.isInteger(value)) {
+      throw new Error(`${sourceName}: invalid integer at token ${index + 1}: ${token}`);
+    }
+    return value;
+  });
+}
+
 // calcDDTable: full double-dummy table for all 5 strains × 4 hands
 // Resolve: table[strain][hand] = total tricks (0-13)
 // strain: 0=S, 1=H, 2=D, 3=C, 4=NT   hand: 0=N, 1=E, 2=S, 3=W
@@ -43,11 +57,13 @@ function createDdsClient({ paths, runProcess, existsSync }) {
     checkBinary(paths.calc);
     const input = handsToBitmasks(hands).flat().join(' ');
     const output = await runProcess(paths.calc, input);
-    const trimmed = output.trim();
-    const nums = trimmed
-      ? trimmed.split(/\s+/).map(Number).filter(Number.isFinite)
-      : [];
-    if (nums.length !== 20) throw new Error('Unexpected DDS output length: ' + nums.length);
+    const tokens = outputTokens(output);
+    if (tokens.length !== 20) throw new Error('Unexpected DDS output length: ' + tokens.length);
+    const nums = parseIntegerTokens(tokens, 'dds_calc');
+    const invalidIndex = nums.findIndex((value) => value < 0 || value > 13);
+    if (invalidIndex !== -1) {
+      throw new Error(`dds_calc: trick value out of range at token ${invalidIndex + 1}: ${nums[invalidIndex]}`);
+    }
 
     // Build table[strain 0-4][hand 0-3]
     const table = [];
@@ -65,7 +81,7 @@ function createDdsClient({ paths, runProcess, existsSync }) {
 // }
 //
 // Returns Promise<{ score: number, cards: [{suit, rank}] }>
-//   score = tricks the trickLeader's side can guarantee from this position onwards
+//   score = tricks the current player's side can guarantee from this position onwards
 //   cards = all equally-optimal cards for the CURRENT player to play
 //
 // Note on `score` interpretation: this is the count of REMAINING tricks the CURRENT PLAYER's side
@@ -95,20 +111,36 @@ function createDdsClient({ paths, runProcess, existsSync }) {
     input += '\n';
 
     const output = await runProcess(paths.solve, input);
-    const trimmed = output.trim();
-    if (!trimmed) throw new Error('dds_solve: empty output');
-
-    const nums = trimmed.split(/\s+/).map(Number);
-    if (nums.length < 2) throw new Error('dds_solve: empty output');
+    const tokens = outputTokens(output);
+    if (tokens.length === 0) throw new Error('dds_solve: empty output');
+    const nums = parseIntegerTokens(tokens, 'dds_solve');
+    if (nums.length < 2) {
+      throw new Error(`Unexpected dds_solve output length: expected at least 2, got ${nums.length}`);
+    }
     const score    = nums[0];
     const numCards = nums[1];
+    if (score < 0 || score > 13) {
+      throw new Error(`dds_solve: score out of range: ${score}`);
+    }
+    if (numCards < 0 || numCards > 13) {
+      throw new Error(`dds_solve: numCards out of range: ${numCards}`);
+    }
+    const expectedLength = 2 + 2 * numCards;
+    if (nums.length !== expectedLength) {
+      throw new Error(`Unexpected dds_solve output length: expected ${expectedLength}, got ${nums.length}`);
+    }
+
     const cards    = [];
     for (let i = 0; i < numCards; i++) {
       const suitI = nums[2 + i * 2];
       const rank  = nums[3 + i * 2];
-      if (!isNaN(suitI) && !isNaN(rank)) {
-        cards.push({ suit: SUIT_FROM_IDX[suitI], rank });
+      if (suitI < 0 || suitI > 3) {
+        throw new Error(`dds_solve: suit index out of range for card ${i + 1}: ${suitI}`);
       }
+      if (rank < 2 || rank > 14) {
+        throw new Error(`dds_solve: rank out of range for card ${i + 1}: ${rank}`);
+      }
+      cards.push({ suit: SUIT_FROM_IDX[suitI], rank });
     }
     return { score, cards };
   }

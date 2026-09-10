@@ -8,7 +8,7 @@ const { createDdsClient } = require('../dds-wrapper');
 const PATHS = {
   calc: '/fixtures/dds_calc',
   solve: '/fixtures/dds_solve',
-  overridden: false,
+  overridden: { calc: false, solve: false },
   platform: 'darwin',
   arch: 'arm64',
 };
@@ -27,7 +27,7 @@ test('calc sends 16 hand masks to the resolved calculator and parses a 5x4 table
     existsSync: () => true,
     runProcess: async (programPath, input) => {
       invocation = { programPath, input };
-      return Array.from({ length: 20 }, (_, index) => index).join(' ');
+      return [...Array.from({ length: 14 }, (_, index) => index), 0, 1, 2, 3, 4, 5].join(' ');
     },
   });
 
@@ -41,8 +41,8 @@ test('calc sends 16 hand masks to the resolved calculator and parses a 5x4 table
     [0, 1, 2, 3],
     [4, 5, 6, 7],
     [8, 9, 10, 11],
-    [12, 13, 14, 15],
-    [16, 17, 18, 19],
+    [12, 13, 0, 1],
+    [2, 3, 4, 5],
   ]);
 });
 
@@ -88,33 +88,53 @@ test('missing calculator reports the resolved Darwin arm64 setup details', async
   });
 });
 
-test('calc rejects output that does not contain exactly 20 numbers', async () => {
-  const client = createDdsClient({
+test('calc rejects malformed table output', async () => {
+  const calcWithOutput = (output) => createDdsClient({
     paths: PATHS,
     existsSync: () => true,
-    runProcess: async () => '1 2 3',
-  });
+    runProcess: async () => output,
+  }).calcDDTable(ONE_CARD_HANDS);
+  const validValues = Array(20).fill('0');
 
   await assert.rejects(
-    client.calcDDTable(ONE_CARD_HANDS),
+    calcWithOutput('1 2 3'),
     { message: 'Unexpected DDS output length: 3' },
   );
+  await assert.rejects(calcWithOutput([...validValues.slice(0, 19), 'junk'].join(' ')));
+  await assert.rejects(calcWithOutput([...validValues.slice(0, 19), '1.5'].join(' ')));
+  await assert.rejects(calcWithOutput([...validValues.slice(0, 19), '-1'].join(' ')));
+  await assert.rejects(calcWithOutput([...validValues.slice(0, 19), '14'].join(' ')));
+  await assert.rejects(calcWithOutput([...validValues, '0'].join(' ')));
 });
 
-test('solve rejects empty output', async () => {
-  const client = createDdsClient({
+test('solve rejects empty and malformed output', async () => {
+  const solveWithOutput = (output) => createDdsClient({
     paths: PATHS,
     existsSync: () => true,
-    runProcess: async () => '',
+    runProcess: async () => output,
+  }).solveBoard({
+    trump: 'NT',
+    trickLeader: 'W',
+    trickPlayed: [],
+    hands: ONE_CARD_HANDS,
   });
 
+  await assert.rejects(solveWithOutput(''), { message: 'dds_solve: empty output' });
+  await assert.rejects(solveWithOutput('3 2 0 14'));
+  await assert.rejects(solveWithOutput('NaN 0'));
+  await assert.rejects(solveWithOutput('3.5 0'));
+  await assert.rejects(solveWithOutput('-1 0'));
+  await assert.rejects(solveWithOutput('14 0'));
+  await assert.rejects(solveWithOutput('3 NaN'));
+  await assert.rejects(solveWithOutput('3 Infinity'));
+  await assert.rejects(solveWithOutput('3 1.5'));
+  await assert.rejects(solveWithOutput('3 -1'));
+  await assert.rejects(solveWithOutput('3 14'));
+  await assert.rejects(solveWithOutput('3 1 4 14'));
+  await assert.rejects(solveWithOutput('3 1 0 1'));
+  await assert.rejects(solveWithOutput('3 1 0 15'));
+  await assert.rejects(solveWithOutput('3 1 0 10.5'));
   await assert.rejects(
-    client.solveBoard({
-      trump: 'NT',
-      trickLeader: 'W',
-      trickPlayed: [],
-      hands: ONE_CARD_HANDS,
-    }),
-    { message: 'dds_solve: empty output' },
+    solveWithOutput('3 0 99'),
   );
 });
