@@ -7,3 +7,8 @@ node_modules/
 
 # npm diagnostics
 npm-debug.log*
+
+# Native build outputs
+*.exe
+*.lib
+*.obj

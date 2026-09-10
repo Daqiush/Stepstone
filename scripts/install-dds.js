@@ -16,8 +16,8 @@ const {
 } = require('./dds-build');
 
 const PROGRAMS = [
-  { key: 'calc', name: 'dds_calc', source: 'dds_calc.cpp' },
-  { key: 'solve', name: 'dds_solve', source: 'dds_solve.cpp' },
+  { key: 'calc', name: 'dds_calc', source: path.join('native', 'dds-cli', 'dds_calc.cpp') },
+  { key: 'solve', name: 'dds_solve', source: path.join('native', 'dds-cli', 'dds_solve.cpp') },
 ];
 const SUBMODULE_ARGS = ['submodule', 'update', '--init', '--recursive', '--', 'dds'];
 const SUBMODULE_COMMAND = `git ${SUBMODULE_ARGS.join(' ')}`;
@@ -112,16 +112,20 @@ async function installDds(options = {}) {
 
   const selectedPrograms = PROGRAMS.filter((program) => !overridden[program.key]);
   const sourceRoot = path.join(absoluteRoot, 'dds', 'library', 'src');
-  const cliSources = selectedPrograms.map((program) => path.join(absoluteRoot, 'dds', program.source));
+  const cliSources = selectedPrograms.map((program) => path.join(absoluteRoot, program.source));
   const sourcePlan = deps.discoverDdsSources({
     sourceRoot,
     projectRoot: absoluteRoot,
     cliSources,
   });
+  sourcePlan.cliSources = Object.fromEntries(selectedPrograms.map((program) => [
+    program.key,
+    path.join(absoluteRoot, program.source),
+  ]));
   const releaseDir = path.join(absoluteRoot, 'dds', 'Build', 'bin', `darwin-${arch}`, 'Release');
   const compileArgsByProgram = {};
   for (const program of selectedPrograms) {
-    const cliSource = path.join(absoluteRoot, 'dds', program.source);
+    const cliSource = path.join(absoluteRoot, program.source);
     const outputPath = path.join(releaseDir, '.fingerprint-output', program.name);
     const args = deps.createCompileArgs({
       arch,

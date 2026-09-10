@@ -30,21 +30,21 @@ npm start            # 默认监听 3000 端口
 
 ### macOS 与 DDS
 
-在 Intel Mac 和 Apple Silicon Mac 上，请先安装 Xcode Command Line Tools：
+默认自动构建 DDS 时，Intel Mac 和 Apple Silicon Mac 都需要 Xcode Command Line Tools：
 
 ```bash
 xcode-select --install
 ```
 
-如果安装工具链失败，或 macOS 升级后工具链失效，可再次运行该命令进行恢复。克隆项目时推荐使用 `git clone --recurse-submodules <仓库地址>`。普通克隆也可以；若 `dds/` 源码尚未出现，macOS 上的安装脚本会初始化仓库记录的公共 DDS 子模块，也可预先手动执行：
+如果安装工具链失败，或 macOS 升级后工具链失效，可再次运行该命令进行恢复。若同时提供有效的 `DDS_CALC_PATH` 与 `DDS_SOLVE_PATH`，则不会读取源码或调用编译器。克隆项目时推荐使用 `git clone --recurse-submodules <仓库地址>`。普通克隆也可以；若 `dds/` 源码尚未出现，macOS 上的安装脚本会初始化仓库固定的官方 DDS 版本，也可预先手动执行：
 
 ```bash
 git submodule update --init --recursive -- dds
 npm install
-npm start
+node server.js
 ```
 
-源码压缩包不含 `.git` 元数据，发布时必须把 `dds/` 源码一并打包，安装脚本无法从子模块记录补回缺失内容。`npm install` 会按当前 Node 架构自动编译 DDS，已有且匹配的构建会直接复用；生成文件由 `dds/.gitignore` 忽略，不应提交到版本控制。
+源码压缩包不含 `.git` 元数据；使用默认自动构建时，发布包必须包含 `dds/` 源码，因为安装脚本无法从子模块记录补回缺失内容。`npm install` 会把主仓库 `native/dds-cli/` 中的 Stepstone 适配器与官方 DDS 源码一起按当前 Node 架构编译；已有且匹配的构建会直接复用。生成文件由 `dds/.gitignore` 忽略，不应提交到版本控制。
 
 如需使用自定义 DDS 程序，可设置 `DDS_CALC_PATH` 和/或 `DDS_SOLVE_PATH`。路径可以是绝对路径，也可以是相对于 Stepstone 项目根目录的路径；若默认程序未构建，启动服务时必须继续保留相应变量。空值、无效路径或不可执行文件会直接报错，而不会静默回退。
 
@@ -57,9 +57,9 @@ npm run test:dds:smoke
 npm run test:server:smoke
 ```
 
-若有界安装等待后报告某个 `.publish-lock`，先确认没有其他 `npm install` 正在运行，再只删除错误信息明确报告的那个锁目录，然后重新运行 `npm install`；不要清理整个 DDS 构建目录或其他锁。
+若有界安装等待后报告某个 `.publish-lock`，先确认没有其他 Stepstone DDS 安装或构建进程正在运行，再只删除错误信息明确报告的那个锁目录，然后重新运行 `npm install`；不要清理整个 DDS 构建目录或其他锁。
 
-Windows 继续使用现有的 `dds/Build/bin/x64/Release/*.exe`。这些二进制文件以及 `.lib`、`.obj` 等本机构建产物同样应保持未跟踪状态。
+Windows 继续使用本机已有的 `dds/Build/bin/x64/Release/*.exe`，也可以通过上述两个环境变量指定自行构建的程序；当前 `postinstall` 不负责为全新 Windows 克隆生成 DDS。`.exe`、`.lib`、`.obj` 等本机构建产物不进入版本控制。
 
 ## 三种对局模式
 

@@ -245,7 +245,7 @@ git commit -m "feat: use cross-platform DDS runtime"
 
 - [ ] **Step 1: Write failing pure build-planning tests**
 
-Create exactly ten tests using `fs.mkdtempSync(path.join(os.tmpdir(), 'stepstone-dds-plan-'))`, with cleanup in `test.afterEach`. Build each fixture under `<tmp>/dds/library/src` plus `<tmp>/dds/dds_calc.cpp` and `dds_solve.cpp`. Assert:
+Create exactly ten tests using `fs.mkdtempSync(path.join(os.tmpdir(), 'stepstone-dds-plan-'))`, with cleanup in `test.afterEach`. Build each fixture under `<tmp>/dds/library/src` plus Stepstone-owned CLI fixtures. The production CLI sources live under `<root>/native/dds-cli/`. Assert:
 
 1. Recursive discovery returns lexically sorted absolute `.cpp` compile sources and sorted `{ absolutePath, relativePath }` fingerprint entries for every `.cpp`, `.hpp`, and `.h` under `library/src`, plus the selected CLI files; a `.cpp` under `<tmp>/test` is excluded.
 2. Empty source discovery rejects with the source root.
@@ -444,9 +444,9 @@ if (require.main === module) {
 
 This ensures npm waits for compilation/smoke validation and receives a nonzero result. Print one actionable error and preserve compiler diagnostics.
 
-- [ ] **Step 4: Record the existing DDS gitlink source**
+- [ ] **Step 4: Record a publicly reproducible DDS gitlink source**
 
-Create `.gitmodules` without changing the pinned gitlink commit:
+Create `.gitmodules` and pin `dds` to a commit reachable from the official public remote. Keep the Stepstone-specific CLI adapters in `native/dds-cli/` so the submodule no longer depends on a local-only commit:
 
 ```ini
 [submodule "dds"]
@@ -565,7 +565,7 @@ Add a concise README section covering:
 - Xcode Command Line Tools prerequisite and `xcode-select --install` recovery.
 - `DDS_CALC_PATH` and `DDS_SOLVE_PATH`, including project-root-relative semantics.
 - `npm run test:dds:smoke` and `npm run test:server:smoke` diagnosis.
-- Windows continues using `dds/Build/bin/x64/Release/*.exe`.
+- Existing Windows setups continue using local `dds/Build/bin/x64/Release/*.exe`; a fresh Windows clone must supply/build DDS separately because postinstall only builds on macOS.
 
 - [ ] **Step 3: Verify ignored artifacts in the correct repositories**
 

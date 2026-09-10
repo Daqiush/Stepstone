@@ -116,9 +116,13 @@ test('one calc override fingerprints and builds only the solver', async () => {
 
   assert.equal(result.status, 'built');
   const discover = calls.find((call) => call[0] === 'discover')[1];
-  assert.deepEqual(discover.cliSources, [path.join(ROOT, 'dds', 'dds_solve.cpp')]);
-  assert.deepEqual(calls.filter((call) => call[0] === 'compileArgs').map((call) => call[1].cliSource), [path.join(ROOT, 'dds', 'dds_solve.cpp')]);
-  assert.deepEqual(calls.find((call) => call[0] === 'build')[1].overridden, { calc: true, solve: false });
+  assert.deepEqual(discover.cliSources, [path.join(ROOT, 'native', 'dds-cli', 'dds_solve.cpp')]);
+  assert.deepEqual(calls.filter((call) => call[0] === 'compileArgs').map((call) => call[1].cliSource), [path.join(ROOT, 'native', 'dds-cli', 'dds_solve.cpp')]);
+  const build = calls.find((call) => call[0] === 'build')[1];
+  assert.deepEqual(build.overridden, { calc: true, solve: false });
+  assert.deepEqual(build.sourcePlan.cliSources, {
+    solve: path.join(ROOT, 'native', 'dds-cli', 'dds_solve.cpp'),
+  });
 });
 
 test('missing DDS source initializes the scoped git submodule and then continues', async () => {

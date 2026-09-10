@@ -698,7 +698,7 @@ function resolveCliSource(rootDir, sourcePlan, program, index) {
   if (Array.isArray(sourcePlan.cliSources) && sourcePlan.cliSources[index]) {
     return sourcePlan.cliSources[index];
   }
-  return path.join(rootDir, 'dds', `${program.name}.cpp`);
+  return path.join(rootDir, 'native', 'dds-cli', `${program.name}.cpp`);
 }
 
 async function buildMacDds({
