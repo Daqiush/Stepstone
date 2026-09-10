@@ -2,11 +2,13 @@
 
 const childProcess = require('node:child_process');
 const path = require('node:path');
+const { StringDecoder } = require('node:string_decoder');
 
 const LISTENING_PATTERN = /Stepstone .*服务器已启动/;
 
-function withStderr(message, stderr) {
-  return stderr ? `${message}\nServer stderr:\n${stderr}` : message;
+function appendTail(tail, text, limit) {
+  const combined = tail + text;
+  return combined.length > limit ? combined.slice(-limit) : combined;
 }
 
 async function smokeServer({
@@ -16,58 +18,190 @@ async function smokeServer({
   setTimer = setTimeout,
   clearTimer = clearTimeout,
   env = {},
+  killGraceMs = 1000,
+  outputTailChars = 8192,
 } = {}) {
   const child = spawnImpl(process.execPath, ['server.js'], {
     cwd: rootDir,
     env: { ...process.env, ...env, PORT: '0' },
     windowsHide: true,
   });
-
-  let stdout = '';
-  let stderr = '';
-  let closed = false;
-  let outcomeChosen = false;
-  let resolveClose;
-  const closePromise = new Promise((resolve) => {
-    resolveClose = resolve;
-  });
+  const tailLimit = Number.isFinite(outputTailChars) && outputTailChars > 0
+    ? Math.floor(outputTailChars)
+    : 8192;
+  const stdoutDecoder = new StringDecoder('utf8');
+  const stderrDecoder = new StringDecoder('utf8');
 
   return new Promise((resolve, reject) => {
-    let timer;
+    let stdoutTail = '';
+    let stderrTail = '';
+    let decodersEnded = false;
+    let exited = false;
+    let closed = false;
+    let settled = false;
+    let outcome = null;
+    let startupTimer = null;
+    let forceKillTimer = null;
+    let finalTimer = null;
+    const killErrors = [];
 
-    const finish = async (error) => {
-      if (outcomeChosen) return;
-      outcomeChosen = true;
-      clearTimer(timer);
-
-      if (!closed) child.kill();
-      await closePromise;
-
-      if (error) reject(error);
-      else resolve();
+    const clearHandle = (name) => {
+      const handle = name === 'startup'
+        ? startupTimer
+        : name === 'force' ? forceKillTimer : finalTimer;
+      if (handle !== null) clearTimer(handle);
+      if (name === 'startup') startupTimer = null;
+      else if (name === 'force') forceKillTimer = null;
+      else finalTimer = null;
     };
 
-    child.stdout.on('data', (chunk) => {
-      stdout += chunk.toString();
-      if (LISTENING_PATTERN.test(stdout)) void finish();
-    });
-    child.stderr.on('data', (chunk) => {
-      stderr += chunk.toString();
-    });
-    child.once('error', (error) => {
-      void finish(new Error(withStderr(`Server process error: ${error.message}`, stderr), { cause: error }));
-    });
-    child.once('close', (code, signal) => {
-      closed = true;
-      resolveClose();
-      if (!outcomeChosen) {
-        const detail = signal ? `signal ${signal}` : `code ${code}`;
-        void finish(new Error(withStderr(`Server exited before startup with ${detail}.`, stderr)));
-      }
-    });
+    const endDecoders = () => {
+      if (decodersEnded) return;
+      decodersEnded = true;
+      stdoutTail = appendTail(stdoutTail, stdoutDecoder.end(), tailLimit);
+      stderrTail = appendTail(stderrTail, stderrDecoder.end(), tailLimit);
+    };
 
-    timer = setTimer(() => {
-      void finish(new Error(withStderr(`Server did not start within ${timeoutMs}ms.`, stderr)));
+    const diagnostics = () => (
+      `stdout tail:\n${stdoutTail || '(empty)'}\nstderr tail:\n${stderrTail || '(empty)'}`
+    );
+
+    const removeProcessListeners = () => {
+      child.stdout.removeListener('data', onStdoutData);
+      child.stderr.removeListener('data', onStderrData);
+      child.removeListener('error', onChildError);
+      child.removeListener('exit', onExit);
+      child.removeListener('close', onClose);
+      if (!closed) {
+        const ignoreLateError = () => {};
+        child.on('error', ignoreLateError);
+        child.once('close', () => child.removeListener('error', ignoreLateError));
+      }
+    };
+
+    const settle = (overrideMessage) => {
+      if (settled) return;
+      settled = true;
+      clearHandle('startup');
+      clearHandle('force');
+      clearHandle('final');
+      endDecoders();
+      removeProcessListeners();
+
+      const message = overrideMessage === undefined ? outcome.message : overrideMessage;
+      if (message === null) {
+        resolve();
+        return;
+      }
+      const error = new Error(`${message}\n${diagnostics()}`, { cause: outcome.cause });
+      reject(error);
+    };
+
+    const attemptKill = (signal) => {
+      try {
+        child.kill(signal);
+      } catch (error) {
+        killErrors.push(`${signal}: ${error.message}`);
+      }
+    };
+
+    const noCloseMessage = (terminationDescription) => {
+      const parts = [];
+      if (outcome.message !== null) parts.push(outcome.message);
+      parts.push(`Server child did not close ${terminationDescription}.`);
+      if (killErrors.length > 0) parts.push(`Termination errors: ${killErrors.join('; ')}`);
+      return parts.join('\n');
+    };
+
+    const waitForCloseAfterExit = () => {
+      if (closed) {
+        settle();
+        return;
+      }
+      clearHandle('force');
+      if (finalTimer === null) {
+        finalTimer = setTimer(() => {
+          settle(noCloseMessage('after exiting'));
+        }, killGraceMs);
+      }
+    };
+
+    const startCleanup = () => {
+      if (closed) {
+        settle();
+        return;
+      }
+      if (exited) {
+        waitForCloseAfterExit();
+        return;
+      }
+
+      attemptKill('SIGTERM');
+      if (closed || settled) return;
+      if (exited) {
+        waitForCloseAfterExit();
+        return;
+      }
+      forceKillTimer = setTimer(() => {
+        if (exited) {
+          waitForCloseAfterExit();
+          return;
+        }
+        attemptKill('SIGKILL');
+        if (closed || settled) return;
+        if (exited) {
+          waitForCloseAfterExit();
+          return;
+        }
+        finalTimer = setTimer(() => {
+          settle(noCloseMessage('after SIGTERM and SIGKILL'));
+        }, killGraceMs);
+      }, killGraceMs);
+    };
+
+    const chooseOutcome = (message, cause = undefined) => {
+      if (outcome !== null) return;
+      outcome = { message, cause };
+      clearHandle('startup');
+      startCleanup();
+    };
+
+    function onStdoutData(chunk) {
+      const decoded = stdoutDecoder.write(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+      stdoutTail = appendTail(stdoutTail, decoded, tailLimit);
+      if (LISTENING_PATTERN.test(stdoutTail)) chooseOutcome(null);
+    }
+    function onStderrData(chunk) {
+      const decoded = stderrDecoder.write(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+      stderrTail = appendTail(stderrTail, decoded, tailLimit);
+    }
+    function onChildError(error) {
+      chooseOutcome(`Server process error: ${error.message}`, error);
+    }
+    function onExit(code, signal) {
+      exited = true;
+      const detail = signal ? `signal ${signal}` : `code ${code}`;
+      if (outcome === null) chooseOutcome(`Server exited before startup with ${detail}.`);
+      else waitForCloseAfterExit();
+    }
+    function onClose(code, signal) {
+      exited = true;
+      closed = true;
+      if (outcome === null) {
+        const detail = signal ? `signal ${signal}` : `code ${code}`;
+        chooseOutcome(`Server exited before startup with ${detail}.`);
+        return;
+      }
+      settle();
+    }
+
+    child.stdout.on('data', onStdoutData);
+    child.stderr.on('data', onStderrData);
+    child.once('error', onChildError);
+    child.once('exit', onExit);
+    child.once('close', onClose);
+    startupTimer = setTimer(() => {
+      chooseOutcome(`Server did not start within ${timeoutMs}ms.`);
     }, timeoutMs);
   });
 }
