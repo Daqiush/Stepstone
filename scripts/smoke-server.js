@@ -83,7 +83,11 @@ async function smokeServer({
     const detachChild = () => {
       if (detached) return;
       detached = true;
-      for (const [name, stream] of [['stdout', child.stdout], ['stderr', child.stderr]]) {
+      for (const [name, stream] of [
+        ['stdin', child.stdin],
+        ['stdout', child.stdout],
+        ['stderr', child.stderr],
+      ]) {
         if (!stream) continue;
         stream.removeAllListeners?.('data');
         stream.removeAllListeners?.('error');

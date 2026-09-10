@@ -10,6 +10,7 @@ const { smokeServer } = require('../scripts/smoke-server');
 
 function fakeChild(killImpl = () => true) {
   const child = new EventEmitter();
+  child.stdin = new PassThrough();
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
   child.signals = [];
@@ -129,6 +130,9 @@ test('server startup detection is UTF-8 safe and cleanup is bounded', async (t) 
 
   await t.test('rejects within a final grace period when child termination returns false and never closes', async () => {
     const child = fakeChild(() => false);
+    child.stdin.on('data', () => {});
+    child.stdin.on('error', () => {});
+    child.stdin.on('close', () => {});
     const clock = manualTimers();
     const promise = smokeServer({
       spawnImpl: () => child,
@@ -148,10 +152,11 @@ test('server startup detection is UTF-8 safe and cleanup is bounded', async (t) 
       return true;
     });
     assert.deepEqual(child.signals, ['SIGTERM', 'SIGKILL']);
+    assert.equal(child.stdin.destroyed, true);
     assert.equal(child.stdout.destroyed, true);
     assert.equal(child.stderr.destroyed, true);
     assert.equal(child.unrefCalls, 1);
-    for (const emitter of [child, child.stdout, child.stderr]) {
+    for (const emitter of [child, child.stdin, child.stdout, child.stderr]) {
       for (const event of ['data', 'error', 'close']) {
         assert.equal(emitter.listenerCount(event), 0, `${event} listener remained`);
       }
