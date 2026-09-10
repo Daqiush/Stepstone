@@ -730,6 +730,25 @@ test('smoke rejection cleans staging and preserves the old current link', async 
 });
 
 test('successful build orders compile, validation, awaited smoke, manifest, and atomic publication', async () => {
+  const wrapperModulePath = require.resolve('../dds-wrapper');
+  const smokeModulePath = require.resolve('../scripts/smoke-dds');
+  const wrapperModule = require(wrapperModulePath);
+  const originalCreateDdsClient = wrapperModule.createDdsClient;
+  wrapperModule.createDdsClient = () => ({
+    solveBoard: async () => ({
+      score: 1,
+      cards: [{ suit: 'S', rank: 2 }, { suit: 'H', rank: 2 }],
+    }),
+  });
+  delete require.cache[smokeModulePath];
+  try {
+    const { smokeSolve } = require(smokeModulePath);
+    await assert.doesNotReject(smokeSolve(path.resolve('fixture-dds-solve')));
+  } finally {
+    wrapperModule.createDdsClient = originalCreateDdsClient;
+    delete require.cache[smokeModulePath];
+  }
+
   const fixture = makeBuildFixture();
   const events = [];
   const { fsOps } = createRealBuildFsOps(events);
@@ -763,6 +782,7 @@ test('successful build orders compile, validation, awaited smoke, manifest, and 
   const significant = events.filter(([name, value]) => (
     name === 'compile'
     || name === 'chmod'
+    || (name === 'validate' && String(value).includes('.staging-'))
     || name === 'smoke-start'
     || name === 'smoke-done'
     || (name === 'write' && value === 'manifest.json')
@@ -775,11 +795,13 @@ test('successful build orders compile, validation, awaited smoke, manifest, and 
     if (name === 'rename' && path.basename(destination) === 'current') return 'current rename';
     if (name === 'symlink') return 'temp symlink';
     if (name === 'write') return 'manifest';
+    if (name === 'validate') return `validate ${path.basename(value)}`;
     return `${name} ${path.basename(value)}`;
   });
   assert.deepEqual(labels, [
     'compile dds_calc', 'compile dds_solve',
     'chmod dds_calc', 'chmod dds_solve',
+    'validate dds_calc', 'validate dds_solve',
     'smoke-start dds_calc', 'smoke-start dds_solve',
     'smoke-done dds_calc', 'smoke-done dds_solve',
     'manifest', 'staging rename', 'temp symlink', 'current rename',

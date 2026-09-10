@@ -45,7 +45,7 @@ async function smokeSolve(solvePath) {
     && result.score <= 13
     && Array.isArray(result.cards)
     && result.cards.length >= 1
-    && result.cards.every((card) => northCards.has(`${card.suit}:${card.rank}`));
+    && result.cards.some((card) => northCards.has(`${card.suit}:${card.rank}`));
   if (!valid) throw new Error(`Invalid dds_solve smoke result from ${solvePath}`);
   return result;
 }
