@@ -5,7 +5,10 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "postinstall": "node scripts/install-dds.js",
+    "test": "node --test test/*.test.js",
+    "test:dds:smoke": "node scripts/smoke-dds.js"
   },
   "dependencies": {
     "express": "^4.18.2",
