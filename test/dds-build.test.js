@@ -200,10 +200,23 @@ function createFsHarness({ failSymlink = false, failCurrentRename = false, failR
     lstatSync(filePath) {
       const absolute = normalize(filePath);
       events.push(['lstat', absolute]);
-      if (links.has(absolute)) return { isFile: () => false, isSymbolicLink: () => true };
+      if (links.has(absolute)) return {
+        isFile: () => false,
+        isDirectory: () => false,
+        isSymbolicLink: () => true,
+      };
       const resolved = resolveLinkedPath(absolute);
-      if (files.has(resolved)) return { isFile: () => true, isSymbolicLink: () => false };
-      if (directories.has(resolved)) return { isFile: () => false, isSymbolicLink: () => false, mtimeMs: 0 };
+      if (files.has(resolved)) return {
+        isFile: () => true,
+        isDirectory: () => false,
+        isSymbolicLink: () => false,
+      };
+      if (directories.has(resolved)) return {
+        isFile: () => false,
+        isDirectory: () => true,
+        isSymbolicLink: () => false,
+        mtimeMs: 0,
+      };
       throw new Error(`ENOENT: ${absolute}`);
     },
     accessSync(filePath) {
@@ -1045,6 +1058,32 @@ test('publication returns immutable destination and reuses an identical concurre
     )), true);
   }
 
+  const linkedRelease = path.resolve('virtual-repair-symlink-directory', 'Release');
+  const linked = createFsHarness();
+  const linkedStaging = seedStaging(linked, linkedRelease, requiredPrograms);
+  seedManifest(linked, linkedStaging, fingerprintValue, requiredPrograms);
+  const linkedBuild = path.join(linkedRelease, 'builds', fingerprintValue);
+  const outsideBuild = path.resolve('virtual-repair-symlink-directory', 'outside-build');
+  linked.directory(outsideBuild);
+  for (const program of requiredPrograms) linked.file(path.join(outsideBuild, program), 'external');
+  seedManifest(linked, outsideBuild, fingerprintValue, requiredPrograms);
+  linked.link(linkedBuild, outsideBuild);
+  const linkedResult = await publishBuild({
+    stagingDir: linkedStaging,
+    releaseDir: linkedRelease,
+    fingerprint: fingerprintValue,
+    requiredPrograms,
+    validateExecutable: (filePath) => linked.fsOps.statSync(filePath),
+    fsOps: linked.fsOps,
+    ...deterministicPublishDeps(linked),
+  });
+  assert.equal(linked.fsOps.readFileSync(path.join(linkedResult.buildDir, 'dds_calc'), 'utf8'), 'binary');
+  assert.equal(linked.events.some(([name, from, to]) => (
+    name === 'rename'
+    && from === path.resolve(linkedBuild)
+    && path.basename(to).startsWith(`${fingerprintValue}.invalid-`)
+  )), true);
+
   const restoreRelease = path.resolve('virtual-quarantine-restore', 'Release');
   const canonical = path.join(restoreRelease, 'builds', fingerprintValue);
   const restoreStagePath = path.join(restoreRelease, '.staging-repair');
@@ -1260,20 +1299,29 @@ test('publication link creation or pre-switch rename failure preserves current a
   const lockDir = path.join(staleRelease, '.publish-lock');
   stale.directory(lockDir);
   stale.file(path.join(lockDir, 'owner.json'), JSON.stringify({ owner: 'dead', pid: 404, createdAt: 0 }));
-  await publishBuild({
+  let deadClock = 10_000;
+  await assert.rejects(publishBuild({
     stagingDir: staleStage,
     releaseDir: staleRelease,
     fingerprint: staleFingerprint,
     requiredPrograms: ['dds_calc', 'dds_solve'],
     validateExecutable: (filePath) => stale.fsOps.statSync(filePath),
     fsOps: stale.fsOps,
-    ...deterministicPublishDeps(stale, { lockStaleMs: 100, isProcessAlive: () => false }),
+    ...deterministicPublishDeps(stale, {
+      now: () => deadClock,
+      sleep: async (delayMs) => { deadClock += delayMs; },
+      lockRetryMs: 2,
+      lockTimeoutMs: 5,
+      lockMaxAttempts: 4,
+    }),
+  }), (error) => {
+    assert.equal(error.message.includes(lockDir), true);
+    assert.match(error.message, /remove.*lock directory manually/i);
+    return true;
   });
-  assert.equal(stale.events.some(([name, from, to]) => (
-    name === 'rename'
-    && from === path.resolve(lockDir)
-    && path.basename(to).startsWith('.publish-lock.stale-')
-  )), true);
+  assert.equal(stale.events.some(([name, from]) => name === 'rename' && from === path.resolve(lockDir)), false);
+  assert.equal(stale.fsOps.existsSync(lockDir), true);
+  assert.equal(JSON.parse(stale.fsOps.readFileSync(path.join(lockDir, 'owner.json'), 'utf8')).owner, 'dead');
 
   const liveRelease = path.resolve('virtual-live-old-lock', 'Release');
   const live = createFsHarness();
@@ -1293,12 +1341,14 @@ test('publication link creation or pre-switch rename failure preserves current a
     ...deterministicPublishDeps(live, {
       now: () => liveClock,
       sleep: async (delayMs) => { liveClock += delayMs; },
-      isProcessAlive: () => true,
       lockRetryMs: 2,
       lockTimeoutMs: 5,
-      lockStaleMs: 1,
     }),
-  }), /timed out.*publication lock/i);
+  }), (error) => {
+    assert.match(error.message, /timed out.*publication lock/i);
+    assert.match(error.message, /remove.*lock directory manually/i);
+    return true;
+  });
   assert.equal(live.events.some(([name, from]) => name === 'rename' && from === path.resolve(liveLock)), false);
 
   const metadataRelease = path.resolve('virtual-lock-metadata-failure', 'Release');
@@ -1344,7 +1394,6 @@ test('publication link creation or pre-switch rename failure preserves current a
       sleep: async (delayMs) => { waits += 1; clock += delayMs; },
       lockRetryMs: 2,
       lockTimeoutMs: 5,
-      lockStaleMs: 100,
       lockMaxAttempts: 4,
     }),
   }), /timed out.*publication lock/i);
@@ -1397,6 +1446,24 @@ test('first install creates current and failed post-verification restores its ab
     ...deterministicPublishDeps(unsafe),
   }), /staging.*direct child/i);
   assert.equal(unsafe.fsOps.readFileSync(path.join(outsideStage, 'sentinel'), 'utf8'), 'keep');
+
+  const linkedStage = path.join(unsafeRelease, '.staging-linked');
+  const linkedStageTarget = path.resolve('virtual-unsafe-boundary', 'outside-linked-stage');
+  unsafe.directory(linkedStageTarget);
+  unsafe.file(path.join(linkedStageTarget, 'dds_calc'), 'outside-binary');
+  seedManifest(unsafe, linkedStageTarget, '3'.repeat(64), ['dds_calc']);
+  unsafe.link(linkedStage, linkedStageTarget);
+  await assert.rejects(publishBuild({
+    stagingDir: linkedStage,
+    releaseDir: unsafeRelease,
+    fingerprint: '3'.repeat(64),
+    requiredPrograms: ['dds_calc'],
+    validateExecutable: (filePath) => unsafe.fsOps.statSync(filePath),
+    fsOps: unsafe.fsOps,
+    ...deterministicPublishDeps(unsafe),
+  }), /staging.*real directory|staging.*symbolic link/i);
+  assert.equal(unsafe.fsOps.readFileSync(path.join(linkedStageTarget, 'dds_calc'), 'utf8'), 'outside-binary');
+  assert.equal(unsafe.fsOps.existsSync(linkedStage), true);
 
   const invalidFingerprintStage = seedStaging(unsafe, unsafeRelease, ['dds_calc']);
   seedManifest(unsafe, invalidFingerprintStage, '../escape', ['dds_calc']);

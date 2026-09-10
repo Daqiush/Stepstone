@@ -33,7 +33,6 @@ const KNOWN_PROGRAMS = new Set(['dds_calc', 'dds_solve']);
 const DEFAULT_COMPILE_TIMEOUT_MS = 600_000;
 const DEFAULT_LOCK_RETRY_MS = 50;
 const DEFAULT_LOCK_TIMEOUT_MS = 60_000;
-const DEFAULT_LOCK_STALE_MS = 900_000;
 
 function compareLexically(left, right) {
   if (left < right) return -1;
@@ -411,13 +410,20 @@ function validatePublicationBoundary({ stagingDir, releaseDir, fingerprint }) {
   }
 }
 
-function isProcessAlive(pid) {
+function validateRealDirectory(directory, fsOps, label) {
+  let stats;
   try {
-    process.kill(pid, 0);
-    return true;
+    stats = fsOps.lstatSync(directory);
   } catch (error) {
-    if (error && error.code === 'ESRCH') return false;
-    return true;
+    throw new Error(`${label} must be a real directory (not a symbolic link): ${directory}: ${error.message}`, { cause: error });
+  }
+  if (
+    !stats
+    || typeof stats.isDirectory !== 'function'
+    || !stats.isDirectory()
+    || (typeof stats.isSymbolicLink === 'function' && stats.isSymbolicLink())
+  ) {
+    throw new Error(`${label} must be a real directory (not a symbolic link): ${directory}`);
   }
 }
 
@@ -429,9 +435,7 @@ async function acquirePublicationLock({
   sleepFn,
   lockRetryMs,
   lockTimeoutMs,
-  lockStaleMs,
   lockMaxAttempts,
-  isProcessAliveFn,
 }) {
   const lockDir = path.join(releaseDir, '.publish-lock');
   const ownerPath = path.join(lockDir, 'owner.json');
@@ -479,30 +483,18 @@ async function acquirePublicationLock({
       if (error.code !== 'EEXIST') throw new Error(`Unable to acquire DDS publication lock ${lockDir}: ${error.message}`, { cause: error });
     }
 
-    let metadata = null;
-    try {
-      metadata = JSON.parse(fsOps.readFileSync(ownerPath, 'utf8'));
-    } catch {}
-
-    const ownerPid = metadata && metadata.pid;
-    const ownerDead = Number.isInteger(ownerPid) && ownerPid > 0 && !isProcessAliveFn(ownerPid);
-    const oldEnough = metadata && Number.isFinite(metadata.createdAt) && nowFn() - metadata.createdAt > lockStaleMs;
-    if (ownerDead && oldEnough) {
-      const stalePath = path.join(releaseDir, `.publish-lock.stale-${randomSuffix(randomBytesFn)}`);
-      try {
-        fsOps.renameSync(lockDir, stalePath);
-        fsOps.rmSync(stalePath, { recursive: true, force: true });
-      } catch (error) {
-        if (fsOps.existsSync(lockDir)) await sleepFn(lockRetryMs);
-      }
-      continue;
-    }
     if (nowFn() - startedAt >= lockTimeoutMs || attempts >= lockMaxAttempts) {
-      throw new Error(`Timed out acquiring DDS publication lock ${lockDir}`);
+      throw new Error(
+        `Timed out acquiring DDS publication lock ${lockDir}. `
+        + 'Another publisher may still be active; if none is running, remove this lock directory manually and retry.',
+      );
     }
     await sleepFn(lockRetryMs);
   }
-  throw new Error(`Timed out acquiring DDS publication lock ${lockDir}`);
+  throw new Error(
+    `Timed out acquiring DDS publication lock ${lockDir}. `
+    + 'Another publisher may still be active; if none is running, remove this lock directory manually and retry.',
+  );
 }
 
 async function publishBuild({
@@ -520,12 +512,11 @@ async function publishBuild({
   sleep: sleepFn = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
   lockRetryMs = DEFAULT_LOCK_RETRY_MS,
   lockTimeoutMs = DEFAULT_LOCK_TIMEOUT_MS,
-  lockStaleMs = DEFAULT_LOCK_STALE_MS,
   lockMaxAttempts = 1_200,
-  isProcessAlive: isProcessAliveFn = isProcessAlive,
 }) {
   validatePublicationBoundary({ stagingDir, releaseDir, fingerprint });
   const fsOps = withFsDefaults(suppliedFsOps);
+  validateRealDirectory(stagingDir, fsOps, 'DDS staging path');
   const buildsDir = path.join(releaseDir, 'builds');
   const buildDir = path.join(buildsDir, fingerprint);
   const activeDir = path.join(releaseDir, 'current');
@@ -551,9 +542,7 @@ async function publishBuild({
       sleepFn,
       lockRetryMs,
       lockTimeoutMs,
-      lockStaleMs,
       lockMaxAttempts,
-      isProcessAliveFn,
     });
     const assertLockOwned = () => publicationLock.assertOwned();
     const oldTarget = fsOps.existsSync(activeDir) ? fsOps.readlinkSync(activeDir) : null;
@@ -561,6 +550,7 @@ async function publishBuild({
     if (fsOps.existsSync(buildDir)) {
       let reusable = true;
       try {
+        validateRealDirectory(buildDir, fsOps, 'DDS immutable build path');
         validateImmutableBuild({
           directory: buildDir,
           fingerprint,
@@ -606,6 +596,7 @@ async function publishBuild({
         stagingOwned = false;
       } catch (error) {
         if (!fsOps.existsSync(buildDir)) throw error;
+        validateRealDirectory(buildDir, fsOps, 'DDS immutable build path');
         validateImmutableBuild({
           directory: buildDir,
           fingerprint,
