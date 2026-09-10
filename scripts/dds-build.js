@@ -271,6 +271,8 @@ function isBuildCacheHit({
   readFileSync = fs.readFileSync,
 }) {
   try {
+    const manifestStats = lstatSync(path.join(activeDir, MANIFEST_NAME));
+    if (!manifestStats || typeof manifestStats.isFile !== 'function' || !manifestStats.isFile()) return false;
     const manifest = readManifestFn(activeDir);
     if (
       !manifest
@@ -397,6 +399,28 @@ function randomSuffix(randomBytesFn) {
   return randomBytesFn(16).toString('hex');
 }
 
+function validatePublicationBoundary({ stagingDir, releaseDir, fingerprint }) {
+  const absoluteReleaseDir = path.resolve(releaseDir);
+  const absoluteStagingDir = path.resolve(stagingDir);
+  const stagingName = path.basename(absoluteStagingDir);
+  if (path.dirname(absoluteStagingDir) !== absoluteReleaseDir || !/^\.staging-.+/.test(stagingName)) {
+    throw new Error(`DDS staging path must be a direct child named .staging-* of ${absoluteReleaseDir}: ${absoluteStagingDir}`);
+  }
+  if (!/^[0-9a-f]{64}$/.test(fingerprint)) {
+    throw new Error(`Invalid DDS build fingerprint: ${fingerprint}`);
+  }
+}
+
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error && error.code === 'ESRCH') return false;
+    return true;
+  }
+}
+
 async function acquirePublicationLock({
   releaseDir,
   fsOps,
@@ -407,6 +431,7 @@ async function acquirePublicationLock({
   lockTimeoutMs,
   lockStaleMs,
   lockMaxAttempts,
+  isProcessAliveFn,
 }) {
   const lockDir = path.join(releaseDir, '.publish-lock');
   const ownerPath = path.join(lockDir, 'owner.json');
@@ -420,7 +445,7 @@ async function acquirePublicationLock({
       fsOps.mkdirSync(lockDir);
       madeLockDirectory = true;
       try {
-        fsOps.writeFileSync(ownerPath, JSON.stringify({ owner, createdAt: nowFn() }));
+        fsOps.writeFileSync(ownerPath, JSON.stringify({ owner, pid: process.pid, createdAt: nowFn() }));
       } catch (metadataError) {
         try {
           fsOps.rmSync(lockDir, { recursive: true, force: true });
@@ -429,13 +454,23 @@ async function acquirePublicationLock({
         }
         throw metadataError;
       }
-      return () => {
+      const assertOwned = () => {
+        let metadata;
         try {
-          const metadata = JSON.parse(fsOps.readFileSync(ownerPath, 'utf8'));
-          if (metadata.owner === owner) fsOps.rmSync(lockDir, { recursive: true, force: true });
+          metadata = JSON.parse(fsOps.readFileSync(ownerPath, 'utf8'));
         } catch (error) {
-          if (fsOps.existsSync(lockDir)) throw error;
+          throw new Error(`DDS publication lock ownership lost at ${lockDir}: ${error.message}`, { cause: error });
         }
+        if (metadata.owner !== owner) {
+          throw new Error(`DDS publication lock ownership lost at ${lockDir}`);
+        }
+      };
+      return {
+        assertOwned,
+        release() {
+          assertOwned();
+          fsOps.rmSync(lockDir, { recursive: true, force: true });
+        },
       };
     } catch (error) {
       if (madeLockDirectory) {
@@ -444,20 +479,15 @@ async function acquirePublicationLock({
       if (error.code !== 'EEXIST') throw new Error(`Unable to acquire DDS publication lock ${lockDir}: ${error.message}`, { cause: error });
     }
 
-    let createdAt = null;
+    let metadata = null;
     try {
-      const metadata = JSON.parse(fsOps.readFileSync(ownerPath, 'utf8'));
-      if (Number.isFinite(metadata.createdAt)) createdAt = metadata.createdAt;
-    } catch {
-      try {
-        const stats = fsOps.lstatSync(lockDir);
-        if (Number.isFinite(stats.mtimeMs)) createdAt = stats.mtimeMs;
-      } catch {
-        continue;
-      }
-    }
+      metadata = JSON.parse(fsOps.readFileSync(ownerPath, 'utf8'));
+    } catch {}
 
-    if (createdAt !== null && nowFn() - createdAt > lockStaleMs) {
+    const ownerPid = metadata && metadata.pid;
+    const ownerDead = Number.isInteger(ownerPid) && ownerPid > 0 && !isProcessAliveFn(ownerPid);
+    const oldEnough = metadata && Number.isFinite(metadata.createdAt) && nowFn() - metadata.createdAt > lockStaleMs;
+    if (ownerDead && oldEnough) {
       const stalePath = path.join(releaseDir, `.publish-lock.stale-${randomSuffix(randomBytesFn)}`);
       try {
         fsOps.renameSync(lockDir, stalePath);
@@ -492,7 +522,9 @@ async function publishBuild({
   lockTimeoutMs = DEFAULT_LOCK_TIMEOUT_MS,
   lockStaleMs = DEFAULT_LOCK_STALE_MS,
   lockMaxAttempts = 1_200,
+  isProcessAlive: isProcessAliveFn = isProcessAlive,
 }) {
+  validatePublicationBoundary({ stagingDir, releaseDir, fingerprint });
   const fsOps = withFsDefaults(suppliedFsOps);
   const buildsDir = path.join(releaseDir, 'builds');
   const buildDir = path.join(buildsDir, fingerprint);
@@ -507,11 +539,11 @@ async function publishBuild({
   let stagingOwned = true;
   let temporaryLink = null;
   let primaryError = null;
-  let releaseLock;
+  let publicationLock;
 
   try {
     fsOps.mkdirSync(buildsDir, { recursive: true });
-    releaseLock = await acquirePublicationLock({
+    publicationLock = await acquirePublicationLock({
       releaseDir,
       fsOps,
       randomBytesFn,
@@ -521,7 +553,9 @@ async function publishBuild({
       lockTimeoutMs,
       lockStaleMs,
       lockMaxAttempts,
+      isProcessAliveFn,
     });
+    const assertLockOwned = () => publicationLock.assertOwned();
     const oldTarget = fsOps.existsSync(activeDir) ? fsOps.readlinkSync(activeDir) : null;
 
     if (fsOps.existsSync(buildDir)) {
@@ -549,12 +583,25 @@ async function publishBuild({
           buildsDir,
           `${fingerprint}.invalid-${randomSuffix(randomBytesFn)}`,
         );
+        assertLockOwned();
         fsOps.renameSync(buildDir, quarantinePath);
-        fsOps.renameSync(stagingDir, buildDir);
-        stagingOwned = false;
+        try {
+          assertLockOwned();
+          fsOps.renameSync(stagingDir, buildDir);
+          stagingOwned = false;
+        } catch (repairError) {
+          try {
+            assertLockOwned();
+            fsOps.renameSync(quarantinePath, buildDir);
+          } catch (restorationError) {
+            repairError.restorationError = restorationError;
+          }
+          throw repairError;
+        }
       }
     } else {
       try {
+        assertLockOwned();
         fsOps.renameSync(stagingDir, buildDir);
         stagingOwned = false;
       } catch (error) {
@@ -581,6 +628,7 @@ async function publishBuild({
       `.current-${randomSuffix(randomBytesFn)}`,
     );
     fsOps.symlinkSync(relativeTarget, temporaryLink, 'dir');
+    assertLockOwned();
     fsOps.renameSync(temporaryLink, activeDir);
     temporaryLink = null;
 
@@ -597,6 +645,7 @@ async function publishBuild({
     } catch (verificationError) {
       try {
         if (oldTarget === null) {
+          assertLockOwned();
           fsOps.unlinkSync(activeDir);
         } else {
           const rollbackLink = path.join(
@@ -605,6 +654,7 @@ async function publishBuild({
           );
           temporaryLink = rollbackLink;
           fsOps.symlinkSync(oldTarget, rollbackLink, 'dir');
+          assertLockOwned();
           fsOps.renameSync(rollbackLink, activeDir);
           temporaryLink = null;
         }
@@ -617,6 +667,8 @@ async function publishBuild({
     return { buildDir, activeDir };
   } catch (error) {
     primaryError = new Error(`Failed to publish DDS build at ${activeDir}: ${error.message}`, { cause: error });
+    if (error.restorationError) primaryError.restorationError = error.restorationError;
+    if (error.rollbackError) primaryError.rollbackError = error.rollbackError;
     throw primaryError;
   } finally {
     let cleanupFailure = null;
@@ -636,9 +688,9 @@ async function publishBuild({
         else cleanupFailure ||= cleanupError;
       }
     }
-    if (releaseLock) {
+    if (publicationLock) {
       try {
-        releaseLock();
+        publicationLock.release();
       } catch (cleanupError) {
         if (primaryError) attachCleanupError(primaryError, cleanupError);
         else cleanupFailure ||= cleanupError;
@@ -700,6 +752,7 @@ async function buildMacDds({
       const result = runCommandFn(compilerPath, args, {
         cwd: rootDir,
         timeout: DEFAULT_COMPILE_TIMEOUT_MS,
+        killSignal: 'SIGKILL',
       });
       if (!result || result.status !== 0 || result.error) {
         const diagnostics = [result && result.stderr, result && result.error && result.error.message]

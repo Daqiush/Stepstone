@@ -128,4 +128,20 @@ test('empty stderr reports the path and code, and synchronous spawn throws have 
     return true;
   });
   assert.equal(killCount, 1);
+
+  const ignoringChild = controlledChild();
+  const signals = [];
+  ignoringChild.kill = (signal) => {
+    signals.push(signal);
+    return false;
+  };
+  await assert.rejects(
+    runDdsProcess(programPath, '', () => ignoringChild, { timeoutMs: 5, killGraceMs: 5 }),
+    (error) => {
+      assert.match(error.message, /timed out/i);
+      assert.match(error.message, /C:\\tools\\dds\.exe/);
+      return true;
+    },
+  );
+  assert.deepEqual(signals, ['SIGTERM', 'SIGKILL']);
 });
