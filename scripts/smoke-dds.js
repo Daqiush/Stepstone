@@ -15,7 +15,16 @@ const FULL_DEAL = {
 };
 
 function createRealClient(paths) {
-  return createDdsClient({ paths, runProcess: runDdsProcess, existsSync: fs.existsSync });
+  return createDdsClient({
+    paths,
+    runProcess: (programPath, input) => runDdsProcess(
+      programPath,
+      input,
+      undefined,
+      { timeoutMs: 30_000 },
+    ),
+    existsSync: fs.existsSync,
+  });
 }
 
 async function smokeCalc(calcPath) {

@@ -108,4 +108,24 @@ test('empty stderr reports the path and code, and synchronous spawn throws have 
       return true;
     },
   );
+
+  const timedChild = controlledChild();
+  let killCount = 0;
+  timedChild.kill = () => {
+    killCount += 1;
+    setImmediate(() => {
+      timedChild.emit('error', new Error('terminated'));
+      timedChild.emit('close', null);
+    });
+    return true;
+  };
+  const timedResult = runDdsProcess(programPath, '', () => timedChild, { timeoutMs: 5 });
+  timedChild.stderr.emit('data', 'still working');
+  await assert.rejects(timedResult, (error) => {
+    assert.match(error.message, /timed out/i);
+    assert.match(error.message, /C:\\tools\\dds\.exe/);
+    assert.match(error.message, /still working/);
+    return true;
+  });
+  assert.equal(killCount, 1);
 });

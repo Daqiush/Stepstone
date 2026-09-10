@@ -19,6 +19,7 @@ const DEFAULT_FS_OPS = {
   readFileSync: fs.readFileSync,
   chmodSync: fs.chmodSync,
   statSync: fs.statSync,
+  lstatSync: fs.lstatSync,
   accessSync: fs.accessSync,
   existsSync: fs.existsSync,
   renameSync: fs.renameSync,
@@ -27,7 +28,12 @@ const DEFAULT_FS_OPS = {
   unlinkSync: fs.unlinkSync,
   rmSync: fs.rmSync,
 };
-let publicationTemporaryIndex = 0;
+const BUILD_MANIFEST_KEYS = ['arch', 'fingerprint', 'hashes', 'platform', 'programs', 'version'];
+const KNOWN_PROGRAMS = new Set(['dds_calc', 'dds_solve']);
+const DEFAULT_COMPILE_TIMEOUT_MS = 600_000;
+const DEFAULT_LOCK_RETRY_MS = 50;
+const DEFAULT_LOCK_TIMEOUT_MS = 60_000;
+const DEFAULT_LOCK_STALE_MS = 900_000;
 
 function compareLexically(left, right) {
   if (left < right) return -1;
@@ -213,6 +219,9 @@ function validateDdsOverrides(paths, { validateExecutableFn = validateExecutable
 }
 
 function isValidBuildManifest(manifest) {
+  const keys = manifest && typeof manifest === 'object' && !Array.isArray(manifest)
+    ? Object.keys(manifest).sort()
+    : [];
   return Boolean(
     manifest
     && typeof manifest === 'object'
@@ -226,6 +235,12 @@ function isValidBuildManifest(manifest) {
     && manifest.arch.length > 0
     && Array.isArray(manifest.programs)
     && manifest.programs.every((program) => typeof program === 'string' && program.length > 0)
+    && manifest.hashes
+    && typeof manifest.hashes === 'object'
+    && !Array.isArray(manifest.hashes)
+    && sameStringSet(Object.keys(manifest.hashes), manifest.programs)
+    && Object.values(manifest.hashes).every((hash) => /^[0-9a-f]{64}$/.test(hash))
+    && JSON.stringify(keys) === JSON.stringify(BUILD_MANIFEST_KEYS)
   );
 }
 
@@ -239,6 +254,7 @@ function readBuildManifest(activeDir, { readFileSync = fs.readFileSync } = {}) {
       platform: manifest.platform,
       arch: manifest.arch,
       programs: manifest.programs,
+      hashes: manifest.hashes,
     };
   } catch {
     return null;
@@ -251,14 +267,24 @@ function isBuildCacheHit({
   requiredPrograms,
   readManifestFn = readBuildManifest,
   validateExecutableFn = validateExecutable,
+  lstatSync = fs.lstatSync,
+  readFileSync = fs.readFileSync,
 }) {
   try {
     const manifest = readManifestFn(activeDir);
-    if (!manifest || manifest.fingerprint !== fingerprint || !Array.isArray(manifest.programs)) return false;
+    if (
+      !manifest
+      || manifest.fingerprint !== fingerprint
+      || !sameStringSet(manifest.programs, requiredPrograms)
+    ) return false;
 
     for (const program of requiredPrograms) {
-      if (!manifest.programs.includes(program)) return false;
-      validateExecutableFn(path.join(activeDir, program));
+      if (!KNOWN_PROGRAMS.has(program) || !manifest.programs.includes(program)) return false;
+      const programPath = path.join(activeDir, program);
+      const stats = lstatSync(programPath);
+      if (!stats.isFile()) return false;
+      validateExecutableFn(programPath);
+      if (sha256(readFileSync(programPath)) !== manifest.hashes[program]) return false;
     }
     return true;
   } catch {
@@ -284,15 +310,169 @@ function withFsDefaults(fsOps) {
   return { ...DEFAULT_FS_OPS, ...(fsOps || {}) };
 }
 
-function validatePrograms(directory, requiredPrograms, validateExecutableFn) {
-  for (const program of requiredPrograms) {
-    validateExecutableFn(path.join(directory, program));
+function sha256(contents) {
+  return crypto.createHash('sha256').update(contents).digest('hex');
+}
+
+function validateProgramNames(requiredPrograms) {
+  if (!Array.isArray(requiredPrograms) || requiredPrograms.some((program) => (
+    !KNOWN_PROGRAMS.has(program) || path.basename(program) !== program
+  ))) {
+    throw new Error(`Invalid DDS program set: ${JSON.stringify(requiredPrograms)}`);
   }
+}
+
+function sameStringSet(left, right) {
+  return Array.isArray(left)
+    && left.length === right.length
+    && [...left].sort().every((value, index) => value === [...right].sort()[index]);
+}
+
+function validateImmutableBuild({
+  directory,
+  fingerprint,
+  platform,
+  arch,
+  requiredPrograms,
+  validateExecutableFn,
+  fsOps,
+}) {
+  validateProgramNames(requiredPrograms);
+  let manifest;
+  const manifestPath = path.join(directory, MANIFEST_NAME);
+  try {
+    const manifestStats = fsOps.lstatSync(manifestPath);
+    if (!manifestStats || typeof manifestStats.isFile !== 'function' || !manifestStats.isFile()) {
+      throw new Error('manifest is not a regular file');
+    }
+    manifest = JSON.parse(fsOps.readFileSync(manifestPath, 'utf8'));
+  } catch (error) {
+    throw new Error(`Invalid DDS build manifest in ${directory}: ${error.message}`, { cause: error });
+  }
+  const keys = manifest && typeof manifest === 'object' && !Array.isArray(manifest)
+    ? Object.keys(manifest).sort()
+    : [];
+  if (
+    JSON.stringify(keys) !== JSON.stringify(BUILD_MANIFEST_KEYS)
+    || manifest.version !== 1
+    || manifest.fingerprint !== fingerprint
+    || manifest.platform !== platform
+    || manifest.arch !== arch
+    || !sameStringSet(manifest.programs, requiredPrograms)
+    || !manifest.hashes
+    || typeof manifest.hashes !== 'object'
+    || Array.isArray(manifest.hashes)
+    || !sameStringSet(Object.keys(manifest.hashes), requiredPrograms)
+  ) {
+    throw new Error(`Invalid DDS build manifest in ${directory}`);
+  }
+  for (const program of requiredPrograms) {
+    const programPath = path.join(directory, program);
+    const stats = fsOps.lstatSync(programPath);
+    if (!stats || typeof stats.isFile !== 'function' || !stats.isFile()) {
+      throw new Error(`DDS build artifact must be a regular file: ${programPath}`);
+    }
+    validateExecutableFn(programPath);
+    const expectedHash = manifest.hashes[program];
+    const actualHash = sha256(fsOps.readFileSync(programPath));
+    if (!/^[0-9a-f]{64}$/.test(expectedHash) || expectedHash !== actualHash) {
+      throw new Error(`DDS build artifact hash mismatch: ${programPath}`);
+    }
+  }
+  return manifest;
 }
 
 function removeOwnedPath(fsOps, ownedPath) {
   if (!ownedPath || !fsOps.existsSync(ownedPath)) return;
   fsOps.rmSync(ownedPath, { recursive: true, force: true });
+}
+
+function attachCleanupError(primaryError, cleanupError) {
+  if (!primaryError.cleanupError) primaryError.cleanupError = cleanupError;
+  else if (!Array.isArray(primaryError.additionalCleanupErrors)) primaryError.additionalCleanupErrors = [cleanupError];
+  else primaryError.additionalCleanupErrors.push(cleanupError);
+}
+
+function randomSuffix(randomBytesFn) {
+  return randomBytesFn(16).toString('hex');
+}
+
+async function acquirePublicationLock({
+  releaseDir,
+  fsOps,
+  randomBytesFn,
+  nowFn,
+  sleepFn,
+  lockRetryMs,
+  lockTimeoutMs,
+  lockStaleMs,
+  lockMaxAttempts,
+}) {
+  const lockDir = path.join(releaseDir, '.publish-lock');
+  const ownerPath = path.join(lockDir, 'owner.json');
+  const owner = randomSuffix(randomBytesFn);
+  const startedAt = nowFn();
+  let attempts = 0;
+
+  while (attempts++ < lockMaxAttempts) {
+    let madeLockDirectory = false;
+    try {
+      fsOps.mkdirSync(lockDir);
+      madeLockDirectory = true;
+      try {
+        fsOps.writeFileSync(ownerPath, JSON.stringify({ owner, createdAt: nowFn() }));
+      } catch (metadataError) {
+        try {
+          fsOps.rmSync(lockDir, { recursive: true, force: true });
+        } catch (cleanupError) {
+          attachCleanupError(metadataError, cleanupError);
+        }
+        throw metadataError;
+      }
+      return () => {
+        try {
+          const metadata = JSON.parse(fsOps.readFileSync(ownerPath, 'utf8'));
+          if (metadata.owner === owner) fsOps.rmSync(lockDir, { recursive: true, force: true });
+        } catch (error) {
+          if (fsOps.existsSync(lockDir)) throw error;
+        }
+      };
+    } catch (error) {
+      if (madeLockDirectory) {
+        throw new Error(`Unable to acquire DDS publication lock ${lockDir}: ${error.message}`, { cause: error });
+      }
+      if (error.code !== 'EEXIST') throw new Error(`Unable to acquire DDS publication lock ${lockDir}: ${error.message}`, { cause: error });
+    }
+
+    let createdAt = null;
+    try {
+      const metadata = JSON.parse(fsOps.readFileSync(ownerPath, 'utf8'));
+      if (Number.isFinite(metadata.createdAt)) createdAt = metadata.createdAt;
+    } catch {
+      try {
+        const stats = fsOps.lstatSync(lockDir);
+        if (Number.isFinite(stats.mtimeMs)) createdAt = stats.mtimeMs;
+      } catch {
+        continue;
+      }
+    }
+
+    if (createdAt !== null && nowFn() - createdAt > lockStaleMs) {
+      const stalePath = path.join(releaseDir, `.publish-lock.stale-${randomSuffix(randomBytesFn)}`);
+      try {
+        fsOps.renameSync(lockDir, stalePath);
+        fsOps.rmSync(stalePath, { recursive: true, force: true });
+      } catch (error) {
+        if (fsOps.existsSync(lockDir)) await sleepFn(lockRetryMs);
+      }
+      continue;
+    }
+    if (nowFn() - startedAt >= lockTimeoutMs || attempts >= lockMaxAttempts) {
+      throw new Error(`Timed out acquiring DDS publication lock ${lockDir}`);
+    }
+    await sleepFn(lockRetryMs);
+  }
+  throw new Error(`Timed out acquiring DDS publication lock ${lockDir}`);
 }
 
 async function publishBuild({
@@ -302,70 +482,169 @@ async function publishBuild({
   requiredPrograms,
   validateExecutable: validateExecutableFn = validateExecutable,
   fsOps: suppliedFsOps,
+  platform = 'darwin',
+  arch = process.arch,
+  smokeProgram,
+  randomBytes: randomBytesFn = crypto.randomBytes,
+  now: nowFn = Date.now,
+  sleep: sleepFn = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
+  lockRetryMs = DEFAULT_LOCK_RETRY_MS,
+  lockTimeoutMs = DEFAULT_LOCK_TIMEOUT_MS,
+  lockStaleMs = DEFAULT_LOCK_STALE_MS,
+  lockMaxAttempts = 1_200,
 }) {
   const fsOps = withFsDefaults(suppliedFsOps);
   const buildsDir = path.join(releaseDir, 'builds');
   const buildDir = path.join(buildsDir, fingerprint);
   const activeDir = path.join(releaseDir, 'current');
   const relativeTarget = path.join('builds', fingerprint);
-  let oldTarget = null;
+  const smokeProgramFn = smokeProgram || ((programPath, programName) => {
+    const smoke = require('./smoke-dds');
+    return programName === 'dds_calc'
+      ? smoke.smokeCalc(programPath)
+      : smoke.smokeSolve(programPath);
+  });
   let stagingOwned = true;
   let temporaryLink = null;
+  let primaryError = null;
+  let releaseLock;
 
   try {
     fsOps.mkdirSync(buildsDir, { recursive: true });
-    if (fsOps.existsSync(activeDir)) oldTarget = fsOps.readlinkSync(activeDir);
+    releaseLock = await acquirePublicationLock({
+      releaseDir,
+      fsOps,
+      randomBytesFn,
+      nowFn,
+      sleepFn,
+      lockRetryMs,
+      lockTimeoutMs,
+      lockStaleMs,
+      lockMaxAttempts,
+    });
+    const oldTarget = fsOps.existsSync(activeDir) ? fsOps.readlinkSync(activeDir) : null;
 
     if (fsOps.existsSync(buildDir)) {
-      validatePrograms(buildDir, requiredPrograms, validateExecutableFn);
+      let reusable = true;
+      try {
+        validateImmutableBuild({
+          directory: buildDir,
+          fingerprint,
+          platform,
+          arch,
+          requiredPrograms,
+          validateExecutableFn,
+          fsOps,
+        });
+        const smokeResults = await Promise.allSettled(requiredPrograms.map((program) => (
+          smokeProgramFn(path.join(buildDir, program), program)
+        )));
+        const smokeFailure = smokeResults.find((result) => result.status === 'rejected');
+        if (smokeFailure) throw smokeFailure.reason;
+      } catch {
+        reusable = false;
+      }
+      if (!reusable) {
+        const quarantinePath = path.join(
+          buildsDir,
+          `${fingerprint}.invalid-${randomSuffix(randomBytesFn)}`,
+        );
+        fsOps.renameSync(buildDir, quarantinePath);
+        fsOps.renameSync(stagingDir, buildDir);
+        stagingOwned = false;
+      }
     } else {
       try {
         fsOps.renameSync(stagingDir, buildDir);
         stagingOwned = false;
       } catch (error) {
         if (!fsOps.existsSync(buildDir)) throw error;
-        validatePrograms(buildDir, requiredPrograms, validateExecutableFn);
+        validateImmutableBuild({
+          directory: buildDir,
+          fingerprint,
+          platform,
+          arch,
+          requiredPrograms,
+          validateExecutableFn,
+          fsOps,
+        });
+        const smokeResults = await Promise.allSettled(requiredPrograms.map((program) => (
+          smokeProgramFn(path.join(buildDir, program), program)
+        )));
+        const smokeFailure = smokeResults.find((result) => result.status === 'rejected');
+        if (smokeFailure) throw smokeFailure.reason;
       }
     }
 
     temporaryLink = path.join(
       releaseDir,
-      `.current-${process.pid}-${++publicationTemporaryIndex}`,
+      `.current-${randomSuffix(randomBytesFn)}`,
     );
     fsOps.symlinkSync(relativeTarget, temporaryLink, 'dir');
     fsOps.renameSync(temporaryLink, activeDir);
     temporaryLink = null;
 
     try {
-      validatePrograms(activeDir, requiredPrograms, validateExecutableFn);
+      validateImmutableBuild({
+        directory: activeDir,
+        fingerprint,
+        platform,
+        arch,
+        requiredPrograms,
+        validateExecutableFn,
+        fsOps,
+      });
     } catch (verificationError) {
-      if (oldTarget === null) {
-        fsOps.unlinkSync(activeDir);
-      } else {
-        const rollbackLink = path.join(
-          releaseDir,
-          `.current-rollback-${process.pid}-${++publicationTemporaryIndex}`,
-        );
-        temporaryLink = rollbackLink;
-        fsOps.symlinkSync(oldTarget, rollbackLink, 'dir');
-        fsOps.renameSync(rollbackLink, activeDir);
-        temporaryLink = null;
+      try {
+        if (oldTarget === null) {
+          fsOps.unlinkSync(activeDir);
+        } else {
+          const rollbackLink = path.join(
+            releaseDir,
+            `.current-rollback-${randomSuffix(randomBytesFn)}`,
+          );
+          temporaryLink = rollbackLink;
+          fsOps.symlinkSync(oldTarget, rollbackLink, 'dir');
+          fsOps.renameSync(rollbackLink, activeDir);
+          temporaryLink = null;
+        }
+      } catch (rollbackError) {
+        verificationError.rollbackError = rollbackError;
       }
       throw verificationError;
     }
 
     return { buildDir, activeDir };
   } catch (error) {
-    throw new Error(`Failed to publish DDS build at ${activeDir}: ${error.message}`, { cause: error });
+    primaryError = new Error(`Failed to publish DDS build at ${activeDir}: ${error.message}`, { cause: error });
+    throw primaryError;
   } finally {
+    let cleanupFailure = null;
     if (temporaryLink) {
       try {
         fsOps.unlinkSync(temporaryLink);
-      } catch {
-        // Preserve the publication error; this link is private to this attempt.
+      } catch (cleanupError) {
+        if (primaryError) attachCleanupError(primaryError, cleanupError);
+        else cleanupFailure = cleanupError;
       }
     }
-    if (stagingOwned) removeOwnedPath(fsOps, stagingDir);
+    if (stagingOwned) {
+      try {
+        removeOwnedPath(fsOps, stagingDir);
+      } catch (cleanupError) {
+        if (primaryError) attachCleanupError(primaryError, cleanupError);
+        else cleanupFailure ||= cleanupError;
+      }
+    }
+    if (releaseLock) {
+      try {
+        releaseLock();
+      } catch (cleanupError) {
+        if (primaryError) attachCleanupError(primaryError, cleanupError);
+        else cleanupFailure ||= cleanupError;
+      }
+    }
+    if (cleanupFailure) throw cleanupFailure;
   }
 }
 
@@ -418,13 +697,19 @@ async function buildMacDds({
         cliSource: resolveCliSource(rootDir, sourcePlan, program, PROGRAMS.indexOf(program)),
         outputPath,
       });
-      const result = runCommandFn(compilerPath, args, { cwd: rootDir });
+      const result = runCommandFn(compilerPath, args, {
+        cwd: rootDir,
+        timeout: DEFAULT_COMPILE_TIMEOUT_MS,
+      });
       if (!result || result.status !== 0 || result.error) {
         const diagnostics = [result && result.stderr, result && result.error && result.error.message]
           .filter(Boolean)
           .join('\n');
+        const timedOut = result
+          && result.error
+          && (result.error.code === 'ETIMEDOUT' || result.error.killed === true);
         throw new Error(
-          `DDS compile failed for ${program.name} (${arch})${diagnostics ? `: ${diagnostics}` : ''}`,
+          `DDS compile ${timedOut ? 'timed out' : 'failed'} for ${program.name} (${arch})${diagnostics ? `: ${diagnostics}` : ''}`,
           result && result.error ? { cause: result.error } : undefined,
         );
       }
@@ -442,9 +727,24 @@ async function buildMacDds({
       });
     }
 
-    await Promise.all(selected.map((program) => (
+    const smokeResults = await Promise.allSettled(selected.map((program) => (
       smokeFunctions[program.key](path.join(stagingDir, program.name))
     )));
+    const smokeFailures = smokeResults
+      .filter((result) => result.status === 'rejected')
+      .map((result) => result.reason);
+    if (smokeFailures.length > 0) {
+      const primarySmokeError = smokeFailures[0] instanceof Error
+        ? smokeFailures[0]
+        : new Error(String(smokeFailures[0]));
+      if (smokeFailures.length > 1) primarySmokeError.siblingErrors = smokeFailures.slice(1);
+      throw primarySmokeError;
+    }
+
+    const hashes = Object.fromEntries(selected.map((program) => [
+      program.name,
+      sha256(fsOps.readFileSync(path.join(stagingDir, program.name))),
+    ]));
 
     fsOps.writeFileSync(path.join(stagingDir, MANIFEST_NAME), `${JSON.stringify({
       version: 1,
@@ -452,6 +752,7 @@ async function buildMacDds({
       platform: 'darwin',
       arch,
       programs: compiledPrograms,
+      hashes,
     }, null, 2)}\n`);
 
     const published = await publishBuild({
@@ -465,6 +766,12 @@ async function buildMacDds({
         accessSync: fsOps.accessSync,
       }),
       fsOps,
+      platform: 'darwin',
+      arch,
+      smokeProgram: (programPath, programName) => {
+        const program = PROGRAMS.find((candidate) => candidate.name === programName);
+        return smokeFunctions[program.key](programPath);
+      },
     });
     stagingOwned = false;
     return {
@@ -472,8 +779,13 @@ async function buildMacDds({
       ...published,
       compiledPrograms,
     };
-  } finally {
-    if (stagingOwned) removeOwnedPath(fsOps, stagingDir);
+  } catch (error) {
+    try {
+      if (stagingOwned) removeOwnedPath(fsOps, stagingDir);
+    } catch (cleanupError) {
+      attachCleanupError(error, cleanupError);
+    }
+    throw error;
   }
 }
 

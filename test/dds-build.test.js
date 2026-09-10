@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -99,6 +100,7 @@ function createRealBuildFsOps(events, initialLinks = new Map()) {
         events.push(['validate', filePath]);
         return fs.statSync(resolveLinkedPath(filePath));
       },
+      lstatSync(filePath) { return fs.lstatSync(resolveLinkedPath(filePath)); },
       accessSync(filePath, mode) { return fs.accessSync(resolveLinkedPath(filePath), mode); },
       existsSync(filePath) { return links.has(filePath) || fs.existsSync(resolveLinkedPath(filePath)); },
       renameSync(from, to) {
@@ -158,9 +160,14 @@ function createFsHarness({ failSymlink = false, failCurrentRename = false } = {}
     }
   };
   const fsOps = {
-    mkdirSync(directory) {
+    mkdirSync(directory, options = {}) {
       const absolute = normalize(directory);
       events.push(['mkdir', absolute]);
+      if (directories.has(absolute) && !options.recursive) {
+        const error = new Error(`EEXIST: ${absolute}`);
+        error.code = 'EEXIST';
+        throw error;
+      }
       for (let current = absolute; !directories.has(current); current = path.dirname(current)) {
         directories.add(current);
         if (path.dirname(current) === current) break;
@@ -189,6 +196,15 @@ function createFsHarness({ failSymlink = false, failCurrentRename = false } = {}
       events.push(['stat', normalize(filePath)]);
       if (!files.has(resolved)) throw new Error(`ENOENT: ${filePath}`);
       return { isFile: () => true };
+    },
+    lstatSync(filePath) {
+      const absolute = normalize(filePath);
+      events.push(['lstat', absolute]);
+      if (links.has(absolute)) return { isFile: () => false, isSymbolicLink: () => true };
+      const resolved = resolveLinkedPath(absolute);
+      if (files.has(resolved)) return { isFile: () => true, isSymbolicLink: () => false };
+      if (directories.has(resolved)) return { isFile: () => false, isSymbolicLink: () => false, mtimeMs: 0 };
+      throw new Error(`ENOENT: ${absolute}`);
     },
     accessSync(filePath) {
       const resolved = resolveLinkedPath(filePath);
@@ -270,6 +286,38 @@ function seedStaging(harness, releaseDir, programs = ['dds_calc', 'dds_solve']) 
   harness.directory(stagingDir);
   for (const program of programs) harness.file(path.join(stagingDir, program));
   return stagingDir;
+}
+
+function artifactHash(contents) {
+  return crypto.createHash('sha256').update(contents).digest('hex');
+}
+
+function seedManifest(harness, directory, fingerprintValue, programs, arch = 'arm64') {
+  const hashes = {};
+  for (const program of programs) {
+    hashes[program] = artifactHash(harness.files.get(path.resolve(directory, program)));
+  }
+  harness.file(path.join(directory, 'manifest.json'), JSON.stringify({
+    version: 1,
+    fingerprint: fingerprintValue,
+    platform: 'darwin',
+    arch,
+    programs,
+    hashes,
+  }));
+}
+
+function deterministicPublishDeps(harness, overrides = {}) {
+  let randomIndex = 0;
+  return {
+    platform: 'darwin',
+    arch: 'arm64',
+    smokeProgram: async (programPath) => harness.fsOps.statSync(programPath),
+    randomBytes: () => Buffer.alloc(16, ++randomIndex),
+    now: () => 10_000,
+    sleep: async () => {},
+    ...overrides,
+  };
 }
 
 function fingerprint(plan, compileArgsByProgram = { dds_calc: ['semantic-calc'] }) {
@@ -474,12 +522,19 @@ test('build manifests parse only when present, valid JSON, and structurally vali
     platform: 'darwin',
     arch: 'arm64',
     programs: ['dds_calc', 'dds_solve'],
+    hashes: {
+      dds_calc: artifactHash('dds_calc'),
+      dds_solve: artifactHash('dds_solve'),
+    },
   };
 
   assert.equal(readBuildManifest(path.join(activeDir, 'missing')), null);
   fs.writeFileSync(manifestPath, '{bad json');
   assert.equal(readBuildManifest(activeDir), null);
   fs.writeFileSync(manifestPath, JSON.stringify({ ...valid, programs: 'dds_calc' }));
+  assert.equal(readBuildManifest(activeDir), null);
+  const { hashes, ...missingHashes } = valid;
+  fs.writeFileSync(manifestPath, JSON.stringify(missingHashes));
   assert.equal(readBuildManifest(activeDir), null);
   fs.writeFileSync(manifestPath, JSON.stringify(valid));
   assert.deepEqual(readBuildManifest(activeDir), valid);
@@ -489,9 +544,10 @@ test('cache hits require the matching manifest, every named program, and executa
   const activeDir = makeTempDirectory();
   const expectedFingerprint = 'b'.repeat(64);
   const programs = ['dds_calc', 'dds_solve'];
+  const hashes = Object.fromEntries(programs.map((program) => [program, artifactHash(program)]));
   for (const program of programs) writeFile(path.join(activeDir, program), program);
   const writeManifest = (value) => fs.writeFileSync(path.join(activeDir, 'manifest.json'), JSON.stringify(value));
-  writeManifest({ version: 1, fingerprint: expectedFingerprint, platform: 'darwin', arch: 'arm64', programs });
+  writeManifest({ version: 1, fingerprint: expectedFingerprint, platform: 'darwin', arch: 'arm64', programs, hashes });
   const nonExecutable = new Set();
   const validateExecutableFn = (filePath) => {
     if (!fs.existsSync(filePath) || nonExecutable.has(filePath)) throw new Error(`not executable: ${filePath}`);
@@ -506,13 +562,23 @@ test('cache hits require the matching manifest, every named program, and executa
 
   assert.equal(check(), true);
   assert.equal(check('c'.repeat(64)), false);
-  writeManifest({ version: 1, fingerprint: expectedFingerprint, platform: 'darwin', arch: 'arm64', programs: ['dds_calc'] });
+  writeManifest({
+    version: 1,
+    fingerprint: expectedFingerprint,
+    platform: 'darwin',
+    arch: 'arm64',
+    programs: ['dds_calc'],
+    hashes: { dds_calc: hashes.dds_calc },
+  });
   assert.equal(check(), false);
-  writeManifest({ version: 1, fingerprint: expectedFingerprint, platform: 'darwin', arch: 'arm64', programs });
+  writeManifest({ version: 1, fingerprint: expectedFingerprint, platform: 'darwin', arch: 'arm64', programs, hashes });
   fs.rmSync(path.join(activeDir, 'dds_solve'));
   assert.equal(check(), false);
   writeFile(path.join(activeDir, 'dds_solve'), 'dds_solve');
   nonExecutable.add(path.join(activeDir, 'dds_solve'));
+  assert.equal(check(), false);
+  nonExecutable.clear();
+  fs.writeFileSync(path.join(activeDir, 'dds_solve'), 'tampered');
   assert.equal(check(), false);
 });
 
@@ -626,6 +692,11 @@ test('both programs are compiled into one staging directory before publication',
   assert.deepEqual(result.compiledPrograms, ['dds_calc', 'dds_solve']);
   assert.equal(path.dirname(outputs[0]), path.dirname(outputs[1]));
   assert.match(path.dirname(outputs[0]), /\.staging-/);
+  const manifest = JSON.parse(fs.readFileSync(path.join(result.buildDir, 'manifest.json'), 'utf8'));
+  assert.deepEqual(Object.keys(manifest.hashes).sort(), ['dds_calc', 'dds_solve']);
+  for (const program of manifest.programs) {
+    assert.equal(manifest.hashes[program], artifactHash(fs.readFileSync(path.join(result.buildDir, program))));
+  }
 });
 
 test('one override builds, smokes, and publishes only the other program in both directions', async () => {
@@ -672,6 +743,7 @@ test('compile failure reports diagnostics and architecture, cleans staging, and 
   const current = path.join(fixture.releaseDir, 'current');
   const events = [];
   const { fsOps } = createRealBuildFsOps(events, new Map([[current, path.join('builds', 'old')]]));
+  let compileOptions;
 
   await assert.rejects(
     buildMacDds({
@@ -684,15 +756,56 @@ test('compile failure reports diagnostics and architecture, cleans staging, and 
       sourcePlan: fixture.sourcePlan,
       fingerprint: '4'.repeat(64),
       releaseDir: fixture.releaseDir,
-      runCommand: () => ({ status: 1, stdout: '', stderr: 'compile broke', error: null }),
+      runCommand: (command, args, options) => {
+        compileOptions = options;
+        return { status: 1, stdout: '', stderr: 'compile broke', error: null };
+      },
       smokeCalc: async () => {},
       smokeSolve: async () => {},
       fsOps,
     }),
     (error) => error.message.includes('compile broke') && error.message.includes('arm64'),
   );
+  assert.equal(compileOptions.timeout, 600_000);
   assert.equal(fsOps.readlinkSync(current), path.join('builds', 'old'));
   assert.equal(fs.readdirSync(fixture.releaseDir).some((name) => name.startsWith('.staging-')), false);
+
+  const cleanupFixture = makeBuildFixture();
+  const cleanupEvents = [];
+  const cleanupAdapter = createRealBuildFsOps(cleanupEvents);
+  const cleanupFsOps = {
+    ...cleanupAdapter.fsOps,
+    rmSync() { throw new Error('cleanup broke'); },
+  };
+  await assert.rejects(
+    buildMacDds({
+      rootDir: cleanupFixture.projectRoot,
+      arch: 'arm64',
+      compilerPath: '/usr/bin/clang++',
+      compilerIdentity: 'fixture clang',
+      paths: {},
+      overridden: { calc: false, solve: false },
+      sourcePlan: cleanupFixture.sourcePlan,
+      fingerprint: 'c'.repeat(64),
+      releaseDir: cleanupFixture.releaseDir,
+      runCommand: () => ({
+        status: null,
+        stdout: '',
+        stderr: 'compiler still running',
+        error: Object.assign(new Error('spawnSync timed out'), { code: 'ETIMEDOUT' }),
+      }),
+      smokeCalc: async () => {},
+      smokeSolve: async () => {},
+      fsOps: cleanupFsOps,
+    }),
+    (error) => {
+      assert.match(error.message, /timed out/i);
+      assert.match(error.message, /dds_calc/);
+      assert.match(error.message, /compiler still running/);
+      assert.match(error.cleanupError.message, /cleanup broke/);
+      return true;
+    },
+  );
 });
 
 test('smoke rejection cleans staging and preserves the old current link', async () => {
@@ -707,8 +820,9 @@ test('smoke rejection cleans staging and preserves the old current link', async 
     return { status: 0, stdout: '', stderr: '', error: null };
   };
 
-  await assert.rejects(
-    buildMacDds({
+  let finishSolve;
+  let solveFinished = false;
+  const operation = buildMacDds({
       rootDir: fixture.projectRoot,
       arch: 'arm64',
       compilerPath: '/usr/bin/clang++',
@@ -720,32 +834,52 @@ test('smoke rejection cleans staging and preserves the old current link', async 
       releaseDir: fixture.releaseDir,
       runCommand: runner,
       smokeCalc: async () => { throw new Error('calc smoke broke'); },
-      smokeSolve: async () => {},
+      smokeSolve: async () => {
+        await new Promise((resolve) => { finishSolve = resolve; });
+        solveFinished = true;
+      },
       fsOps,
-    }),
-    /calc smoke broke/,
-  );
+    });
+  await new Promise((resolve) => setImmediate(resolve));
+  const stagedBeforeSiblingSettles = fs.readdirSync(fixture.releaseDir).some((name) => name.startsWith('.staging-'));
+  finishSolve();
+  await assert.rejects(operation, /calc smoke broke/);
+  assert.equal(stagedBeforeSiblingSettles, true);
+  assert.equal(solveFinished, true);
   assert.equal(fsOps.readlinkSync(current), path.join('builds', 'old'));
   assert.equal(fs.readdirSync(fixture.releaseDir).some((name) => name.startsWith('.staging-')), false);
 });
 
 test('successful build orders compile, validation, awaited smoke, manifest, and atomic publication', async () => {
   const wrapperModulePath = require.resolve('../dds-wrapper');
+  const processModulePath = require.resolve('../dds-process');
   const smokeModulePath = require.resolve('../scripts/smoke-dds');
   const wrapperModule = require(wrapperModulePath);
+  const processModule = require(processModulePath);
   const originalCreateDdsClient = wrapperModule.createDdsClient;
-  wrapperModule.createDdsClient = () => ({
-    solveBoard: async () => ({
-      score: 1,
-      cards: [{ suit: 'S', rank: 2 }, { suit: 'H', rank: 2 }],
-    }),
+  const originalRunDdsProcess = processModule.runDdsProcess;
+  let smokeTimeout;
+  processModule.runDdsProcess = (programPath, input, spawnImpl, options) => {
+    smokeTimeout = options.timeoutMs;
+    return Promise.resolve('fixture');
+  };
+  wrapperModule.createDdsClient = ({ runProcess }) => ({
+    solveBoard: async () => {
+      await runProcess('fixture-dds-solve', 'fixture-input');
+      return {
+        score: 1,
+        cards: [{ suit: 'S', rank: 2 }, { suit: 'H', rank: 2 }],
+      };
+    },
   });
   delete require.cache[smokeModulePath];
   try {
     const { smokeSolve } = require(smokeModulePath);
     await assert.doesNotReject(smokeSolve(path.resolve('fixture-dds-solve')));
+    assert.equal(smokeTimeout, 30_000);
   } finally {
     wrapperModule.createDdsClient = originalCreateDdsClient;
+    processModule.runDdsProcess = originalRunDdsProcess;
     delete require.cache[smokeModulePath];
   }
 
@@ -819,6 +953,7 @@ test('publication returns immutable destination and reuses an identical concurre
   const requiredPrograms = ['dds_calc', 'dds_solve'];
   const first = createFsHarness();
   const firstStaging = seedStaging(first, releaseDir, requiredPrograms);
+  seedManifest(first, firstStaging, fingerprintValue, requiredPrograms);
   const result = await publishBuild({
     stagingDir: firstStaging,
     releaseDir,
@@ -826,6 +961,7 @@ test('publication returns immutable destination and reuses an identical concurre
     requiredPrograms,
     validateExecutable: (filePath) => first.fsOps.statSync(filePath),
     fsOps: first.fsOps,
+    ...deterministicPublishDeps(first),
   });
   assert.deepEqual(result, {
     buildDir: path.join(releaseDir, 'builds', fingerprintValue),
@@ -835,8 +971,11 @@ test('publication returns immutable destination and reuses an identical concurre
 
   const concurrent = createFsHarness();
   const concurrentStaging = seedStaging(concurrent, releaseDir, requiredPrograms);
+  seedManifest(concurrent, concurrentStaging, fingerprintValue, requiredPrograms);
   concurrent.directory(result.buildDir);
   for (const program of requiredPrograms) concurrent.file(path.join(result.buildDir, program));
+  seedManifest(concurrent, result.buildDir, fingerprintValue, requiredPrograms);
+  const reusedSmokes = [];
   await publishBuild({
     stagingDir: concurrentStaging,
     releaseDir,
@@ -844,9 +983,52 @@ test('publication returns immutable destination and reuses an identical concurre
     requiredPrograms,
     validateExecutable: (filePath) => concurrent.fsOps.statSync(filePath),
     fsOps: concurrent.fsOps,
+    ...deterministicPublishDeps(concurrent, {
+      smokeProgram: async (programPath) => reusedSmokes.push(programPath),
+    }),
   });
   assert.equal(concurrent.events.some(([name, from]) => name === 'rename' && from === path.resolve(concurrentStaging)), false);
   assert.equal(concurrent.events.some(([name, target]) => name === 'rm' && target === path.resolve(concurrentStaging)), true);
+  assert.deepEqual(reusedSmokes, requiredPrograms.map((program) => path.join(result.buildDir, program)));
+
+  for (const defect of ['missing-manifest', 'corrupt-manifest', 'hash-mismatch', 'symlink-artifact']) {
+    const repairRelease = path.resolve(`virtual-repair-${defect}`, 'Release');
+    const repair = createFsHarness();
+    const repairStaging = seedStaging(repair, repairRelease, requiredPrograms);
+    seedManifest(repair, repairStaging, fingerprintValue, requiredPrograms);
+    const corruptBuild = path.join(repairRelease, 'builds', fingerprintValue);
+    repair.directory(corruptBuild);
+    for (const program of requiredPrograms) repair.file(path.join(corruptBuild, program), 'corrupt');
+    if (defect !== 'missing-manifest') seedManifest(repair, corruptBuild, fingerprintValue, requiredPrograms);
+    if (defect === 'corrupt-manifest') {
+      repair.file(path.join(corruptBuild, 'manifest.json'), '{not-json');
+    }
+    if (defect === 'hash-mismatch') {
+      const manifestPath = path.join(corruptBuild, 'manifest.json');
+      const manifest = JSON.parse(repair.files.get(path.resolve(manifestPath)));
+      manifest.hashes.dds_calc = '0'.repeat(64);
+      repair.file(manifestPath, JSON.stringify(manifest));
+    }
+    if (defect === 'symlink-artifact') {
+      repair.files.delete(path.resolve(corruptBuild, 'dds_calc'));
+      repair.link(path.join(corruptBuild, 'dds_calc'), path.join('..', 'outside-dds'));
+    }
+    const repaired = await publishBuild({
+      stagingDir: repairStaging,
+      releaseDir: repairRelease,
+      fingerprint: fingerprintValue,
+      requiredPrograms,
+      validateExecutable: (filePath) => repair.fsOps.statSync(filePath),
+      fsOps: repair.fsOps,
+      ...deterministicPublishDeps(repair),
+    });
+    assert.equal(repair.fsOps.readFileSync(path.join(repaired.buildDir, 'dds_calc'), 'utf8'), 'binary');
+    assert.equal(repair.events.some(([name, from, to]) => (
+      name === 'rename'
+      && from === path.resolve(corruptBuild)
+      && path.basename(to).startsWith(`${fingerprintValue}.invalid-`)
+    )), true);
+  }
 });
 
 test('post-switch validation uses current and atomically restores the old target on failure', async () => {
@@ -855,6 +1037,7 @@ test('post-switch validation uses current and atomically restores the old target
   const current = path.join(releaseDir, 'current');
   seedPublishedBuild(harness, releaseDir);
   const stagingDir = seedStaging(harness, releaseDir);
+  seedManifest(harness, stagingDir, '8'.repeat(64), ['dds_calc', 'dds_solve']);
   const finalPaths = [];
   await assert.rejects(
     publishBuild({
@@ -868,12 +1051,75 @@ test('post-switch validation uses current and atomically restores the old target
         return harness.fsOps.statSync(filePath);
       },
       fsOps: harness.fsOps,
+      ...deterministicPublishDeps(harness),
     }),
     /post-switch verify broke/,
   );
   assert.deepEqual(finalPaths.slice(-2), [path.join(current, 'dds_calc'), path.join(current, 'dds_solve')]);
   assert.equal(harness.fsOps.readlinkSync(current), path.join('builds', 'old'));
   assert.equal(harness.events.filter(([name, , to]) => name === 'rename' && to === path.resolve(current)).length, 2);
+
+  const serializedRelease = path.resolve('virtual-serialized', 'Release');
+  const serialized = createFsHarness();
+  seedPublishedBuild(serialized, serializedRelease);
+  const firstFingerprint = 'd'.repeat(64);
+  const secondFingerprint = 'e'.repeat(64);
+  const firstBuild = path.join(serializedRelease, 'builds', firstFingerprint);
+  serialized.directory(firstBuild);
+  serialized.file(path.join(firstBuild, 'dds_calc'));
+  seedManifest(serialized, firstBuild, firstFingerprint, ['dds_calc']);
+  const firstUnusedStage = seedStaging(serialized, serializedRelease, ['dds_calc']);
+  seedManifest(serialized, firstUnusedStage, firstFingerprint, ['dds_calc']);
+  const secondStage = path.join(serializedRelease, '.staging-second');
+  serialized.directory(secondStage);
+  serialized.file(path.join(secondStage, 'dds_solve'));
+  seedManifest(serialized, secondStage, secondFingerprint, ['dds_solve']);
+  let releaseFirstSmoke;
+  const firstSmokeStarted = new Promise((resolve) => {
+    releaseFirstSmoke = { started: resolve, finish: null };
+  });
+  const firstSmokeGate = new Promise((resolve) => { releaseFirstSmoke.finish = resolve; });
+  let retrySecond;
+  const secondWait = new Promise((resolve) => { retrySecond = resolve; });
+  const firstPublish = publishBuild({
+    stagingDir: firstUnusedStage,
+    releaseDir: serializedRelease,
+    fingerprint: firstFingerprint,
+    requiredPrograms: ['dds_calc'],
+    validateExecutable: (filePath) => serialized.fsOps.statSync(filePath),
+    fsOps: serialized.fsOps,
+    ...deterministicPublishDeps(serialized, {
+      smokeProgram: async () => {
+        releaseFirstSmoke.started();
+        await firstSmokeGate;
+      },
+    }),
+  });
+  await Promise.race([
+    firstSmokeStarted,
+    firstPublish.then(() => { throw new Error('publication bypassed reused-build smoke'); }),
+  ]);
+  let secondValidated = false;
+  const secondPublish = publishBuild({
+    stagingDir: secondStage,
+    releaseDir: serializedRelease,
+    fingerprint: secondFingerprint,
+    requiredPrograms: ['dds_solve'],
+    validateExecutable(filePath) {
+      secondValidated = true;
+      return serialized.fsOps.statSync(filePath);
+    },
+    fsOps: serialized.fsOps,
+    ...deterministicPublishDeps(serialized, { sleep: () => secondWait }),
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(secondValidated, false);
+  assert.equal(serialized.fsOps.readlinkSync(path.join(serializedRelease, 'current')), path.join('builds', 'old'));
+  releaseFirstSmoke.finish();
+  await firstPublish;
+  retrySecond();
+  await secondPublish;
+  assert.equal(serialized.fsOps.readlinkSync(path.join(serializedRelease, 'current')), path.join('builds', secondFingerprint));
 });
 
 test('publication link creation or pre-switch rename failure preserves current and names its path', async () => {
@@ -886,6 +1132,7 @@ test('publication link creation or pre-switch rename failure preserves current a
     const current = path.join(releaseDir, 'current');
     seedPublishedBuild(harness, releaseDir);
     const stagingDir = seedStaging(harness, releaseDir);
+    seedManifest(harness, stagingDir, '9'.repeat(64), ['dds_calc', 'dds_solve']);
     await assert.rejects(
       publishBuild({
         stagingDir,
@@ -894,11 +1141,84 @@ test('publication link creation or pre-switch rename failure preserves current a
         requiredPrograms: ['dds_calc', 'dds_solve'],
         validateExecutable: (filePath) => harness.fsOps.statSync(filePath),
         fsOps: harness.fsOps,
+        ...deterministicPublishDeps(harness),
       }),
       (error) => error.message.includes(current),
     );
     assert.equal(harness.fsOps.readlinkSync(current), path.join('builds', 'old'));
   }
+
+  const staleRelease = path.resolve('virtual-stale-lock', 'Release');
+  const stale = createFsHarness();
+  const staleFingerprint = 'f'.repeat(64);
+  const staleStage = seedStaging(stale, staleRelease);
+  seedManifest(stale, staleStage, staleFingerprint, ['dds_calc', 'dds_solve']);
+  const lockDir = path.join(staleRelease, '.publish-lock');
+  stale.directory(lockDir);
+  stale.file(path.join(lockDir, 'owner.json'), JSON.stringify({ owner: 'dead', createdAt: 0 }));
+  await publishBuild({
+    stagingDir: staleStage,
+    releaseDir: staleRelease,
+    fingerprint: staleFingerprint,
+    requiredPrograms: ['dds_calc', 'dds_solve'],
+    validateExecutable: (filePath) => stale.fsOps.statSync(filePath),
+    fsOps: stale.fsOps,
+    ...deterministicPublishDeps(stale, { lockStaleMs: 100 }),
+  });
+  assert.equal(stale.events.some(([name, from, to]) => (
+    name === 'rename'
+    && from === path.resolve(lockDir)
+    && path.basename(to).startsWith('.publish-lock.stale-')
+  )), true);
+
+  const metadataRelease = path.resolve('virtual-lock-metadata-failure', 'Release');
+  const metadata = createFsHarness();
+  const metadataStage = seedStaging(metadata, metadataRelease);
+  seedManifest(metadata, metadataStage, staleFingerprint, ['dds_calc', 'dds_solve']);
+  const metadataFsOps = {
+    ...metadata.fsOps,
+    writeFileSync(filePath, contents) {
+      if (path.basename(filePath) === 'owner.json') throw new Error('owner metadata broke');
+      return metadata.fsOps.writeFileSync(filePath, contents);
+    },
+  };
+  await assert.rejects(publishBuild({
+    stagingDir: metadataStage,
+    releaseDir: metadataRelease,
+    fingerprint: staleFingerprint,
+    requiredPrograms: ['dds_calc', 'dds_solve'],
+    validateExecutable: (filePath) => metadata.fsOps.statSync(filePath),
+    fsOps: metadataFsOps,
+    ...deterministicPublishDeps(metadata),
+  }), /owner metadata broke/);
+  assert.equal(metadata.fsOps.existsSync(path.join(metadataRelease, '.publish-lock')), false);
+
+  const boundedRelease = path.resolve('virtual-bounded-lock', 'Release');
+  const bounded = createFsHarness();
+  const boundedStage = seedStaging(bounded, boundedRelease);
+  seedManifest(bounded, boundedStage, staleFingerprint, ['dds_calc', 'dds_solve']);
+  const boundedLock = path.join(boundedRelease, '.publish-lock');
+  bounded.directory(boundedLock);
+  bounded.file(path.join(boundedLock, 'owner.json'), JSON.stringify({ owner: 'live', createdAt: 1_000 }));
+  let clock = 1_000;
+  let waits = 0;
+  await assert.rejects(publishBuild({
+    stagingDir: boundedStage,
+    releaseDir: boundedRelease,
+    fingerprint: staleFingerprint,
+    requiredPrograms: ['dds_calc', 'dds_solve'],
+    validateExecutable: (filePath) => bounded.fsOps.statSync(filePath),
+    fsOps: bounded.fsOps,
+    ...deterministicPublishDeps(bounded, {
+      now: () => clock,
+      sleep: async (delayMs) => { waits += 1; clock += delayMs; },
+      lockRetryMs: 2,
+      lockTimeoutMs: 5,
+      lockStaleMs: 100,
+      lockMaxAttempts: 4,
+    }),
+  }), /timed out.*publication lock/i);
+  assert.equal(waits, 3);
 });
 
 test('first install creates current and failed post-verification restores its absence', async () => {
@@ -907,16 +1227,19 @@ test('first install creates current and failed post-verification restores its ab
     const harness = createFsHarness();
     const current = path.join(releaseDir, 'current');
     const stagingDir = seedStaging(harness, releaseDir);
+    const fingerprintValue = (shouldFail ? 'a' : 'b').repeat(64);
+    seedManifest(harness, stagingDir, fingerprintValue, ['dds_calc', 'dds_solve']);
     const operation = publishBuild({
       stagingDir,
       releaseDir,
-      fingerprint: (shouldFail ? 'a' : 'b').repeat(64),
+      fingerprint: fingerprintValue,
       requiredPrograms: ['dds_calc', 'dds_solve'],
       validateExecutable(filePath) {
         if (shouldFail && filePath.startsWith(`${current}${path.sep}`)) throw new Error('first verify broke');
         return harness.fsOps.statSync(filePath);
       },
       fsOps: harness.fsOps,
+      ...deterministicPublishDeps(harness),
     });
     if (shouldFail) {
       await assert.rejects(operation, /first verify broke/);
