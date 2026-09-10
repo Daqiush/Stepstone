@@ -8,10 +8,12 @@ const test = require('node:test');
 
 const {
   canonicalizeCompileArgs,
+  buildMacDds,
   computeBuildFingerprint,
   createCompileArgs,
   discoverDdsSources,
   isBuildCacheHit,
+  publishBuild,
   readBuildManifest,
   validateDdsOverrides,
   validateExecutable,
@@ -48,6 +50,226 @@ function makeSourceFixture() {
   writeFile(path.join(sourceRoot, 'calc_dd_table.cpp'), 'int calc_table() { return 0; }');
   writeFile(path.join(sourceRoot, 'nested', 'solve_board.cpp'), 'int solve_board() { return 0; }');
   return { projectRoot, sourceRoot, cliSources };
+}
+
+function makeBuildFixture() {
+  const fixture = makeSourceFixture();
+  const releaseDir = path.join(fixture.projectRoot, 'dds', 'Build', 'bin', 'darwin-arm64', 'Release');
+  fs.mkdirSync(releaseDir, { recursive: true });
+  return {
+    ...fixture,
+    releaseDir,
+    sourcePlan: {
+      compileSources: discoverDdsSources(fixture).compileSources,
+      includeDir: fixture.sourceRoot,
+      cliSources: { calc: fixture.cliSources[0], solve: fixture.cliSources[1] },
+    },
+  };
+}
+
+function createRealBuildFsOps(events, initialLinks = new Map()) {
+  const links = new Map(initialLinks);
+  const resolveLinkedPath = (filePath) => {
+    for (const [linkPath, target] of links) {
+      if (filePath === linkPath || filePath.startsWith(`${linkPath}${path.sep}`)) {
+        return path.join(path.resolve(path.dirname(linkPath), target), path.relative(linkPath, filePath));
+      }
+    }
+    return filePath;
+  };
+  return {
+    links,
+    fsOps: {
+      mkdirSync: fs.mkdirSync,
+      mkdtempSync(prefix) {
+        const result = fs.mkdtempSync(prefix);
+        events.push(['stage', result]);
+        return result;
+      },
+      writeFileSync(filePath, contents) {
+        events.push(['write', path.basename(filePath)]);
+        return fs.writeFileSync(filePath, contents);
+      },
+      readFileSync(filePath, encoding) { return fs.readFileSync(resolveLinkedPath(filePath), encoding); },
+      chmodSync(filePath, mode) {
+        events.push(['chmod', path.basename(filePath), mode]);
+        return fs.chmodSync(filePath, mode);
+      },
+      statSync(filePath) {
+        events.push(['validate', filePath]);
+        return fs.statSync(resolveLinkedPath(filePath));
+      },
+      accessSync(filePath, mode) { return fs.accessSync(resolveLinkedPath(filePath), mode); },
+      existsSync(filePath) { return links.has(filePath) || fs.existsSync(resolveLinkedPath(filePath)); },
+      renameSync(from, to) {
+        events.push(['rename', from, to]);
+        if (links.has(from)) {
+          const target = links.get(from);
+          links.delete(from);
+          links.set(to, target);
+          return;
+        }
+        return fs.renameSync(from, to);
+      },
+      symlinkSync(target, linkPath) {
+        events.push(['symlink', target, linkPath]);
+        if (links.has(linkPath) || fs.existsSync(linkPath)) throw new Error(`EEXIST: ${linkPath}`);
+        links.set(linkPath, target);
+      },
+      readlinkSync(linkPath) {
+        if (!links.has(linkPath)) throw new Error(`EINVAL: ${linkPath}`);
+        return links.get(linkPath);
+      },
+      unlinkSync(filePath) {
+        events.push(['unlink', filePath]);
+        if (!links.delete(filePath)) fs.unlinkSync(filePath);
+      },
+      rmSync(filePath, options) {
+        events.push(['rm', filePath]);
+        links.delete(filePath);
+        return fs.rmSync(filePath, options);
+      },
+    },
+  };
+}
+
+function createFsHarness({ failSymlink = false, failCurrentRename = false } = {}) {
+  const directories = new Set();
+  const files = new Map();
+  const links = new Map();
+  const events = [];
+  let temporaryIndex = 0;
+  const normalize = (value) => path.resolve(value);
+  const within = (candidate, parent) => candidate === parent || candidate.startsWith(`${parent}${path.sep}`);
+  const resolveLinkedPath = (filePath) => {
+    const absolute = normalize(filePath);
+    for (const [linkPath, target] of links) {
+      if (within(absolute, linkPath)) {
+        return path.join(path.resolve(path.dirname(linkPath), target), path.relative(linkPath, absolute));
+      }
+    }
+    return absolute;
+  };
+  const moveEntries = (collection, from, to) => {
+    for (const [entry, value] of [...collection.entries()]) {
+      if (!within(entry, from)) continue;
+      collection.delete(entry);
+      collection.set(path.join(to, path.relative(from, entry)), value);
+    }
+  };
+  const fsOps = {
+    mkdirSync(directory) {
+      const absolute = normalize(directory);
+      events.push(['mkdir', absolute]);
+      for (let current = absolute; !directories.has(current); current = path.dirname(current)) {
+        directories.add(current);
+        if (path.dirname(current) === current) break;
+      }
+    },
+    mkdtempSync(prefix) {
+      const result = normalize(`${prefix}${++temporaryIndex}`);
+      directories.add(result);
+      events.push(['mkdtemp', result]);
+      return result;
+    },
+    writeFileSync(filePath, contents) {
+      const absolute = normalize(filePath);
+      files.set(absolute, Buffer.isBuffer(contents) ? contents : String(contents));
+      events.push(['write', absolute]);
+    },
+    readFileSync(filePath, encoding) {
+      const resolved = resolveLinkedPath(filePath);
+      if (!files.has(resolved)) throw new Error(`ENOENT: ${filePath}`);
+      const value = files.get(resolved);
+      return encoding ? value.toString() : value;
+    },
+    chmodSync(filePath, mode) { events.push(['chmod', normalize(filePath), mode]); },
+    statSync(filePath) {
+      const resolved = resolveLinkedPath(filePath);
+      events.push(['stat', normalize(filePath)]);
+      if (!files.has(resolved)) throw new Error(`ENOENT: ${filePath}`);
+      return { isFile: () => true };
+    },
+    accessSync(filePath) {
+      const resolved = resolveLinkedPath(filePath);
+      events.push(['access', normalize(filePath)]);
+      if (!files.has(resolved)) throw new Error(`EACCES: ${filePath}`);
+    },
+    existsSync(filePath) {
+      const absolute = normalize(filePath);
+      const resolved = resolveLinkedPath(absolute);
+      return links.has(absolute) || directories.has(resolved) || files.has(resolved);
+    },
+    renameSync(fromPath, toPath) {
+      const from = normalize(fromPath);
+      const to = normalize(toPath);
+      events.push(['rename', from, to]);
+      if (failCurrentRename && path.basename(to) === 'current') throw new Error(`rename denied: ${to}`);
+      if (links.has(from)) {
+        const target = links.get(from);
+        links.delete(from);
+        links.set(to, target);
+        return;
+      }
+      if (!directories.has(from)) throw new Error(`ENOENT: ${from}`);
+      directories.delete(from);
+      directories.add(to);
+      moveEntries(files, from, to);
+      moveEntries(links, from, to);
+    },
+    symlinkSync(target, linkPath) {
+      const absolute = normalize(linkPath);
+      events.push(['symlink', target, absolute]);
+      if (failSymlink) throw new Error(`symlink denied: ${absolute}`);
+      links.set(absolute, target);
+    },
+    readlinkSync(linkPath) {
+      const absolute = normalize(linkPath);
+      if (!links.has(absolute)) throw new Error(`EINVAL: ${absolute}`);
+      return links.get(absolute);
+    },
+    unlinkSync(filePath) {
+      const absolute = normalize(filePath);
+      events.push(['unlink', absolute]);
+      if (!links.delete(absolute) && !files.delete(absolute)) throw new Error(`ENOENT: ${absolute}`);
+    },
+    rmSync(filePath) {
+      const absolute = normalize(filePath);
+      events.push(['rm', absolute]);
+      directories.delete(absolute);
+      for (const candidate of [...files.keys()]) if (within(candidate, absolute)) files.delete(candidate);
+      for (const candidate of [...links.keys()]) if (within(candidate, absolute)) links.delete(candidate);
+    },
+  };
+  return {
+    directories,
+    files,
+    links,
+    events,
+    fsOps,
+    directory(directory) { directories.add(normalize(directory)); },
+    file(filePath, contents = 'binary') {
+      const absolute = normalize(filePath);
+      directories.add(path.dirname(absolute));
+      files.set(absolute, contents);
+    },
+    link(linkPath, target) { links.set(normalize(linkPath), target); },
+  };
+}
+
+function seedPublishedBuild(harness, releaseDir, name = 'old', programs = ['dds_calc', 'dds_solve']) {
+  const buildDir = path.join(releaseDir, 'builds', name);
+  harness.directory(buildDir);
+  for (const program of programs) harness.file(path.join(buildDir, program));
+  harness.link(path.join(releaseDir, 'current'), path.join('builds', name));
+  return buildDir;
+}
+
+function seedStaging(harness, releaseDir, programs = ['dds_calc', 'dds_solve']) {
+  const stagingDir = path.join(releaseDir, '.staging-fixture');
+  harness.directory(stagingDir);
+  for (const program of programs) harness.file(path.join(stagingDir, program));
+  return stagingDir;
 }
 
 function fingerprint(plan, compileArgsByProgram = { dds_calc: ['semantic-calc'] }) {
@@ -364,5 +586,323 @@ test('override validation is independent, preserves resolved paths, accepts syml
       }, { validateExecutableFn: (filePath) => { throw new Error(`invalid ${filePath}`); } }),
       (error) => error.message.includes(invalidPath),
     );
+  }
+});
+
+test('both programs are compiled into one staging directory before publication', async () => {
+  const fixture = makeBuildFixture();
+  const events = [];
+  const { fsOps } = createRealBuildFsOps(events);
+  const outputs = [];
+  const runCommand = (command, args) => {
+    const outputPath = args.at(-1);
+    outputs.push(outputPath);
+    events.push(['compile', path.basename(outputPath)]);
+    fs.writeFileSync(outputPath, path.basename(outputPath));
+    return { status: 0, stdout: '', stderr: '', error: null };
+  };
+  const smoke = async (programPath) => {
+    assert.equal(outputs.length, 2);
+    assert.equal(events.some(([name]) => name === 'rename'), false);
+    assert.equal(fs.existsSync(programPath), true);
+  };
+
+  const result = await buildMacDds({
+    rootDir: fixture.projectRoot,
+    arch: 'arm64',
+    compilerPath: '/usr/bin/clang++',
+    compilerIdentity: 'fixture clang',
+    paths: {},
+    overridden: { calc: false, solve: false },
+    sourcePlan: fixture.sourcePlan,
+    fingerprint: '1'.repeat(64),
+    releaseDir: fixture.releaseDir,
+    runCommand,
+    smokeCalc: smoke,
+    smokeSolve: smoke,
+    fsOps,
+  });
+
+  assert.deepEqual(result.compiledPrograms, ['dds_calc', 'dds_solve']);
+  assert.equal(path.dirname(outputs[0]), path.dirname(outputs[1]));
+  assert.match(path.dirname(outputs[0]), /\.staging-/);
+});
+
+test('one override builds, smokes, and publishes only the other program in both directions', async () => {
+  for (const overriddenProgram of ['calc', 'solve']) {
+    const fixture = makeBuildFixture();
+    const events = [];
+    const { fsOps } = createRealBuildFsOps(events);
+    const compiled = [];
+    const smoked = [];
+    const runCommand = (command, args) => {
+      const outputPath = args.at(-1);
+      compiled.push(path.basename(outputPath));
+      fs.writeFileSync(outputPath, 'binary');
+      return { status: 0, stdout: '', stderr: '', error: null };
+    };
+    const result = await buildMacDds({
+      rootDir: fixture.projectRoot,
+      arch: 'arm64',
+      compilerPath: '/usr/bin/clang++',
+      compilerIdentity: 'fixture clang',
+      paths: {},
+      overridden: { calc: overriddenProgram === 'calc', solve: overriddenProgram === 'solve' },
+      sourcePlan: fixture.sourcePlan,
+      fingerprint: (overriddenProgram === 'calc' ? '2' : '3').repeat(64),
+      releaseDir: fixture.releaseDir,
+      runCommand,
+      smokeCalc: async () => smoked.push('dds_calc'),
+      smokeSolve: async () => smoked.push('dds_solve'),
+      fsOps,
+    });
+    const expected = overriddenProgram === 'calc' ? ['dds_solve'] : ['dds_calc'];
+    assert.deepEqual(compiled, expected);
+    assert.deepEqual(smoked, expected);
+    assert.deepEqual(result.compiledPrograms, expected);
+    assert.equal(fs.existsSync(path.join(result.buildDir, expected[0])), true);
+  }
+});
+
+test('compile failure reports diagnostics and architecture, cleans staging, and preserves current', async () => {
+  const fixture = makeBuildFixture();
+  const oldBuild = path.join(fixture.releaseDir, 'builds', 'old');
+  fs.mkdirSync(oldBuild, { recursive: true });
+  for (const program of ['dds_calc', 'dds_solve']) writeFile(path.join(oldBuild, program), 'old');
+  const current = path.join(fixture.releaseDir, 'current');
+  const events = [];
+  const { fsOps } = createRealBuildFsOps(events, new Map([[current, path.join('builds', 'old')]]));
+
+  await assert.rejects(
+    buildMacDds({
+      rootDir: fixture.projectRoot,
+      arch: 'arm64',
+      compilerPath: '/usr/bin/clang++',
+      compilerIdentity: 'fixture clang',
+      paths: {},
+      overridden: { calc: false, solve: false },
+      sourcePlan: fixture.sourcePlan,
+      fingerprint: '4'.repeat(64),
+      releaseDir: fixture.releaseDir,
+      runCommand: () => ({ status: 1, stdout: '', stderr: 'compile broke', error: null }),
+      smokeCalc: async () => {},
+      smokeSolve: async () => {},
+      fsOps,
+    }),
+    (error) => error.message.includes('compile broke') && error.message.includes('arm64'),
+  );
+  assert.equal(fsOps.readlinkSync(current), path.join('builds', 'old'));
+  assert.equal(fs.readdirSync(fixture.releaseDir).some((name) => name.startsWith('.staging-')), false);
+});
+
+test('smoke rejection cleans staging and preserves the old current link', async () => {
+  const fixture = makeBuildFixture();
+  const current = path.join(fixture.releaseDir, 'current');
+  const oldBuild = path.join(fixture.releaseDir, 'builds', 'old');
+  fs.mkdirSync(oldBuild, { recursive: true });
+  const events = [];
+  const { fsOps } = createRealBuildFsOps(events, new Map([[current, path.join('builds', 'old')]]));
+  const runner = (command, args) => {
+    fs.writeFileSync(args.at(-1), 'binary');
+    return { status: 0, stdout: '', stderr: '', error: null };
+  };
+
+  await assert.rejects(
+    buildMacDds({
+      rootDir: fixture.projectRoot,
+      arch: 'arm64',
+      compilerPath: '/usr/bin/clang++',
+      compilerIdentity: 'fixture clang',
+      paths: {},
+      overridden: { calc: false, solve: false },
+      sourcePlan: fixture.sourcePlan,
+      fingerprint: '5'.repeat(64),
+      releaseDir: fixture.releaseDir,
+      runCommand: runner,
+      smokeCalc: async () => { throw new Error('calc smoke broke'); },
+      smokeSolve: async () => {},
+      fsOps,
+    }),
+    /calc smoke broke/,
+  );
+  assert.equal(fsOps.readlinkSync(current), path.join('builds', 'old'));
+  assert.equal(fs.readdirSync(fixture.releaseDir).some((name) => name.startsWith('.staging-')), false);
+});
+
+test('successful build orders compile, validation, awaited smoke, manifest, and atomic publication', async () => {
+  const fixture = makeBuildFixture();
+  const events = [];
+  const { fsOps } = createRealBuildFsOps(events);
+  const runner = (command, args) => {
+    const program = path.basename(args.at(-1));
+    events.push(['compile', program]);
+    fs.writeFileSync(args.at(-1), 'binary');
+    return { status: 0, stdout: '', stderr: '', error: null };
+  };
+  const smoke = async (programPath) => {
+    const program = path.basename(programPath);
+    events.push(['smoke-start', program]);
+    await new Promise((resolve) => setImmediate(resolve));
+    events.push(['smoke-done', program]);
+  };
+  await buildMacDds({
+    rootDir: fixture.projectRoot,
+    arch: 'arm64',
+    compilerPath: '/usr/bin/clang++',
+    compilerIdentity: 'fixture clang',
+    paths: {},
+    overridden: { calc: false, solve: false },
+    sourcePlan: fixture.sourcePlan,
+    fingerprint: '6'.repeat(64),
+    releaseDir: fixture.releaseDir,
+    runCommand: runner,
+    smokeCalc: smoke,
+    smokeSolve: smoke,
+    fsOps,
+  });
+  const significant = events.filter(([name, value]) => (
+    name === 'compile'
+    || name === 'chmod'
+    || name === 'smoke-start'
+    || name === 'smoke-done'
+    || (name === 'write' && value === 'manifest.json')
+    || name === 'symlink'
+    || (name === 'rename' && (String(value).includes('.staging-') || path.basename(value) !== 'current'))
+    || (name === 'rename' && path.basename(value) === 'current')
+  ));
+  const labels = significant.map(([name, value, destination]) => {
+    if (name === 'rename' && String(value).includes('.staging-')) return 'staging rename';
+    if (name === 'rename' && path.basename(destination) === 'current') return 'current rename';
+    if (name === 'symlink') return 'temp symlink';
+    if (name === 'write') return 'manifest';
+    return `${name} ${path.basename(value)}`;
+  });
+  assert.deepEqual(labels, [
+    'compile dds_calc', 'compile dds_solve',
+    'chmod dds_calc', 'chmod dds_solve',
+    'smoke-start dds_calc', 'smoke-start dds_solve',
+    'smoke-done dds_calc', 'smoke-done dds_solve',
+    'manifest', 'staging rename', 'temp symlink', 'current rename',
+  ]);
+  const firstSmoke = events.findIndex(([name]) => name === 'smoke-start');
+  const validationIndexes = events
+    .map(([name], index) => name === 'validate' ? index : -1)
+    .filter((index) => index >= 0);
+  assert.equal(validationIndexes.filter((index) => index < firstSmoke).length, 2);
+});
+
+test('publication returns immutable destination and reuses an identical concurrent build', async () => {
+  const releaseDir = path.resolve('virtual', 'Release');
+  const fingerprintValue = '7'.repeat(64);
+  const requiredPrograms = ['dds_calc', 'dds_solve'];
+  const first = createFsHarness();
+  const firstStaging = seedStaging(first, releaseDir, requiredPrograms);
+  const result = await publishBuild({
+    stagingDir: firstStaging,
+    releaseDir,
+    fingerprint: fingerprintValue,
+    requiredPrograms,
+    validateExecutable: (filePath) => first.fsOps.statSync(filePath),
+    fsOps: first.fsOps,
+  });
+  assert.deepEqual(result, {
+    buildDir: path.join(releaseDir, 'builds', fingerprintValue),
+    activeDir: path.join(releaseDir, 'current'),
+  });
+  assert.equal(first.events.some(([name, from, to]) => name === 'rename' && from === path.resolve(firstStaging) && to === path.resolve(result.buildDir)), true);
+
+  const concurrent = createFsHarness();
+  const concurrentStaging = seedStaging(concurrent, releaseDir, requiredPrograms);
+  concurrent.directory(result.buildDir);
+  for (const program of requiredPrograms) concurrent.file(path.join(result.buildDir, program));
+  await publishBuild({
+    stagingDir: concurrentStaging,
+    releaseDir,
+    fingerprint: fingerprintValue,
+    requiredPrograms,
+    validateExecutable: (filePath) => concurrent.fsOps.statSync(filePath),
+    fsOps: concurrent.fsOps,
+  });
+  assert.equal(concurrent.events.some(([name, from]) => name === 'rename' && from === path.resolve(concurrentStaging)), false);
+  assert.equal(concurrent.events.some(([name, target]) => name === 'rm' && target === path.resolve(concurrentStaging)), true);
+});
+
+test('post-switch validation uses current and atomically restores the old target on failure', async () => {
+  const releaseDir = path.resolve('virtual-rollback', 'Release');
+  const harness = createFsHarness();
+  const current = path.join(releaseDir, 'current');
+  seedPublishedBuild(harness, releaseDir);
+  const stagingDir = seedStaging(harness, releaseDir);
+  const finalPaths = [];
+  await assert.rejects(
+    publishBuild({
+      stagingDir,
+      releaseDir,
+      fingerprint: '8'.repeat(64),
+      requiredPrograms: ['dds_calc', 'dds_solve'],
+      validateExecutable(filePath) {
+        finalPaths.push(filePath);
+        if (filePath === path.join(current, 'dds_solve')) throw new Error('post-switch verify broke');
+        return harness.fsOps.statSync(filePath);
+      },
+      fsOps: harness.fsOps,
+    }),
+    /post-switch verify broke/,
+  );
+  assert.deepEqual(finalPaths.slice(-2), [path.join(current, 'dds_calc'), path.join(current, 'dds_solve')]);
+  assert.equal(harness.fsOps.readlinkSync(current), path.join('builds', 'old'));
+  assert.equal(harness.events.filter(([name, , to]) => name === 'rename' && to === path.resolve(current)).length, 2);
+});
+
+test('publication link creation or pre-switch rename failure preserves current and names its path', async () => {
+  for (const failure of ['symlink', 'rename']) {
+    const releaseDir = path.resolve(`virtual-${failure}-failure`, 'Release');
+    const harness = createFsHarness({
+      failSymlink: failure === 'symlink',
+      failCurrentRename: failure === 'rename',
+    });
+    const current = path.join(releaseDir, 'current');
+    seedPublishedBuild(harness, releaseDir);
+    const stagingDir = seedStaging(harness, releaseDir);
+    await assert.rejects(
+      publishBuild({
+        stagingDir,
+        releaseDir,
+        fingerprint: '9'.repeat(64),
+        requiredPrograms: ['dds_calc', 'dds_solve'],
+        validateExecutable: (filePath) => harness.fsOps.statSync(filePath),
+        fsOps: harness.fsOps,
+      }),
+      (error) => error.message.includes(current),
+    );
+    assert.equal(harness.fsOps.readlinkSync(current), path.join('builds', 'old'));
+  }
+});
+
+test('first install creates current and failed post-verification restores its absence', async () => {
+  for (const shouldFail of [false, true]) {
+    const releaseDir = path.resolve(`virtual-first-${shouldFail}`, 'Release');
+    const harness = createFsHarness();
+    const current = path.join(releaseDir, 'current');
+    const stagingDir = seedStaging(harness, releaseDir);
+    const operation = publishBuild({
+      stagingDir,
+      releaseDir,
+      fingerprint: (shouldFail ? 'a' : 'b').repeat(64),
+      requiredPrograms: ['dds_calc', 'dds_solve'],
+      validateExecutable(filePath) {
+        if (shouldFail && filePath.startsWith(`${current}${path.sep}`)) throw new Error('first verify broke');
+        return harness.fsOps.statSync(filePath);
+      },
+      fsOps: harness.fsOps,
+    });
+    if (shouldFail) {
+      await assert.rejects(operation, /first verify broke/);
+      assert.equal(harness.fsOps.existsSync(current), false);
+      assert.equal(harness.events.some(([name, target]) => name === 'unlink' && target === path.resolve(current)), true);
+    } else {
+      const result = await operation;
+      assert.equal(harness.fsOps.readlinkSync(result.activeDir), path.join('builds', 'b'.repeat(64)));
+    }
   }
 });
