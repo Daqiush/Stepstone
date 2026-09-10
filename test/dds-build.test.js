@@ -135,6 +135,20 @@ test('a header byte changes the lowercase SHA-256 build fingerprint', () => {
   assert.match(first, /^[0-9a-f]{64}$/);
   assert.match(second, /^[0-9a-f]{64}$/);
   assert.notEqual(first, second);
+
+  const collisionRoot = makeTempDirectory();
+  const leftFiles = [
+    { absolutePath: writeFile(path.join(collisionRoot, 'left-a'), Buffer.from('x\0b')), relativePath: 'a' },
+    { absolutePath: writeFile(path.join(collisionRoot, 'left-c'), Buffer.from('d')), relativePath: 'c' },
+  ];
+  const rightFiles = [
+    { absolutePath: writeFile(path.join(collisionRoot, 'right-a'), Buffer.from('x')), relativePath: 'a' },
+    { absolutePath: writeFile(path.join(collisionRoot, 'right-b'), Buffer.from('c\0d')), relativePath: 'b' },
+  ];
+  assert.notEqual(
+    fingerprint({ fingerprintFiles: leftFiles }),
+    fingerprint({ fingerprintFiles: rightFiles }),
+  );
 });
 
 test('CLI content is fingerprinted stably and canonical output paths do not affect the fingerprint', () => {
@@ -163,8 +177,45 @@ test('CLI content is fingerprinted stably and canonical output paths do not affe
   assert.deepEqual(canonicalOne, canonicalTwo);
   assert.equal(canonicalOne.includes(outsideCollision), true);
   assert.equal(canonicalOne.at(-1), '<OUTPUT>/dds_calc');
+  assert.throws(
+    () => canonicalizeCompileArgs({
+      args: createCompileArgs({
+        arch: 'arm64',
+        includeDir,
+        librarySources: plan.compileSources,
+        cliSource: fixture.cliSources[0],
+        outputPath: firstOutput,
+      }),
+      projectRoot: fixture.projectRoot,
+      outputPath: secondOutput,
+      programName: 'dds_calc',
+    }),
+    (error) => error.message.includes(firstOutput) && error.message.includes(secondOutput),
+  );
   assert.equal(fingerprint(plan, { dds_calc: canonicalOne }), initial);
   assert.equal(fingerprint(plan, { dds_calc: canonicalTwo }), initial);
+
+  const secondCheckout = makeSourceFixture();
+  const secondCheckoutPlan = discoverDdsSources(secondCheckout);
+  const checkoutArgs = (checkout, checkoutPlan) => {
+    const checkoutOutput = path.join(checkout.projectRoot, '.stage', 'dds_calc');
+    return canonicalizeCompileArgs({
+      args: createCompileArgs({
+        arch: 'arm64',
+        includeDir: path.join(checkout.projectRoot, 'dds', 'library', 'include'),
+        librarySources: checkoutPlan.compileSources,
+        cliSource: checkout.cliSources[0],
+        outputPath: checkoutOutput,
+      }),
+      projectRoot: checkout.projectRoot,
+      outputPath: checkoutOutput,
+      programName: 'dds_calc',
+    });
+  };
+  assert.equal(
+    fingerprint(plan, { dds_calc: checkoutArgs(fixture, plan) }),
+    fingerprint(secondCheckoutPlan, { dds_calc: checkoutArgs(secondCheckout, secondCheckoutPlan) }),
+  );
 
   fs.writeFileSync(fixture.cliSources[0], 'int calc() { return 99; }');
   assert.notEqual(fingerprint(discoverDdsSources(fixture), { dds_calc: canonicalOne }), initial);

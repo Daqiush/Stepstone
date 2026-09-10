@@ -109,8 +109,12 @@ function canonicalizeCompileArgs({ args, projectRoot, outputPath, programName })
   const absoluteProjectRoot = path.resolve(projectRoot);
 
   return args.map((argument, index) => {
-    if (index > 0 && args[index - 1] === '-o') return `<OUTPUT>/${programName}`;
-    if (argument === outputPath && index > 0 && args[index - 1] === '-o') return `<OUTPUT>/${programName}`;
+    if (index > 0 && args[index - 1] === '-o') {
+      if (argument !== outputPath) {
+        throw new Error(`Compiler output argument ${argument} does not match outputPath ${outputPath}`);
+      }
+      return `<OUTPUT>/${programName}`;
+    }
     if (typeof argument !== 'string' || !path.isAbsolute(argument)) return argument;
 
     const absoluteArgument = path.resolve(argument);
@@ -130,20 +134,32 @@ function stableJson(value) {
   return JSON.stringify(value);
 }
 
+function updateUint64(hash, value) {
+  const encoded = Buffer.allocUnsafe(8);
+  encoded.writeBigUInt64BE(BigInt(value));
+  hash.update(encoded);
+}
+
+function updateLengthPrefixed(hash, value) {
+  const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value, 'utf8');
+  updateUint64(hash, bytes.length);
+  hash.update(bytes);
+}
+
 function computeBuildFingerprint({ files, platform, arch, compilerIdentity, compileArgsByProgram }) {
   const hash = crypto.createHash('sha256');
   const sortedFiles = files
     .map((file) => ({ ...file, relativePath: normalizeRelativePath(file.relativePath) }))
     .sort((left, right) => compareLexically(left.relativePath, right.relativePath));
 
+  hash.update('stepstone-dds-build-fingerprint-v1', 'utf8');
+  updateUint64(hash, sortedFiles.length);
   for (const file of sortedFiles) {
-    hash.update(file.relativePath, 'utf8');
-    hash.update('\0');
-    hash.update(fs.readFileSync(file.absolutePath));
-    hash.update('\0');
+    updateLengthPrefixed(hash, file.relativePath);
+    updateLengthPrefixed(hash, fs.readFileSync(file.absolutePath));
   }
 
-  hash.update(stableJson({ platform, arch, compilerIdentity, compileArgsByProgram }), 'utf8');
+  updateLengthPrefixed(hash, stableJson({ platform, arch, compilerIdentity, compileArgsByProgram }));
   return hash.digest('hex');
 }
 
