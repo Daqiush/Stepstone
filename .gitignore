@@ -1,2 +1,9 @@
 node_modules/
 .worktrees/
+
+# macOS metadata
+.DS_Store
+._*
+
+# npm diagnostics
+npm-debug.log*
