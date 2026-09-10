@@ -43,6 +43,10 @@ test('calc-only relative override retains the default solve path and reports ove
   assert.equal(resolved.calc, path.resolve(ROOT, 'custom', 'dds_calc'));
   assert.equal(resolved.solve, path.join(ROOT, 'dds', 'Build', 'bin', 'darwin-arm64', 'Release', 'current', 'dds_solve'));
   assert.deepEqual(resolved.overridden, { calc: true, solve: false });
+  assert.throws(
+    () => resolveDdsPaths({ rootDir: ROOT, platform: 'darwin', arch: 'arm64', env: { DDS_CALC_PATH: '' } }),
+    /DDS_CALC_PATH.*empty/i,
+  );
 });
 
 test('solve-only absolute override retains the default calc path and reports override flags', () => {
@@ -57,6 +61,10 @@ test('solve-only absolute override retains the default calc path and reports ove
   assert.equal(resolved.calc, path.join(ROOT, 'dds', 'Build', 'bin', 'x64', 'Release', 'dds_calc.exe'));
   assert.equal(resolved.solve, absoluteSolve);
   assert.deepEqual(resolved.overridden, { calc: false, solve: true });
+  assert.throws(
+    () => resolveDdsPaths({ rootDir: ROOT, platform: 'win32', arch: 'x64', env: { DDS_SOLVE_PATH: '' } }),
+    /DDS_SOLVE_PATH.*empty/i,
+  );
 });
 
 test('omitted runtime inputs use process platform and architecture', {
