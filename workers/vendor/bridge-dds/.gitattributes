@@ -1,0 +1,4 @@
+# Preserve the pinned generated output and upstream license text byte-for-byte.
+dds-worker.mjs -text -whitespace
+LICENSE.bridge-dds -whitespace
+LICENSE.dds -whitespace
