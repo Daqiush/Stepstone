@@ -211,6 +211,21 @@ test('ping follows an earlier queued solve', async () => {
   } finally { await isolated.dispose(); }
 });
 
+test('local ordered probe measures a distinct ping blocked behind its paired solve', async () => {
+  const isolated = await runtime({ DDS_TEST_SOLVE_DELAY_MS: '150' });
+  try {
+    const before = (await post(isolated, '/__dds/ping')).body.completedOperations;
+    const { status, body } = await post(isolated, '/__dds/ordered-probe', { deal: oneTrickDeal });
+    assert.equal(status, 200);
+    assert.equal(body.ok, true);
+    assert.deepEqual(body.solveResponse.result, { score: 1, cards: [{ suit: 'S', rank: 14 }] });
+    assert.deepEqual(body.pingResponse, { ok: true, completedOperations: before + 1 });
+    assert.ok(body.solveCompletedMs >= 100);
+    assert.ok(body.queueDelayMs >= body.solveCompletedMs);
+    assert.equal((await post(isolated, '/__dds/ping')).body.completedOperations, before + 1);
+  } finally { await isolated.dispose(); }
+});
+
 test('entry point limits methods and paths to local test endpoints', async () => {
   const missing = await mf.dispatchFetch('http://localhost/');
   assert.equal(missing.status, 404);

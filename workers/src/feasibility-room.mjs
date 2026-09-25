@@ -1,6 +1,7 @@
 import { createWasmDdsClient, DdsInputError } from './dds-wasm-adapter.mjs';
 import { loadDdsModule } from './dds-wasm-loader.mjs';
 import ddsWasm from '../vendor/bridge-dds/dds-worker.wasm';
+import { runOrderedQueueProbe } from './ordered-queue-probe.mjs';
 
 function failure(code, status) {
   return Response.json({ ok: false, error: { code } }, { status });
@@ -47,9 +48,35 @@ export class FeasibilityRoom {
   }
 
   fetch(request) {
-    const operation = this.queued.then(() => this.handle(request));
+    if (new URL(request.url).pathname === '/__dds/ordered-probe') return this.orderedProbe(request);
+    return this.enqueue(() => this.handle(request));
+  }
+
+  enqueue(command) {
+    const operation = this.queued.then(command);
     this.queued = operation.then(() => {}, () => {});
     return operation;
+  }
+
+  async orderedProbe(request) {
+    let body;
+    try { body = await request.json(); }
+    catch { return failure('INVALID_DEAL', 400); }
+    // This outer request is never put on the queue: doing so and awaiting the
+    // two inner commands would deadlock. Both inner commands use the ordinary
+    // queue, with no await between their enqueues.
+    const solve = new Request(new URL('/__dds/solve', request.url), {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    });
+    const ping = new Request(new URL('/__dds/ping', request.url), {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    });
+    const pair = await runOrderedQueueProbe({
+      enqueueSolve: () => this.enqueue(async () => (await this.handle(solve)).json()),
+      enqueuePing: () => this.enqueue(async () => (await this.handle(ping)).json()),
+      now: () => performance.now(),
+    });
+    return Response.json({ ok: true, ...pair });
   }
 
   async handle(request) {

@@ -43,6 +43,7 @@ const report = {
     seed, iterations, completedIterations: 0, fixtureCount: fixtures.length, completedFixtureCount: 0,
     bundleBytes: statSync(resolve(ROOT, 'workers/vendor/bridge-dds/dds-worker.wasm')).size,
     parityMismatches: [], candidateDifferences: [], solveCpuMs: [], queueDelayMs: [], maxMemoryBytes: null,
+    queueProbe: 'local Worker ordered pair: distinct same-DO ping queued after solve; timing captured at ping completion',
     generation: { randomTableEvery: 100, solveDepthRule: '(index - 1) % 13',
       solveDepthMeaning: 'number of complete legal tricks played before the current partial trick' },
     randomTableCount: 0, solveDepthCounts: Array(13).fill(0),
@@ -78,15 +79,13 @@ async function runCase(item) {
     }
   }
   if (kind === 'solve') {
-    // Both requests use the same fixed Worker URL and Durable Object. The
-    // ping counter must prove this solve completed before its response.
+    // The local Worker queues a distinct ping immediately after this solve.
     const timed = await probeTimedSolve({
-      sendSolve: () => post('solve', payload), sendPing: () => post('ping', {}),
-      expectedCompletedOperations, now: () => performance.now(),
+      sendOrderedPair: () => post('ordered-probe', payload), expectedCompletedOperations,
       validateSolveResponse: validateWorkerResponse,
     });
     worker = timed.solveResponse;
-    workerMs = timed.solveCompletedAt - workerStarted;
+    workerMs = timed.solveCompletedMs;
     queueDelayMs = timed.queueDelayMs;
     expectedCompletedOperations = timed.completedOperations;
   } else {

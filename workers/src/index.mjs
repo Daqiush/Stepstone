@@ -1,6 +1,6 @@
 export { FeasibilityRoom } from './feasibility-room.mjs';
 
-const ROUTES = new Set(['/__dds/table', '/__dds/solve', '/__dds/metrics', '/__dds/ping']);
+const ROUTES = new Set(['/__dds/table', '/__dds/solve', '/__dds/metrics', '/__dds/ping', '/__dds/ordered-probe']);
 
 export default {
   async fetch(request, env) {

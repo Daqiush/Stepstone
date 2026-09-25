@@ -118,6 +118,20 @@ fail the evidence gate. The feasibility gate additionally requires 100,000 compl
 random cases, all fixtures, and resource metrics, so a short run can show
 observed parity without passing the overall gate.
 
+The queue-delay sample comes from the local-only `/__dds/ordered-probe` route.
+It parses one solve deal, then synchronously enqueues two distinct commands on
+the same Durable Object queue: the solve followed by an unrelated ping. The
+outer probe request stays off that queue to avoid deadlock. The Worker records
+elapsed time at solve completion and again when the ping completes; queue delay
+is the latter elapsed time. The benchmark checks that ping observed exactly one
+new completed DDS operation and that its timestamp is no earlier than solve
+completion. A malformed pair, timeout, or counter overtake fails the run. This
+protocol is only enabled in `DDS_LOCAL_TEST` and is scoped to the local Worker
+URL accepted by the benchmark CLI. The solve's `workerMs` in new reports is
+the Worker's elapsed time to complete the queued solve, whereas older reports
+measured the separate HTTP solve response. The previous full report remains
+an unaltered historical failure from independent-request ordering.
+
 Emscripten 3.1.74's `runtime_shared.js` supports exporting `HEAPU8` through
 `EXPORTED_RUNTIME_METHODS`. Its `updateMemoryViews()` replaces the exported
 typed array whenever Wasm linear memory grows. The loader reads
