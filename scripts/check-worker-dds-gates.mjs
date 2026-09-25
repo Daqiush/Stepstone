@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { compareDdsResults, validateCandidateDiagnostics } from './worker-dds-benchmark-validation.mjs';
 
 // Conservative local gate for a Free-plan Worker script (Wasm bytes only).
 // It intentionally leaves room for the JavaScript wrapper in a 3 MiB budget.
@@ -49,9 +50,15 @@ const counts = recorded ? {
 const countsValid = counts && integer(counts.table) && integer(counts.solve)
   && counts.table + counts.solve === benchmark.completedIterations + benchmark.completedFixtureCount;
 let recordsValid = true;
+let parityEvidenceValid = true;
+let observedParityCount = 0;
 if (recorded) {
   let solveIndex = 0;
   for (const op of recorded) {
+    try {
+      const comparison = compareDdsResults(op?.kind, op?.baseline, op?.worker);
+      if (comparison.parityMismatch) observedParityCount += 1;
+    } catch { parityEvidenceValid = false; }
     if (!op || typeof op.id !== 'string' || !['table', 'solve'].includes(op.kind)
         || !Object.hasOwn(op, 'baseline') || !Object.hasOwn(op, 'worker')
         || !finite(op.baselineMs) || !finite(op.workerMs) || !finite(op.initMs)
@@ -102,15 +109,20 @@ const coverageEvidence = benchmark.status !== 'complete' || (
   && counts.table - benchmark.randomTableCount + counts.solve - depthCount === benchmark.completedFixtureCount
   && recordedCoverage
 );
+const candidateDiagnosticsValid = validateCandidateDiagnostics(recorded ?? [], benchmark.candidateDifferences);
 const complete = integer(benchmark.iterations) && benchmark.iterations >= 100000
   && benchmark.completedIterations === benchmark.iterations
   && integer(benchmark.fixtureCount) && benchmark.fixtureCount > 0
   && benchmark.completedFixtureCount === benchmark.fixtureCount
-  && benchmark.status === 'complete' && countsValid && recordsValid && sampleEvidence && coverageEvidence;
+  && benchmark.status === 'complete' && countsValid && recordsValid && sampleEvidence && coverageEvidence
+  && parityEvidenceValid && candidateDiagnosticsValid;
 gate('benchmark-completeness', complete,
   `${benchmark.completedIterations ?? 'missing'}/${benchmark.iterations ?? 'missing'} random; ${benchmark.completedFixtureCount ?? 'missing'}/${benchmark.fixtureCount ?? 'missing'} fixtures; ${counts?.table ?? 'missing'} table + ${counts?.solve ?? 'missing'} solve operations; ${benchmark.solveCpuMs?.length ?? 'missing'} CPU / ${benchmark.queueDelayMs?.length ?? 'missing'} queue samples; depths=${Array.isArray(depths) ? depths.join(',') : 'legacy/unavailable'}; status=${benchmark.status ?? 'missing'}`);
-gate('parity', complete && Array.isArray(benchmark.parityMismatches) && benchmark.parityMismatches.length === 0,
-  `${benchmark.parityMismatches?.length ?? 'missing'} mismatches`);
+gate('parity', Array.isArray(benchmark.parityMismatches) && benchmark.parityMismatches.length === 0
+  && (!recorded || (parityEvidenceValid && observedParityCount === 0)),
+  `${benchmark.parityMismatches?.length ?? 'missing'} score/table mismatches; ${benchmark.candidateDifferences?.length ?? 'missing'} candidate differences (informational)`);
+gate('candidate-diagnostics', candidateDiagnosticsValid,
+  `${benchmark.candidateDifferences?.length ?? 'missing'} entries reconciled to recorded operations`);
 gate('wasm-bundle', finite(benchmark.bundleBytes) && benchmark.bundleBytes < WASM_LIMIT_BYTES,
   `${benchmark.bundleBytes ?? 'missing'} bytes < ${WASM_LIMIT_BYTES} bytes`);
 gate('memory', finite(benchmark.maxMemoryBytes) && benchmark.maxMemoryBytes < MEMORY_LIMIT_BYTES,

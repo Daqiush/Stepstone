@@ -108,6 +108,9 @@ test('real Workers runtime solves a deal and reports bounded timings', async () 
   assert.equal(body.ok, true);
   assert.ok(Number.isFinite(body.metrics.initMs) && body.metrics.initMs >= 0);
   assert.ok(Number.isFinite(body.metrics.solveMs) && body.metrics.solveMs >= 0);
+  // The pinned Emscripten return object does not expose its Wasm Memory.
+  // Keep the metric unavailable rather than reporting a process estimate.
+  assert.equal(Object.hasOwn(body.metrics, 'memoryBytes'), false);
 });
 
 test('table uses the existing five strains by four seats representation', async () => {

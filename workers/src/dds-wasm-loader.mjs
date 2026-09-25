@@ -38,6 +38,25 @@ function withBuffers(module, sizes, run) {
   }
 }
 
+export function decodeFutureTricks(module, future) {
+  const count = module.getValue(future + 4, 'i32');
+  if (count < 1 || count > 13) throw new Error('Invalid DDS futureTricks count');
+  const score = module.getValue(future + 164, 'i32');
+  const cards = [];
+  for (let index = 0; index < count; index += 1) {
+    const suit = STRAINS[module.getValue(future + 8 + index * 4, 'i32')];
+    const rank = module.getValue(future + 60 + index * 4, 'i32');
+    const equals = module.getValue(future + 112 + index * 4, 'i32');
+    const candidateScore = module.getValue(future + 164 + index * 4, 'i32');
+    if (candidateScore !== score || !suit || suit === 'NT' || rank < 2 || rank > 14) throw new Error('Invalid DDS candidate');
+    cards.push({ suit, rank });
+    for (let lower = 2; lower < rank; lower += 1) {
+      if (equals & (1 << lower)) cards.push({ suit, rank: lower });
+    }
+  }
+  return { score, cards };
+}
+
 function bind(module) {
   module._SetMaxThreads(0);
   return {
@@ -71,22 +90,7 @@ function bind(module) {
         // -1 asks for the maximum score; 2 returns every optimum play; mode 1
         // still computes a score when the player has just one legal card.
         checked(module._SolveBoardPBN(deal, -1, 2, 1, future, 0));
-        const count = module.getValue(future + 4, 'i32');
-        if (count < 1 || count > 13) throw new Error('Invalid DDS futureTricks count');
-        const score = module.getValue(future + 164, 'i32');
-        const cards = [];
-        for (let index = 0; index < count; index += 1) {
-          const suit = STRAINS[module.getValue(future + 8 + index * 4, 'i32')];
-          const rank = module.getValue(future + 60 + index * 4, 'i32');
-          const equals = module.getValue(future + 112 + index * 4, 'i32');
-          const candidateScore = module.getValue(future + 164 + index * 4, 'i32');
-          if (candidateScore !== score || !suit || suit === 'NT' || rank < 2 || rank > 14) throw new Error('Invalid DDS candidate');
-          cards.push({ suit, rank });
-          for (let lower = 2; lower < rank; lower += 1) {
-            if (equals & (1 << lower)) cards.push({ suit, rank: lower });
-          }
-        }
-        return { score, cards };
+        return decodeFutureTricks(module, future);
       });
     },
   };

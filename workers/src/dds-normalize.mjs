@@ -62,14 +62,24 @@ export function normalizeTable(table) {
   }));
 }
 
-export function normalizeSolveResult(result) {
+export function normalizeSolveResult(result, deal) {
   if (!result || typeof result !== 'object' || !Number.isInteger(result.score) || result.score < 0 || result.score > 13) invalid();
   const cards = normalizeCards(result.cards);
+  if (cards.length < 1 || cards.length > 13) invalid();
   const seen = new Set();
   for (const card of cards) {
     const key = `${card.suit}${card.rank}`;
     if (seen.has(key)) invalid();
     seen.add(key);
+  }
+  if (deal) {
+    const hand = deal.hands[currentSeat(deal.trickLeader, deal.trickPlayed.length)];
+    const available = new Set(hand.map((card) => `${card.suit}${card.rank}`));
+    const ledSuit = deal.trickPlayed[0]?.suit;
+    const mustFollow = ledSuit && hand.some((card) => card.suit === ledSuit);
+    for (const card of cards) {
+      if (!available.has(`${card.suit}${card.rank}`) || (mustFollow && card.suit !== ledSuit)) invalid();
+    }
   }
   return { score: result.score, cards: cards.sort((a, b) => SUITS.indexOf(a.suit) - SUITS.indexOf(b.suit) || a.rank - b.rank) };
 }

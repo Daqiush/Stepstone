@@ -40,7 +40,7 @@ export function createWasmDdsClient({ loadModule }) {
     },
     async solveBoard(deal) {
       const normalized = normalizeDeal(deal);
-      try { return normalizeSolveResult(await call('solveBoardPbn', dealToPbn(normalized))); }
+      try { return normalizeSolveResult(await call('solveBoardPbn', dealToPbn(normalized)), normalized); }
       catch { throw new DdsRuntimeError(); }
     },
   };

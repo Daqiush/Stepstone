@@ -91,9 +91,36 @@ and remaining PBN hands. It calls `SolveBoardPBN` with target `-1`, solutions
 one card is legal. The returned `futureTricks.score` is for the current
 player's partnership and includes the current trick. `equals` rank bits are
 expanded into explicit equivalent cards before returning `{ score, cards }`.
+The loader rejects any DDS candidate whose reported score differs from the
+root score. The adapter checks every expanded card against the current
+player's remaining hand and follow-suit obligation, rejects duplicates, and
+sorts the result into canonical suit/rank order.
 Both calls free their Wasm buffers, and non-success DDS codes throw.
 
 Only these two DDS methods are exposed. Dealer par, play analysis, alternate
 target/solution modes, multithreaded DDS, and non-PBN APIs are unsupported.
 The caller must provide legal, complete bridge positions; the outer adapter
-normalizes card shapes but does not prove all game-state invariants.
+normalizes input card shapes but does not prove all game-state invariants.
+
+## Feasibility comparison and memory
+
+The benchmark requires exact equality for every full double-dummy table and
+for each solve's optimal trick score. Different sets of equally optimal cards
+are recorded as `candidateDifferences` with both sorted sets, separate from
+`parityMismatches`. Worker candidates are still checked for canonical order,
+uniqueness, ownership, and follow-suit legality before comparison. The loader
+checks each DDS candidate's score against the root solve score. A malformed
+response stops the benchmark immediately; a score or table mismatch remains a
+parity failure. The gate reconstructs every candidate difference from its
+recorded operation and requires the diagnostic's ID, kind, score, and both
+canonical card sets to match exactly; missing, extra, or duplicate diagnostics
+fail the evidence gate. The feasibility gate additionally requires 100,000 completed
+random cases, all fixtures, and resource metrics, so a short run can show
+observed parity without passing the overall gate.
+
+The pinned Emscripten module internally owns a `WebAssembly.Memory`, but its
+returned public object exposes neither `_memory` nor `HEAP8`. Those names in
+the generated glue are not usable public metrics; `HEAP8` access throws an
+Emscripten export error. The harness therefore leaves `memoryBytes` absent and
+the report's `maxMemoryBytes` null. The memory gate remains failed until a
+genuine byte measurement is available from a supported runtime interface.

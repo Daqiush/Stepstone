@@ -25,12 +25,24 @@ test('serializes a normalized table as canonical PBN hands and caches the lazy l
 
 test('serializes a partial solve as PBN and returns canonical candidates', async () => {
   let payload;
+  const solveHands = { ...hands, W: [{ suit: 'S', rank: 2 }, { suit: 'D', rank: 14 }] };
   const client = createWasmDdsClient({ loadModule: async () => ({
     solveBoardPbn(value) { payload = value; return { score: 4, cards: [{ suit: 'D', rank: 'A' }, { suit: 'S', rank: 2 }] }; },
   }) });
-  const result = await client.solveBoard({ hands, trump: 'NT', trickLeader: 'S', trickPlayed: [{ suit: 'S', rank: 3 }] });
-  assert.equal(payload, 'trump=NT;leader=S;turn=W;trick=S3;hands=N:A... E:.K.. S:..2. W:...T');
+  const result = await client.solveBoard({ hands: solveHands, trump: 'NT', trickLeader: 'W', trickPlayed: [] });
+  assert.equal(payload, 'trump=NT;leader=W;turn=W;trick=;hands=N:A... E:.K.. S:..2. W:2..A.');
   assert.deepEqual(result, { score: 4, cards: [{ suit: 'S', rank: 2 }, { suit: 'D', rank: 14 }] });
+});
+
+test('rejects candidate plays outside the current hand or breaking follow suit', async () => {
+  const deal = { hands: { N: [], E: [{ suit: 'H', rank: 10 }, { suit: 'S', rank: 14 }], S: [], W: [] },
+    trump: 'NT', trickLeader: 'N', trickPlayed: [{ suit: 'H', rank: 2 }] };
+  for (const card of [{ suit: 'S', rank: 14 }, { suit: 'H', rank: 11 }]) {
+    const client = createWasmDdsClient({ loadModule: async () => ({
+      solveBoardPbn: () => ({ score: 1, cards: [card] }),
+    }) });
+    await assert.rejects(() => client.solveBoard(deal), (error) => error instanceof DdsRuntimeError && error.code === 'DDS_FAILURE');
+  }
 });
 
 test('rejects malformed input before invoking the loader', async () => {

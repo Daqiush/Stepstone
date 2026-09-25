@@ -2,7 +2,20 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
-import { loadDdsModule } from '../src/dds-wasm-loader.mjs';
+import { decodeFutureTricks, loadDdsModule } from '../src/dds-wasm-loader.mjs';
+
+test('DDS futureTricks expands equals only when every candidate has the root score', () => {
+  const values = new Map([[4, 1], [8, 0], [60, 14], [112, 1 << 13], [164, 2]]);
+  const module = { getValue(offset) { return values.get(offset) ?? 0; } };
+  assert.deepEqual(decodeFutureTricks(module, 0), { score: 2,
+    cards: [{ suit: 'S', rank: 14 }, { suit: 'S', rank: 13 }] });
+  values.set(164, 1);
+  values.set(168, 2);
+  values.set(4, 2);
+  values.set(12, 1);
+  values.set(64, 10);
+  assert.throws(() => decodeFutureTricks(module, 0), /Invalid DDS candidate/);
+});
 
 test('vendored runtime and precompiled Wasm derive exactly from the pinned single-file artifact', async () => {
   const checkout = await readFile(new URL('../vendor/bridge-dds/dds-worker.mjs', import.meta.url));

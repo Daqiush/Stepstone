@@ -2,7 +2,7 @@ import { createRequire } from 'node:module';
 import { readFileSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { normalizeDdsResult } from './worker-dds-benchmark-validation.mjs';
+import { compareDdsResults, normalizeDdsResult, validateWorkerSolveCandidates } from './worker-dds-benchmark-validation.mjs';
 import { createRandomCaseGenerator } from './worker-dds-random-cases.mjs';
 import { probeTimedSolve } from './worker-dds-queue-probe.mjs';
 import { writeReportCheckpoint } from './worker-dds-checkpoint.mjs';
@@ -42,7 +42,7 @@ const report = {
   benchmark: {
     seed, iterations, completedIterations: 0, fixtureCount: fixtures.length, completedFixtureCount: 0,
     bundleBytes: statSync(resolve(ROOT, 'workers/vendor/bridge-dds/dds-worker.wasm')).size,
-    parityMismatches: [], solveCpuMs: [], queueDelayMs: [], maxMemoryBytes: null,
+    parityMismatches: [], candidateDifferences: [], solveCpuMs: [], queueDelayMs: [], maxMemoryBytes: null,
     generation: { randomTableEvery: 100, solveDepthRule: '(index - 1) % 13',
       solveDepthMeaning: 'number of complete legal tricks played before the current partial trick' },
     randomTableCount: 0, solveDepthCounts: Array(13).fill(0),
@@ -62,15 +62,16 @@ async function runCase(item) {
   const baselineStarted = performance.now();
   const baseline = kind === 'table' ? await calcDDTable(item.hands) : await solveBoard(deal);
   const baselineMs = performance.now() - baselineStarted;
-  const normalizedBaseline = normalizeDdsResult(kind, baseline);
+  normalizeDdsResult(kind, baseline);
   const payload = kind === 'table' ? { hands: item.hands } : { deal };
   const workerStarted = performance.now();
   let worker, workerMs, queueDelayMs = null;
-  let normalizedWorker;
   function validateWorkerResponse(response) {
     if (!response.metrics || !Number.isFinite(response.metrics.initMs) || !Number.isFinite(response.metrics.solveMs)
         || response.metrics.solveMs < 0 || response.metrics.initMs < 0) throw new Error('Malformed Worker metrics');
-    try { normalizedWorker = normalizeDdsResult(kind, response.result); }
+    try { kind === 'solve'
+      ? validateWorkerSolveCandidates(response.result, deal)
+      : normalizeDdsResult(kind, response.result); }
     catch (error) { throw new Error(`Malformed Worker response: ${error.message}`); }
     if (response.metrics.memoryBytes !== undefined
         && (!Number.isSafeInteger(response.metrics.memoryBytes) || response.metrics.memoryBytes < 0)) {
@@ -95,12 +96,14 @@ async function runCase(item) {
     validateWorkerResponse(worker);
     expectedCompletedOperations += 1;
   }
-  const same = JSON.stringify(normalizedBaseline) === JSON.stringify(normalizedWorker);
+  const comparison = compareDdsResults(kind, baseline, worker.result);
   const record = { id: item.id, kind, depth: item.depth ?? null, baseline, worker: worker.result, baselineMs, workerMs,
     initMs: worker.metrics.initMs, solveCpuMs: worker.metrics.solveMs, queueDelayMs,
     memoryBytes: Number.isFinite(worker.metrics.memoryBytes) ? worker.metrics.memoryBytes : null };
   report.benchmark.operations.push(record);
-  if (!same) report.benchmark.parityMismatches.push({ id: item.id, kind, baseline, worker: worker.result });
+  if (comparison.parityMismatch) report.benchmark.parityMismatches.push({ id: item.id, kind, baseline, worker: worker.result });
+  if (comparison.candidateDifference) report.benchmark.candidateDifferences.push({ id: item.id, kind, score: worker.result.score,
+    ...comparison.candidateDifference });
   if (kind === 'solve') {
     report.benchmark.solveCpuMs.push(worker.metrics.solveMs);
     report.benchmark.queueDelayMs.push(queueDelayMs);

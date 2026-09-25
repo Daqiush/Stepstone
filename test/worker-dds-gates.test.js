@@ -13,6 +13,7 @@ const valid = () => ({
   benchmark: {
     seed: 20260923, iterations: 100000, completedIterations: 100000,
     fixtureCount: 1, completedFixtureCount: 1, parityMismatches: [],
+    candidateDifferences: [],
     status: 'complete', operationCounts: { table: 1001, solve: 99000 },
     generation: { randomTableEvery: 100 }, randomTableCount: 1000,
     solveDepthCounts: Array.from({ length: 13 }, (_, i) => i < 5 ? 7616 : 7615),
@@ -38,6 +39,47 @@ test('a complete report below all limits passes and prints every named gate', ()
     'max-solve-cpu', 'max-queued-command-delay', 'writes-per-day', 'reads-per-day']) {
     assert.match(result.stdout, new RegExp(name));
   }
+});
+
+test('candidate differences are visible diagnostics and do not fail parity', () => {
+  const report = valid();
+  report.benchmark.operations = [{ id: 'tie', kind: 'solve', baseline: { score: 2, cards: [{ suit: 'S', rank: 2 }] },
+    worker: { score: 2, cards: [{ suit: 'S', rank: 2 }, { suit: 'S', rank: 3 }] },
+    baselineMs: 1, workerMs: 1, initMs: 1, solveCpuMs: 100, queueDelayMs: 20 }];
+  report.benchmark.candidateDifferences.push({ id: 'tie', kind: 'solve', score: 2, baseline: ['S2'], worker: ['S2', 'S3'] });
+  const result = check(report);
+  assert.match(result.stdout, /PASS candidate-diagnostics/);
+  assert.match(result.stdout, /PASS parity/);
+  assert.match(result.stdout, /1 candidate differences/);
+});
+
+test('forged candidate diagnostic fails its own evidence gate', () => {
+  const report = valid();
+  report.benchmark.candidateDifferences.push({ id: 'forged', kind: 'solve', score: 2,
+    baseline: ['S2'], worker: ['S2', 'S3'] });
+  const result = check(report);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stdout, /FAIL candidate-diagnostics/);
+});
+
+test('an incomplete benchmark can still pass the observed parity gate', () => {
+  const report = valid();
+  report.benchmark.completedIterations = 2147;
+  report.benchmark.status = 'failed';
+  const result = check(report);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stdout, /FAIL benchmark-completeness/);
+  assert.match(result.stdout, /PASS parity/);
+});
+
+test('recorded score mismatch fails parity even if the mismatch summary is empty', () => {
+  const report = valid();
+  report.benchmark.operations = [{ id: 'one', kind: 'solve', baseline: { score: 1, cards: [{ suit: 'S', rank: 2 }] },
+    worker: { score: 0, cards: [{ suit: 'S', rank: 2 }] }, baselineMs: 1, workerMs: 1,
+    initMs: 1, solveCpuMs: 100, queueDelayMs: 20 }];
+  const result = check(report);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stdout, /FAIL parity/);
 });
 
 const boundaries = [
