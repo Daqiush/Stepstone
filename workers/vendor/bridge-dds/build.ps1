@@ -66,4 +66,36 @@ if ($generated.Split(@($oldHandler), [System.StringSplitOptions]::None).Length -
 $actual = (Get-FileHash -LiteralPath $output -Algorithm SHA256).Hash.ToLowerInvariant()
 $expected = 'b436073a6941a8eee13f093b2435906d905d9c8a69080b3e6a8f66d07b252442'
 if ($actual -ne $expected) { throw "Artifact hash mismatch: $actual" }
+
+# Workers cannot compile Wasm from bytes at runtime. Keep the exact pinned
+# single-file output above as provenance, then emit its Wasm as a static module
+# and let the generated glue accept a precompiled WebAssembly.Module.
+$pinned = [System.IO.File]::ReadAllText($output)
+$embedded = [regex]::Match($pinned, 'Module\["wasm"\]=base64Decode\("(?<bytes>[A-Za-z0-9+/=]+)"\)')
+if (-not $embedded.Success) { throw 'Expected one embedded DDS Wasm module' }
+$wasmPath = Join-Path $target 'dds-worker.wasm'
+[System.IO.File]::WriteAllBytes($wasmPath, [Convert]::FromBase64String($embedded.Groups['bytes'].Value))
+$wasmHash = (Get-FileHash -LiteralPath $wasmPath -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($wasmHash -ne 'ddc660d975c5abd08ec8490a9456dd68d202579c540e9353078b6bdecaddf5f7') {
+  throw "Wasm hash mismatch: $wasmHash"
+}
+
+$wasmInitializer = 'Module["wasm"]=base64Decode('
+$wasmInitializerWorker = 'Module["wasm"]=Module["wasm"]||base64Decode('
+$instanceAccess = 'output.instance.exports'
+$instanceAccessWorker = '(output.instance??output).exports'
+foreach ($part in @($wasmInitializer, $instanceAccess)) {
+  if ($pinned.Split(@($part), [System.StringSplitOptions]::None).Length -ne 2) {
+    throw "Expected one generated glue occurrence: $part"
+  }
+}
+$workerOutput = Join-Path $target 'dds-worker.mjs'
+$workerGlue = $pinned.Replace($wasmInitializer, $wasmInitializerWorker).Replace($instanceAccess, $instanceAccessWorker)
+[System.IO.File]::WriteAllText($workerOutput, $workerGlue, [System.Text.UTF8Encoding]::new($false))
+$workerHash = (Get-FileHash -LiteralPath $workerOutput -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($workerHash -ne '932d339ba405f3abf67b2f925fca7bd00967caa6952093dc37ea35e3a7a0f949') {
+  throw "Worker glue hash mismatch: $workerHash"
+}
 Write-Output "Reproduced $output SHA256 $actual"
+Write-Output "Reproduced $wasmPath SHA256 $wasmHash"
+Write-Output "Reproduced $workerOutput SHA256 $workerHash"

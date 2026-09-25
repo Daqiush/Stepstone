@@ -1,22 +1,25 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
-import { fileURLToPath } from 'node:url';
 import { loadDdsModule } from '../src/dds-wasm-loader.mjs';
 
-test('vendored runtime checkout bytes match the pinned Git artifact', async () => {
-  const root = fileURLToPath(new URL('../../', import.meta.url));
-  const path = 'workers/vendor/bridge-dds/dds-worker.mjs';
+test('vendored runtime and precompiled Wasm derive exactly from the pinned single-file artifact', async () => {
   const checkout = await readFile(new URL('../vendor/bridge-dds/dds-worker.mjs', import.meta.url));
-  const tracked = execFileSync('git', ['show', `:${path}`], { cwd: root });
-  const textAttribute = execFileSync('git', ['check-attr', 'text', '--', path], { cwd: root, encoding: 'utf8' });
+  const wasm = await readFile(new URL('../vendor/bridge-dds/dds-worker.wasm', import.meta.url));
   const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
-  assert.equal(sha256(checkout), sha256(tracked));
-  assert.match(textAttribute, /text: unset\s*$/);
-  assert.equal(checkout.length, 455341);
-  assert.equal(sha256(checkout), 'b436073a6941a8eee13f093b2435906d905d9c8a69080b3e6a8f66d07b252442');
+  assert.equal(checkout.length, 455367);
+  assert.equal(sha256(checkout), '932d339ba405f3abf67b2f925fca7bd00967caa6952093dc37ea35e3a7a0f949');
+  assert.equal(wasm.length, 323370);
+  assert.equal(sha256(wasm), 'ddc660d975c5abd08ec8490a9456dd68d202579c540e9353078b6bdecaddf5f7');
+  const source = checkout.toString('utf8');
+  const encoded = source.match(/Module\["wasm"\]=Module\["wasm"\]\|\|base64Decode\("([A-Za-z0-9+/=]+)"\)/);
+  assert.ok(encoded);
+  assert.equal(sha256(Buffer.from(encoded[1], 'base64')), sha256(wasm));
+  const original = source
+    .replace('Module["wasm"]=Module["wasm"]||base64Decode(', 'Module["wasm"]=base64Decode(')
+    .replace('(output.instance??output).exports', 'output.instance.exports');
+  assert.equal(sha256(Buffer.from(original)), 'b436073a6941a8eee13f093b2435906d905d9c8a69080b3e6a8f66d07b252442');
 });
 
 test('failed Wasm instantiation rejects promptly and permits a later retry', async () => {

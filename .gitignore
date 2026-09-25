@@ -1,5 +1,6 @@
 node_modules/
 .worktrees/
+workers/.wrangler/
 
 # macOS metadata
 .DS_Store

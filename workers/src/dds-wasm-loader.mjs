@@ -92,9 +92,9 @@ function bind(module) {
   };
 }
 
-export async function loadDdsModule() {
+export async function loadDdsModule(precompiledWasm) {
   if (!modulePromise) {
-    modulePromise = Promise.resolve().then(createDds).then(bind).catch(() => {
+    modulePromise = Promise.resolve().then(() => createDds(precompiledWasm ? { wasm: precompiledWasm } : undefined)).then(bind).catch(() => {
       modulePromise = undefined;
       const error = new Error('DDS module initialization failed');
       error.code = 'DDS_FAILURE';

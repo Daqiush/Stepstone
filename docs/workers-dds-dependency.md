@@ -1,10 +1,12 @@
 # Workers DDS dependency
 
-The Worker bundle uses a vendored, single-file ESM build of double-dummy solver
-(DDS). `workers/vendor/bridge-dds/dds-worker.mjs` embeds its Wasm bytes as
-base64. It does not load a separate asset at runtime. The generated module is
-imported only by `workers/src/dds-wasm-loader.mjs`; no npm dependency or Node
-runtime API is involved.
+The Worker bundle uses a vendored ESM build of double-dummy solver (DDS).
+`workers/vendor/bridge-dds/dds-worker.mjs` retains the original embedded Wasm
+bytes for the plain Node test path. Workers cannot compile those bytes at
+runtime, so `workers/vendor/bridge-dds/dds-worker.wasm` is also imported as a
+static, precompiled module by the feasibility Durable Object. The loader passes
+that module to the generated Emscripten glue. There is no runtime network fetch
+or Node API in the Worker path.
 
 ## Exact source and license
 
@@ -20,16 +22,17 @@ runtime API is involved.
   commit `3d6d8ee910466516a53e665b86458faa81dae9ba` installs Emscripten
   `3.1.74`, release commit `c2655005234810c7c42e02a18e4696554abe0352`.
 
-The vendored ESM file is 455,341 bytes with SHA-256
+The pinned single-file ESM output before Worker adaptation is 455,341 bytes
+with SHA-256
 `b436073a6941a8eee13f093b2435906d905d9c8a69080b3e6a8f66d07b252442`.
-This is the exact tracked and checkout byte sequence, including CRLF line
-endings; `workers/vendor/bridge-dds/.gitattributes` sets `-text` for this
-generated file so Git does not convert it on any platform. The loader test
-compares the checkout bytes to the Git index and checks this pinned hash.
-Its decoded embedded Wasm is 323,370 bytes with SHA-256
+The Worker-adapted vendored ESM file is 455,367 bytes with SHA-256
+`932d339ba405f3abf67b2f925fca7bd00967caa6952093dc37ea35e3a7a0f949`.
+The loader test reverses only the two Worker adaptations and checks the
+original pinned hash. The separate Wasm module exactly matches the decoded
+embedded bytes: 323,370 bytes with SHA-256
 `ddc660d975c5abd08ec8490a9456dd68d202579c540e9353078b6bdecaddf5f7`.
-An independent repeat build from these commits, followed by the documented
-one-substitution post-processing step, produced byte-identical output.
+`workers/vendor/bridge-dds/.gitattributes` sets `-text` for the generated
+artifacts so Git does not convert them on any platform.
 
 ## Rebuild
 
@@ -42,14 +45,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File workers/vendor/bridge-dds/bu
 The [build script](../workers/vendor/bridge-dds/build.ps1) clones and checks out
 both pinned sources, installs the pinned toolchain into that work directory,
 compiles the upstream `dds/src/Makefiles/sources.txt` source set, patches one
-Emscripten-generated error handler, and checks the resulting SHA-256. The
+Emscripten-generated error handler, extracts the exact Wasm bytes, makes two
+small Worker glue adaptations, and checks all resulting SHA-256 values. The
 unpatched output has SHA-256
 `0ad3615f1be57389e16457ba0514fa04e86d393dc4d5fc7298f7f66f3055f218`.
 The only change replaces `error=>{console.error(error)}` with
 `error=>{readyPromiseReject(error)}`. Emscripten 3.1.74's generated minimal
 runtime otherwise leaves the module's ready promise pending when
 `WebAssembly.instantiate` rejects. The embedded Wasm bytes are unchanged. The
-script does not activate a global toolchain. Its full compiler flags are:
+two Worker adaptations let a supplied `WebAssembly.Module` take precedence over
+decoded bytes and accept either the `WebAssembly.Instance` result of
+`instantiate(module, imports)` or the `{ instance }` result of
+`instantiate(bytes, imports)`. The script does not activate a global toolchain.
+Its full compiler flags are:
 
 ```text
 -D__WASM__ -O3 -std=c++11
@@ -60,12 +68,11 @@ script does not activate a global toolchain. Its full compiler flags are:
 -sENVIRONMENT=worker -sMINIMAL_RUNTIME=1 -sEXPORT_KEEPALIVE=1 -sFILESYSTEM=0
 ```
 
-The artifact is Worker-safe because it contains no dynamic import, Node
-`require`, `fetch`, `XMLHttpRequest`, `import.meta`, or
-`WebAssembly.instantiateStreaming`. Its sole Wasm instantiation uses decoded
-embedded bytes. The loader test imports it in plain Node ESM with network APIs
-set to throw; Node is used only as the test host and contributes no runtime
-dependency to the generated file.
+The Worker path imports the `.wasm` file statically and passes the precompiled
+module to `loadDdsModule()`. Its sole Wasm instantiation uses that module.
+The loader test also runs the no-argument `loadDdsModule()` path in plain Node
+ESM with network APIs set to throw. Node is only the test host and contributes
+no runtime dependency to the generated file.
 
 ## Adapter mapping
 

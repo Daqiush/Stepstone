@@ -1,4 +1,5 @@
-# Preserve the pinned generated output and upstream license text byte-for-byte.
+# Preserve generated runtime artifacts and upstream license text byte-for-byte.
 dds-worker.mjs -text -whitespace
+dds-worker.wasm -text -whitespace
 LICENSE.bridge-dds -whitespace
 LICENSE.dds -whitespace
