@@ -73,9 +73,8 @@ async function runCase(item) {
       ? validateWorkerSolveCandidates(response.result, deal)
       : normalizeDdsResult(kind, response.result); }
     catch (error) { throw new Error(`Malformed Worker response: ${error.message}`); }
-    if (response.metrics.memoryBytes !== undefined
-        && (!Number.isSafeInteger(response.metrics.memoryBytes) || response.metrics.memoryBytes < 0)) {
-      throw new Error('Malformed Worker response: invalid memoryBytes metric');
+    if (!Number.isSafeInteger(response.metrics.heapBytes) || response.metrics.heapBytes <= 0) {
+      throw new Error('Malformed Worker response: invalid heapBytes metric');
     }
   }
   if (kind === 'solve') {
@@ -99,7 +98,7 @@ async function runCase(item) {
   const comparison = compareDdsResults(kind, baseline, worker.result);
   const record = { id: item.id, kind, depth: item.depth ?? null, baseline, worker: worker.result, baselineMs, workerMs,
     initMs: worker.metrics.initMs, solveCpuMs: worker.metrics.solveMs, queueDelayMs,
-    memoryBytes: Number.isFinite(worker.metrics.memoryBytes) ? worker.metrics.memoryBytes : null };
+    heapBytes: worker.metrics.heapBytes };
   report.benchmark.operations.push(record);
   if (comparison.parityMismatch) report.benchmark.parityMismatches.push({ id: item.id, kind, baseline, worker: worker.result });
   if (comparison.candidateDifference) report.benchmark.candidateDifferences.push({ id: item.id, kind, score: worker.result.score,
@@ -108,7 +107,8 @@ async function runCase(item) {
     report.benchmark.solveCpuMs.push(worker.metrics.solveMs);
     report.benchmark.queueDelayMs.push(queueDelayMs);
   }
-  if (record.memoryBytes !== null) report.benchmark.maxMemoryBytes = Math.max(report.benchmark.maxMemoryBytes ?? 0, record.memoryBytes);
+  // Maximum observed across operations, not an unobserved process-memory peak.
+  report.benchmark.maxMemoryBytes = Math.max(report.benchmark.maxMemoryBytes ?? 0, record.heapBytes);
 }
 
 try {

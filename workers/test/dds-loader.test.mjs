@@ -21,8 +21,8 @@ test('vendored runtime and precompiled Wasm derive exactly from the pinned singl
   const checkout = await readFile(new URL('../vendor/bridge-dds/dds-worker.mjs', import.meta.url));
   const wasm = await readFile(new URL('../vendor/bridge-dds/dds-worker.wasm', import.meta.url));
   const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
-  assert.equal(checkout.length, 455367);
-  assert.equal(sha256(checkout), '932d339ba405f3abf67b2f925fca7bd00967caa6952093dc37ea35e3a7a0f949');
+  assert.equal(checkout.length, 455375);
+  assert.equal(sha256(checkout), 'da11523782524ae2b4274e1123794f0a50e47403924dbb90b0ddde9bb723ac1d');
   assert.equal(wasm.length, 323370);
   assert.equal(sha256(wasm), 'ddc660d975c5abd08ec8490a9456dd68d202579c540e9353078b6bdecaddf5f7');
   const source = checkout.toString('utf8');
@@ -32,7 +32,7 @@ test('vendored runtime and precompiled Wasm derive exactly from the pinned singl
   const original = source
     .replace('Module["wasm"]=Module["wasm"]||base64Decode(', 'Module["wasm"]=base64Decode(')
     .replace('(output.instance??output).exports', 'output.instance.exports');
-  assert.equal(sha256(Buffer.from(original)), 'b436073a6941a8eee13f093b2435906d905d9c8a69080b3e6a8f66d07b252442');
+  assert.equal(sha256(Buffer.from(original)), '875c4ed0ab297192e92dfbb19ee25c889f77eacafa8c490504958f69492519af');
 });
 
 test('failed Wasm instantiation rejects promptly and permits a later retry', async () => {
@@ -61,11 +61,13 @@ test('initializes embedded DDS once without network APIs and solves real PBN pos
   const originalInstantiate = WebAssembly.instantiate;
   let instantiations = 0;
   const allocations = [];
+  let actualMemory;
   globalThis.fetch = () => { throw new Error('DDS attempted fetch'); };
   globalThis.XMLHttpRequest = class { constructor() { throw new Error('DDS attempted XHR'); } };
   WebAssembly.instantiate = async (...args) => {
     instantiations += 1;
     const result = await originalInstantiate(...args);
+    actualMemory = result.instance.exports.memory;
     const exports = { ...result.instance.exports,
       malloc(size) { allocations.push(size); return result.instance.exports.malloc(size); } };
     return { instance: { exports } };
@@ -74,7 +76,10 @@ test('initializes embedded DDS once without network APIs and solves real PBN pos
     const [first, second] = await Promise.all([loadDdsModule(), loadDdsModule()]);
     assert.strictEqual(first, second);
     assert.equal(instantiations, 1);
-    assert.deepEqual(Object.keys(first).sort(), ['calcDDTablePbn', 'solveBoardPbn']);
+    assert.deepEqual(Object.keys(first).sort(), ['calcDDTablePbn', 'heapBytes', 'solveBoardPbn']);
+    assert.ok(actualMemory instanceof WebAssembly.Memory);
+    assert.ok(Number.isSafeInteger(first.heapBytes()) && first.heapBytes() > 0);
+    assert.equal(first.heapBytes(), actualMemory.buffer.byteLength);
     const table = first.calcDDTablePbn('N:AKT74.A65.J96.84 E:J53.KQJT7.T75.97 S:.43.KQ32.AKJT653 W:Q9862.982.A84.Q2');
     assert.deepEqual(Object.keys(table).sort(), ['E', 'N', 'S', 'W']);
     for (const seat of ['N', 'E', 'S', 'W']) for (const strain of ['S', 'H', 'D', 'C', 'NT']) {
@@ -84,6 +89,7 @@ test('initializes embedded DDS once without network APIs and solves real PBN pos
     assert.deepEqual(solve, { score: 1, cards: [{ suit: 'S', rank: 14 }] });
     const partial = first.solveBoardPbn('trump=NT;leader=N;turn=E;trick=SA;hands=N:... E:K... S:Q... W:J...');
     assert.deepEqual(partial, { score: 0, cards: [{ suit: 'S', rank: 13 }] });
+    assert.equal(first.heapBytes(), actualMemory.buffer.byteLength);
     assert.deepEqual(allocations.slice(-4), [112, 216, 112, 216]);
   } finally {
     globalThis.fetch = originalFetch;

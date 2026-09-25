@@ -45,12 +45,16 @@ try {
 & (Join-Path $emsdk 'upstream/emscripten/em++.bat') `
   -D__WASM__ -O3 -std=c++11 @sources -o $output `
   '-sEXPORTED_FUNCTIONS=["_malloc","_free","_SetMaxThreads","_AnalysePlayPBN","_CalcDDtablePBN","_SolveBoardPBN","_DealerPar"]' `
-  '-sEXPORTED_RUNTIME_METHODS=["cwrap","ccall","getValue","setValue","stringToUTF8","UTF8ToString"]' `
+  '-sEXPORTED_RUNTIME_METHODS=["cwrap","ccall","getValue","setValue","stringToUTF8","UTF8ToString","HEAPU8"]' `
   -sMODULARIZE=1 -sSINGLE_FILE=1 -sEXPORT_ES6=1 -sNO_EXIT_RUNTIME=1 `
   -sALLOW_MEMORY_GROWTH=1 -sASSERTIONS=1 -sSTACK_OVERFLOW_CHECK=1 `
   -sENVIRONMENT=worker -sMINIMAL_RUNTIME=1 -sEXPORT_KEEPALIVE=1 -sFILESYSTEM=0
 if ($LASTEXITCODE -ne 0) { throw 'DDS compilation failed' }
 } finally { Pop-Location }
+$unpatchedHash = (Get-FileHash -LiteralPath $output -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($unpatchedHash -ne 'ec0a2b8bc5713996907d9afd8e8863b26ecee677f18b482ecd723922084db27c') {
+  throw "Unpatched artifact hash mismatch: $unpatchedHash"
+}
 # Emscripten 3.1.74's minimal runtime logs an instantiate error but leaves its
 # ready promise pending. Settle that promise with the same error instead.
 $oldHandler = 'error=>{console.error(error)}'
@@ -64,7 +68,7 @@ if ($generated.Split(@($oldHandler), [System.StringSplitOptions]::None).Length -
   [System.Text.UTF8Encoding]::new($false)
 )
 $actual = (Get-FileHash -LiteralPath $output -Algorithm SHA256).Hash.ToLowerInvariant()
-$expected = 'b436073a6941a8eee13f093b2435906d905d9c8a69080b3e6a8f66d07b252442'
+$expected = '875c4ed0ab297192e92dfbb19ee25c889f77eacafa8c490504958f69492519af'
 if ($actual -ne $expected) { throw "Artifact hash mismatch: $actual" }
 
 # Workers cannot compile Wasm from bytes at runtime. Keep the exact pinned
@@ -93,7 +97,7 @@ $workerOutput = Join-Path $target 'dds-worker.mjs'
 $workerGlue = $pinned.Replace($wasmInitializer, $wasmInitializerWorker).Replace($instanceAccess, $instanceAccessWorker)
 [System.IO.File]::WriteAllText($workerOutput, $workerGlue, [System.Text.UTF8Encoding]::new($false))
 $workerHash = (Get-FileHash -LiteralPath $workerOutput -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($workerHash -ne '932d339ba405f3abf67b2f925fca7bd00967caa6952093dc37ea35e3a7a0f949') {
+if ($workerHash -ne 'da11523782524ae2b4274e1123794f0a50e47403924dbb90b0ddde9bb723ac1d') {
   throw "Worker glue hash mismatch: $workerHash"
 }
 Write-Output "Reproduced $output SHA256 $actual"

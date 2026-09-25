@@ -59,7 +59,12 @@ export function decodeFutureTricks(module, future) {
 
 function bind(module) {
   module._SetMaxThreads(0);
+  // Emscripten refreshes the exported view after memory growth. Read it for
+  // each sample instead of retaining an earlier, possibly detached buffer.
+  const heapBytes = () => module.HEAPU8.buffer.byteLength;
+  if (!Number.isSafeInteger(heapBytes()) || heapBytes() <= 0) throw new Error('DDS Wasm memory unavailable');
   return {
+    heapBytes,
     calcDDTablePbn(value) {
       return withBuffers(module, [80, 80], (deal, result) => {
         module.stringToUTF8(ddsHands(value), deal, 80);

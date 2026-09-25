@@ -110,6 +110,13 @@ const coverageEvidence = benchmark.status !== 'complete' || (
   && recordedCoverage
 );
 const candidateDiagnosticsValid = validateCandidateDiagnostics(recorded ?? [], benchmark.candidateDifferences);
+const heapSamplesValid = recorded === null || (recorded.length > 0
+  && recorded.every((op) => Number.isSafeInteger(op?.heapBytes) && op.heapBytes > 0));
+const observedMaxHeapBytes = recorded && heapSamplesValid
+  ? recorded.reduce((max, op) => Math.max(max, op.heapBytes), 0) : null;
+const memoryEvidenceValid = Number.isSafeInteger(benchmark.maxMemoryBytes)
+  && benchmark.maxMemoryBytes > 0 && benchmark.maxMemoryBytes < MEMORY_LIMIT_BYTES
+  && heapSamplesValid && (recorded === null || benchmark.maxMemoryBytes === observedMaxHeapBytes);
 const complete = integer(benchmark.iterations) && benchmark.iterations >= 100000
   && benchmark.completedIterations === benchmark.iterations
   && integer(benchmark.fixtureCount) && benchmark.fixtureCount > 0
@@ -125,8 +132,8 @@ gate('candidate-diagnostics', candidateDiagnosticsValid,
   `${benchmark.candidateDifferences?.length ?? 'missing'} entries reconciled to recorded operations`);
 gate('wasm-bundle', finite(benchmark.bundleBytes) && benchmark.bundleBytes < WASM_LIMIT_BYTES,
   `${benchmark.bundleBytes ?? 'missing'} bytes < ${WASM_LIMIT_BYTES} bytes`);
-gate('memory', finite(benchmark.maxMemoryBytes) && benchmark.maxMemoryBytes < MEMORY_LIMIT_BYTES,
-  `${benchmark.maxMemoryBytes ?? 'missing'} bytes < ${MEMORY_LIMIT_BYTES} bytes`);
+gate('memory', memoryEvidenceValid,
+  `${benchmark.maxMemoryBytes ?? 'missing'} bytes < ${MEMORY_LIMIT_BYTES} bytes; observed maximum ${observedMaxHeapBytes ?? 'missing'} bytes`);
 gate('p99-solve-cpu', samples(benchmark.solveCpuMs) && p99 < 1000,
   `${p99 ?? 'missing'} ms < 1000 ms`);
 gate('max-solve-cpu', samples(benchmark.solveCpuMs) && maxSolve < 10000,

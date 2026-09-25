@@ -28,6 +28,7 @@ export class FeasibilityRoom {
         throw new Error('isolated initialization failure');
       }
       const module = await loadDdsModule(ddsWasm);
+      this.heapBytes = module.heapBytes;
       this.client = createWasmDdsClient({ loadModule: async () => ({
         calcDDTablePbn: (hands) => module.calcDDTablePbn(hands),
         solveBoardPbn: (deal) => {
@@ -40,6 +41,7 @@ export class FeasibilityRoom {
       }) });
     } catch {
       this.client = null;
+      this.heapBytes = null;
     }
     this.initMs = performance.now() - started;
   }
@@ -58,7 +60,8 @@ export class FeasibilityRoom {
     }
     if (path === '/__dds/metrics') {
       await request.text();
-      return Response.json({ ok: true, completedOperations: this.completedOperations, initMs: this.initMs });
+      return Response.json({ ok: true, completedOperations: this.completedOperations,
+        initMs: this.initMs, heapBytes: this.heapBytes?.() ?? null });
     }
     let body;
     try { body = await request.json(); }
@@ -78,7 +81,7 @@ export class FeasibilityRoom {
         ? await this.client.calcDDTable(body?.hands)
         : await this.client.solveBoard(body?.deal);
       const solveMs = performance.now() - started;
-      const metrics = { initMs: this.initMs, solveMs };
+      const metrics = { initMs: this.initMs, solveMs, heapBytes: this.heapBytes() };
       this.completedOperations += 1;
       return Response.json({ ok: true, result, metrics });
     } catch (error) {

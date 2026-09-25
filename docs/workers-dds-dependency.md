@@ -22,11 +22,11 @@ or Node API in the Worker path.
   commit `3d6d8ee910466516a53e665b86458faa81dae9ba` installs Emscripten
   `3.1.74`, release commit `c2655005234810c7c42e02a18e4696554abe0352`.
 
-The pinned single-file ESM output before Worker adaptation is 455,341 bytes
+The pinned single-file ESM output before Worker adaptation is 455,349 bytes
 with SHA-256
-`b436073a6941a8eee13f093b2435906d905d9c8a69080b3e6a8f66d07b252442`.
-The Worker-adapted vendored ESM file is 455,367 bytes with SHA-256
-`932d339ba405f3abf67b2f925fca7bd00967caa6952093dc37ea35e3a7a0f949`.
+`875c4ed0ab297192e92dfbb19ee25c889f77eacafa8c490504958f69492519af`.
+The Worker-adapted vendored ESM file is 455,375 bytes with SHA-256
+`da11523782524ae2b4274e1123794f0a50e47403924dbb90b0ddde9bb723ac1d`.
 The loader test reverses only the two Worker adaptations and checks the
 original pinned hash. The separate Wasm module exactly matches the decoded
 embedded bytes: 323,370 bytes with SHA-256
@@ -48,7 +48,7 @@ compiles the upstream `dds/src/Makefiles/sources.txt` source set, patches one
 Emscripten-generated error handler, extracts the exact Wasm bytes, makes two
 small Worker glue adaptations, and checks all resulting SHA-256 values. The
 unpatched output has SHA-256
-`0ad3615f1be57389e16457ba0514fa04e86d393dc4d5fc7298f7f66f3055f218`.
+`ec0a2b8bc5713996907d9afd8e8863b26ecee677f18b482ecd723922084db27c`.
 The only change replaces `error=>{console.error(error)}` with
 `error=>{readyPromiseReject(error)}`. Emscripten 3.1.74's generated minimal
 runtime otherwise leaves the module's ready promise pending when
@@ -62,7 +62,7 @@ Its full compiler flags are:
 ```text
 -D__WASM__ -O3 -std=c++11
 -sEXPORTED_FUNCTIONS=["_malloc","_free","_SetMaxThreads","_AnalysePlayPBN","_CalcDDtablePBN","_SolveBoardPBN","_DealerPar"]
--sEXPORTED_RUNTIME_METHODS=["cwrap","ccall","getValue","setValue","stringToUTF8","UTF8ToString"]
+-sEXPORTED_RUNTIME_METHODS=["cwrap","ccall","getValue","setValue","stringToUTF8","UTF8ToString","HEAPU8"]
 -sMODULARIZE=1 -sSINGLE_FILE=1 -sEXPORT_ES6=1 -sNO_EXIT_RUNTIME=1
 -sALLOW_MEMORY_GROWTH=1 -sASSERTIONS=1 -sSTACK_OVERFLOW_CHECK=1
 -sENVIRONMENT=worker -sMINIMAL_RUNTIME=1 -sEXPORT_KEEPALIVE=1 -sFILESYSTEM=0
@@ -118,9 +118,24 @@ fail the evidence gate. The feasibility gate additionally requires 100,000 compl
 random cases, all fixtures, and resource metrics, so a short run can show
 observed parity without passing the overall gate.
 
-The pinned Emscripten module internally owns a `WebAssembly.Memory`, but its
-returned public object exposes neither `_memory` nor `HEAP8`. Those names in
-the generated glue are not usable public metrics; `HEAP8` access throws an
-Emscripten export error. The harness therefore leaves `memoryBytes` absent and
-the report's `maxMemoryBytes` null. The memory gate remains failed until a
-genuine byte measurement is available from a supported runtime interface.
+Emscripten 3.1.74's `runtime_shared.js` supports exporting `HEAPU8` through
+`EXPORTED_RUNTIME_METHODS`. Its `updateMemoryViews()` replaces the exported
+typed array whenever Wasm linear memory grows. The loader reads
+`module.HEAPU8.buffer.byteLength` for each metric sample after initialization
+and each solve/table operation. This is the current Wasm linear-memory byte
+length, not JavaScript process memory or a configured estimate. The build uses
+`ALLOW_MEMORY_GROWTH=1`, so this value can increase. The benchmark records
+each operation's `heapBytes`; `maxMemoryBytes` is the maximum observed sample,
+not a continuously monitored peak. Historical reports captured before this
+export retain missing memory metrics and must not be backfilled.
+When operation records are present, the memory gate requires a positive integer
+`heapBytes` on every record and exact agreement between their observed maximum
+and `maxMemoryBytes`. A missing or understated sample fails the memory gate.
+
+`workers/test/results/dds-feasibility-memory-small.json` is a new local Worker
+run over all 28 fixtures and 26 seeded random cases. Every solve depth 0–12
+is represented. All 54 operations recorded `heapBytes: 18939904`, yielding
+`maxMemoryBytes: 18939904` (about 18.1 MiB). Its memory gate passes; the
+benchmark-completeness gate remains failed because the required 100,000 random
+cases have not been rerun. The older `dds-feasibility.json` remains an
+unaltered historical partial report with `maxMemoryBytes: null`.

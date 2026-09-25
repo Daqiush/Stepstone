@@ -41,6 +41,66 @@ test('a complete report below all limits passes and prints every named gate', ()
   }
 });
 
+function sampledMemoryReport(heapBytes = [48 * MB, 48 * MB]) {
+  const report = valid();
+  report.benchmark.operations = heapBytes.map((bytes, index) => ({
+    id: `sample-${index}`, kind: 'table', heapBytes: bytes,
+  }));
+  report.benchmark.maxMemoryBytes = Math.max(...heapBytes);
+  return report;
+}
+
+test('memory evidence passes when the summary exactly matches positive operation heap samples', () => {
+  const result = check(sampledMemoryReport([47 * MB, 48 * MB]));
+  assert.match(result.stdout, /PASS memory/);
+});
+
+test('memory evidence rejects an understated maximum despite a below-limit summary', () => {
+  const report = sampledMemoryReport([48 * MB, 49 * MB]);
+  report.benchmark.maxMemoryBytes = 48 * MB;
+  const result = check(report);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stdout, /FAIL memory/);
+});
+
+test('memory evidence rejects a maximum that exceeds every recorded sample', () => {
+  const report = sampledMemoryReport([47 * MB, 48 * MB]);
+  report.benchmark.maxMemoryBytes = 49 * MB;
+  const result = check(report);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stdout, /FAIL memory/);
+});
+
+test('memory evidence rejects a noninteger summary', () => {
+  const report = sampledMemoryReport();
+  report.benchmark.maxMemoryBytes += 0.5;
+  const result = check(report);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stdout, /FAIL memory/);
+});
+
+for (const [name, value] of [
+  ['missing', undefined], ['zero', 0], ['negative', -1],
+  ['noninteger', 48 * MB + 0.5], ['non-number', '50331648'],
+]) test(`memory evidence rejects ${name} operation heap bytes`, () => {
+  const report = sampledMemoryReport();
+  if (value === undefined) delete report.benchmark.operations[0].heapBytes;
+  else report.benchmark.operations[0].heapBytes = value;
+  const result = check(report);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stdout, /FAIL memory/);
+});
+
+test('memory evidence rejects an empty operation list and historical missing values', () => {
+  const empty = sampledMemoryReport();
+  empty.benchmark.operations = [];
+  assert.match(check(empty).stdout, /FAIL memory/);
+  const historical = sampledMemoryReport();
+  historical.benchmark.operations[0].heapBytes = null;
+  historical.benchmark.maxMemoryBytes = null;
+  assert.match(check(historical).stdout, /FAIL memory/);
+});
+
 test('candidate differences are visible diagnostics and do not fail parity', () => {
   const report = valid();
   report.benchmark.operations = [{ id: 'tie', kind: 'solve', baseline: { score: 2, cards: [{ suit: 'S', rank: 2 }] },

@@ -1,13 +1,15 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { execFile, spawn } from 'node:child_process';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
+const execFileAsync = promisify(execFile);
 const wrangler = fileURLToPath(new URL('../../node_modules/wrangler/bin/wrangler.js', import.meta.url));
 const config = fileURLToPath(new URL('../wrangler.jsonc', import.meta.url));
 const oneTrickDeal = {
@@ -56,6 +58,7 @@ async function runtime(bindings = {}) {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   const runner = {
+    base,
     get readinessProbeBodyConsumed() { return readinessResponse?.bodyUsed; },
     dispatchFetch: (url, init) => fetch(`${base}${new URL(url).pathname}`, init),
     async dispose() {
@@ -108,19 +111,40 @@ test('real Workers runtime solves a deal and reports bounded timings', async () 
   assert.equal(body.ok, true);
   assert.ok(Number.isFinite(body.metrics.initMs) && body.metrics.initMs >= 0);
   assert.ok(Number.isFinite(body.metrics.solveMs) && body.metrics.solveMs >= 0);
-  // The pinned Emscripten return object does not expose its Wasm Memory.
-  // Keep the metric unavailable rather than reporting a process estimate.
-  assert.equal(Object.hasOwn(body.metrics, 'memoryBytes'), false);
+  assert.ok(Number.isSafeInteger(body.metrics.heapBytes) && body.metrics.heapBytes > 0);
+  const metric = await post(mf, '/__dds/metrics');
+  assert.equal(metric.status, 200);
+  assert.equal(metric.body.heapBytes, body.metrics.heapBytes);
 });
 
 test('table uses the existing five strains by four seats representation', async () => {
   const { status, body } = await post(mf, '/__dds/table', { hands: oneTrickDeal.hands });
   assert.equal(status, 200);
   assert.equal(body.ok, true);
+  assert.ok(Number.isSafeInteger(body.metrics.heapBytes) && body.metrics.heapBytes > 0);
+  assert.equal((await post(mf, '/__dds/metrics')).body.heapBytes, body.metrics.heapBytes);
   assert.equal(body.result.length, 5);
   for (const row of body.result) {
     assert.equal(row.length, 4);
     for (const tricks of row) assert.ok(Number.isInteger(tricks) && tricks >= 0 && tricks <= 13);
+  }
+});
+
+test('real Worker benchmark records current heap bytes and maximum observed bytes', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'stepstone-dds-memory-report-'));
+  const out = join(dir, 'report.json');
+  try {
+    await execFileAsync(process.execPath, [join(root, 'scripts/benchmark-worker-dds.mjs'),
+      '--seed', '20260923', '--iterations', '1', '--url', mf.base, '--out', out],
+    { cwd: root, timeout: 120000 });
+    const report = JSON.parse(await readFile(out, 'utf8'));
+    const observed = report.benchmark.operations.map((operation) => operation.heapBytes);
+    assert.ok(observed.length > 1);
+    assert.ok(observed.every((bytes) => Number.isSafeInteger(bytes) && bytes > 0));
+    assert.equal(report.benchmark.maxMemoryBytes, Math.max(...observed));
+    assert.equal(report.benchmark.maxMemoryBytes, (await post(mf, '/__dds/metrics')).body.heapBytes);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 });
 
