@@ -5,13 +5,24 @@ const { join, resolve } = require('node:path');
 const { tmpdir } = require('node:os');
 
 let state;
+let remoteCanonical;
 const ROOT = resolve(__dirname, '..');
 
 function tempRun() { return mkdtempSync(join(tmpdir(), 'remote-dds-soak-state-')); }
-function request(index) { return { route: '/__dds/solve', body: { index, z: 2, a: 1 } }; }
+function request(index) { return { route: '/__dds/solve', body: `{"z":2,"index":${index},"a":1}` }; }
 function accounting(overrides = {}) {
-  return { workerInbound: 1, doFetchArrivals: 1, queuedDoCommands: 2, sqliteRows: 2, ...overrides };
+  return { workerInbound: 1, doFetchArrivals: 1, queuedDoCommands: 2, sqliteReads: 1, sqliteWrites: 1, ...overrides };
 }
+
+test('request hash exactly matches the remote UTF-8 body-string canonicalization', async () => {
+  state ??= await import('../scripts/remote-dds-soak-state.mjs');
+  remoteCanonical ??= await import('../workers/src/remote-test-canonical.mjs');
+  const body = '{"z":2,"a":1}';
+  const canonical = remoteCanonical.canonicalHarnessRequest('/__dds/solve', body);
+  assert.equal(state.canonicalRequest('/__dds/solve', body), canonical);
+  assert.equal(state.requestHash('/__dds/solve', body), state.sha256Utf8(canonical));
+  assert.notEqual(state.requestHash('/__dds/solve', body), state.requestHash('/__dds/solve', '{"a":1,"z":2}'));
+});
 
 test('creates the pinned deterministic manifest', async () => {
   state ??= await import('../scripts/remote-dds-soak-state.mjs');
@@ -31,7 +42,7 @@ test('persists an fsynced intent and recovers it as a deterministic replay', asy
   try {
     const run = state.createSoakState({ dir, root: ROOT, requestForIndex: request });
     const intent = run.recordIntent({ index: 0, operationId: 'op-0', ...request(0) });
-    assert.equal(intent.requestHash, state.requestHash('/__dds/solve', { a: 1, index: 0, z: 2 }));
+    assert.equal(intent.requestHash, state.requestHash('/__dds/solve', request(0).body));
     const resumed = state.recoverSoakState({ dir, root: ROOT, requestForIndex: request });
     assert.equal(resumed.recovery.kind, 'replay-pending');
     assert.equal(resumed.recovery.intent.operationId, 'op-0');
@@ -64,7 +75,7 @@ test('fails closed on journal gap, duplicate, invalid JSON, changed deterministi
       if (scenario === 'gap') writeFileSync(join(dir, 'journal.jsonl'), `${readFileSync(join(dir, 'journal.jsonl'))}${JSON.stringify({ type: 'intent', index: 2, operationId: 'op-2', ...request(2), requestHash: state.requestHash('/__dds/solve', request(2).body) })}\n`);
       if (scenario === 'duplicate') writeFileSync(join(dir, 'journal.jsonl'), `${readFileSync(join(dir, 'journal.jsonl'))}${JSON.stringify({ type: 'completion', index: 0, operationId: 'op-0', responseHash: 'a'.repeat(64), observed: accounting() })}\n`);
       if (scenario === 'invalid-json') writeFileSync(join(dir, 'journal.jsonl'), `${readFileSync(join(dir, 'journal.jsonl'))}{broken\n`);
-      if (scenario === 'changed-request') assert.throws(() => state.recoverSoakState({ dir, root: ROOT, requestForIndex: (index) => ({ route: '/changed', body: { index } }) }), /deterministic request changed/i);
+      if (scenario === 'changed-request') assert.throws(() => state.recoverSoakState({ dir, root: ROOT, requestForIndex: (index) => ({ route: '/changed', body: JSON.stringify({ index }) }) }), /deterministic request changed/i);
       if (scenario === 'changed-hash') { const manifest = JSON.parse(readFileSync(join(dir, 'manifest.json'))); manifest.hashes.fixtureCorpus = '0'.repeat(64); writeFileSync(join(dir, 'manifest.json'), JSON.stringify(manifest)); }
       if (scenario !== 'changed-request') assert.throws(() => state.recoverSoakState({ dir, root: ROOT, requestForIndex: request }), /journal|hash/i, scenario);
     } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -116,7 +127,7 @@ test('allows a documented fresh activation at the next shard boundary', async ()
   state ??= await import('../scripts/remote-dds-soak-state.mjs');
   const dir = tempRun();
   try {
-    const boundaryRequest = (index) => ({ route: '/__dds/table', body: { index } });
+    const boundaryRequest = (index) => ({ route: '/__dds/table', body: JSON.stringify({ index }) });
     state.createSoakState({ dir, root: ROOT, requestForIndex: boundaryRequest });
     const journal = [];
     for (let index = 0; index <= 2000; index++) {
@@ -145,5 +156,7 @@ test('projects and enforces all accounting dimensions including replay arrival c
   assert.equal(projected.doFetchArrivals, projected.workerInbound);
   assert.throws(() => state.assertAccountingWithinLimits({ ...baseline, workerInbound: 25001 }), /workerInbound/i);
   assert.throws(() => state.assertAccountingWithinLimits({ ...baseline, queuedDoCommands: 50001 }), /queuedDoCommands/i);
-  assert.throws(() => state.assertAccountingWithinLimits({ ...baseline, sqliteRows: 25001 }), /sqliteRows/i);
+  assert.doesNotThrow(() => state.assertAccountingWithinLimits(baseline));
+  assert.throws(() => state.assertAccountingWithinLimits({ ...baseline, sqliteReads: 25001 }), /sqliteReads/i);
+  assert.throws(() => state.assertAccountingWithinLimits({ ...baseline, sqliteWrites: 25001 }), /sqliteWrites/i);
 });

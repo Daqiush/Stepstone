@@ -2,10 +2,11 @@ import { appendFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSyn
 import { createHash } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { writeReportCheckpoint } from './worker-dds-checkpoint.mjs';
+import { canonicalHarnessRequest } from '../workers/src/remote-test-canonical.mjs';
 
 export const SOAK_SEED = 20260923;
 export const ACCOUNTING_SCHEMA_VERSION = 1;
-export const ACCOUNTING_LIMITS = Object.freeze({ workerInbound: 25000, queuedDoCommands: 50000, sqliteRows: 25000 });
+export const ACCOUNTING_LIMITS = Object.freeze({ workerInbound: 25000, queuedDoCommands: 50000, sqliteReads: 25000, sqliteWrites: 25000 });
 const JOURNAL = 'journal.jsonl';
 const MANIFEST = 'manifest.json';
 const REPORT = 'report.json';
@@ -19,7 +20,9 @@ export function canonicalJson(value) {
 }
 
 export function sha256Utf8(value) { return createHash('sha256').update(value, 'utf8').digest('hex'); }
-export function canonicalRequest(route, body) { return canonicalJson({ route, body }); }
+// `body` is the exact UTF-8 text passed to fetch. Do not parse/re-serialize it:
+// remote authorization hashes the literal request body text.
+export function canonicalRequest(route, body) { return canonicalHarnessRequest(route, body); }
 export function requestHash(route, body) { return sha256Utf8(canonicalRequest(route, body)); }
 
 function hashFile(file) { return createHash('sha256').update(readFileSync(file)).digest('hex'); }
@@ -68,7 +71,7 @@ function readJournal(dir) {
     catch { throw new Error(`Invalid journal JSON at line ${index + 1}`); }
   });
 }
-function zeroAccounting() { return { workerInbound: 0, doFetchArrivals: 0, queuedDoCommands: 0, sqliteRows: 0 }; }
+function zeroAccounting() { return { workerInbound: 0, doFetchArrivals: 0, queuedDoCommands: 0, sqliteReads: 0, sqliteWrites: 0 }; }
 function addAccounting(total, delta) {
   const next = { ...total };
   for (const key of Object.keys(next)) {
@@ -98,7 +101,8 @@ export function projectAccounting({ fixtures = 0, coldStarts = 0, metricProbes =
     workerInbound,
     doFetchArrivals: workerInbound,
     queuedDoCommands: 43780 + fixtures * 2 + metricProbes + closeSmokeProbes,
-    sqliteRows: (22000 + fixtures + pendingReplays) * 2 + coldStarts + metricProbes + closeSmokeProbes,
+    sqliteReads: 22000 + fixtures + pendingReplays + metricProbes + closeSmokeProbes,
+    sqliteWrites: 22000 + fixtures + metricProbes + closeSmokeProbes,
   };
 }
 
@@ -141,19 +145,20 @@ function makeReport(snapshot) {
   return { version: 1, completedCursor: snapshot.cursor, observed: snapshot.observed, activationIds: snapshot.activationIds, terminalFailure: snapshot.terminalFailure ?? null };
 }
 
-export function createSoakState({ dir, root, requestForIndex }) {
+export function createSoakState({ dir, root, requestForIndex, projection = projectAccounting() }) {
   if (typeof requestForIndex !== 'function') throw new Error('requestForIndex is required');
+  assertAccountingWithinLimits(projection);
   mkdirSync(dir, { recursive: true });
   const manifest = createRunManifest({ root });
   if (existsSync(file(dir, MANIFEST))) throw new Error('Soak state already exists; use recoverSoakState');
   writeReportCheckpoint(file(dir, MANIFEST), manifest);
   const state = { cursor: 0, pending: null, terminalFailure: null, activationIds: {}, observed: zeroAccounting() };
-  const api = buildStateApi({ dir, requestForIndex, manifest, state });
+  const api = buildStateApi({ dir, requestForIndex, manifest, state, projection });
   writeReportCheckpoint(file(dir, REPORT), api.report);
   return api;
 }
 
-function buildStateApi({ dir, requestForIndex, manifest, state }) {
+function buildStateApi({ dir, requestForIndex, manifest, state, projection }) {
   const saveReport = () => { api.report = makeReport(state); writeReportCheckpoint(file(dir, REPORT), api.report); };
   const requirePending = (operationId) => {
     if (!state.pending) throw new Error('No pending intent');
@@ -173,6 +178,9 @@ function buildStateApi({ dir, requestForIndex, manifest, state }) {
     manifest,
     report: makeReport(state),
     recordIntent({ index, operationId, route, body }) {
+      // This is deliberately immediately before durable intent/dispatch: callers
+      // provide the whole-run projection, including fixtures, probes and replays.
+      assertAccountingWithinLimits(projection);
       if (state.pending || state.terminalFailure) throw new Error('Cannot dispatch while pending or terminally failed');
       const record = { type: 'intent', index, operationId, route, requestHash: requestHash(route, body), canonicalRequest: canonicalRequest(route, body) };
       validateIntent(record, state.cursor, requestForIndex);
@@ -190,12 +198,13 @@ function buildStateApi({ dir, requestForIndex, manifest, state }) {
   return api;
 }
 
-export function recoverSoakState({ dir, root, requestForIndex }) {
+export function recoverSoakState({ dir, root, requestForIndex, projection = projectAccounting() }) {
   if (typeof requestForIndex !== 'function') throw new Error('requestForIndex is required');
+  assertAccountingWithinLimits(projection);
   const manifest = readJson(file(dir, MANIFEST), 'manifest');
   validateManifest(manifest, createRunManifest({ root }));
   const state = replayJournal(readJournal(dir), requestForIndex);
-  const api = buildStateApi({ dir, requestForIndex, manifest, state });
+  const api = buildStateApi({ dir, requestForIndex, manifest, state, projection });
   // A journal is authoritative. Replacing a stale or torn checkpoint is safe.
   writeReportCheckpoint(file(dir, REPORT), api.report);
   api.recovery = state.terminalFailure ? { kind: 'failed', failure: state.terminalFailure }

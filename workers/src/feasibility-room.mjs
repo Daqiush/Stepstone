@@ -18,7 +18,8 @@ export class FeasibilityRoom {
       workerInbound: 0,
       doFetchArrivals: 0,
       queuedDoCommands: 0,
-      sqliteRows: 0,
+      sqliteReads: 0,
+      sqliteWrites: 0,
     };
     this.sql = state.storage.sql;
     this.injectFailure = env.DDS_LOCAL_TEST === 'true' && env.DDS_TEST_FAIL_FIRST_SOLVE === 'true';
@@ -107,7 +108,7 @@ export class FeasibilityRoom {
       'SELECT request_hash, response_json FROM test_operations WHERE run_id = ? AND operation_id = ?',
       identity.runId, identity.operationId,
     ).toArray();
-    this.accounting.sqliteRows += 1;
+    this.accounting.sqliteReads += 1;
     const stored = rows[0];
     if (stored) {
       if (stored.request_hash !== identity.requestHash) return failure('OPERATION_CONFLICT', 409);
@@ -124,7 +125,7 @@ export class FeasibilityRoom {
       'INSERT INTO test_operations (run_id, operation_id, request_hash, response_json, created_at) VALUES (?, ?, ?, ?, ?)',
       identity.runId, identity.operationId, identity.requestHash, JSON.stringify(operationResult), Date.now(),
     );
-    this.accounting.sqliteRows += 1;
+    this.accounting.sqliteWrites += 1;
     return this.remoteEnvelope(operationResult, false);
   }
 

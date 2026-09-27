@@ -1,3 +1,5 @@
+import { canonicalHarnessRequest } from './remote-test-canonical.mjs';
+
 const MAX_REQUEST_BYTES = 32 * 1024;
 const BASE64URL_32_BYTES = /^[A-Za-z0-9_-]{43}$/;
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -40,10 +42,7 @@ function remoteIdentity(headers) {
 }
 
 async function canonicalRequestHash(path, body) {
-  const canonical = new TextEncoder().encode(JSON.stringify({
-    body: new TextDecoder().decode(body),
-    route: path,
-  }));
+  const canonical = new TextEncoder().encode(canonicalHarnessRequest(path, new TextDecoder().decode(body)));
   const digest = await crypto.subtle.digest('SHA-256', canonical);
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }

@@ -266,10 +266,10 @@ test('remote operation replays a persisted table result without new queued work'
     assert.match(first.body.operationResult.activationId, /^[0-9a-f-]{36}$/i);
     assert.equal(second.body.operationResult.activationId, first.body.operationResult.activationId);
     assert.deepEqual(first.body.accounting, {
-      workerInbound: 1, doFetchArrivals: 1, queuedDoCommands: 1, sqliteRows: 2,
+      workerInbound: 1, doFetchArrivals: 1, queuedDoCommands: 1, sqliteReads: 1, sqliteWrites: 1,
     });
     assert.deepEqual(second.body.accounting, {
-      workerInbound: 2, doFetchArrivals: 2, queuedDoCommands: 1, sqliteRows: 3,
+      workerInbound: 2, doFetchArrivals: 2, queuedDoCommands: 1, sqliteReads: 2, sqliteWrites: 1,
     });
   } finally { await isolated.dispose(); }
 });
@@ -305,7 +305,7 @@ test('remote operation replays an ordered solve without enqueueing its solve and
     assert.deepEqual(second.body.operationResult, first.body.operationResult);
     assert.equal(second.body.replayed, true);
     assert.deepEqual(second.body.accounting, {
-      workerInbound: 2, doFetchArrivals: 2, queuedDoCommands: 2, sqliteRows: 3,
+      workerInbound: 2, doFetchArrivals: 2, queuedDoCommands: 2, sqliteReads: 2, sqliteWrites: 1,
     });
   } finally { await isolated.dispose(); }
 });
