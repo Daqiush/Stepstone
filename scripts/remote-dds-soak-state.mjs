@@ -130,7 +130,7 @@ export function projectAccounting({ fixtureTables = 0, fixtureSolves = 0, coldSt
   return {
     workerInbound,
     doFetchArrivals: workerInbound,
-    queuedDoCommands: 43780 + fixtureTables + fixtureSolves * 2 + coldStarts + closeSmokeProbes,
+    queuedDoCommands: 43780 + fixtureTables + fixtureSolves * 2 + closeSmokeProbes,
     sqliteRows: {
       reads: 22000 + auxiliary,
       writes: 22000 + fixtureTables + fixtureSolves + coldStarts + metricProbes + closeSmokeProbes,

@@ -194,9 +194,9 @@ test('projects and enforces all accounting dimensions including replay arrival c
   assert.equal(baseline.workerInbound, 22000);
   assert.equal(baseline.queuedDoCommands, 43780);
   assert.deepEqual(baseline.sqliteRows, { reads: 22000, writes: 22000 });
-  const projected = state.projectAccounting({ fixtures: 3, coldStarts: 11, metricProbes: 2, pendingReplays: 1, closeSmokeProbes: 2 });
-  assert.equal(projected.queuedDoCommands, 43780 + 3 * 2 + 2 + 2);
-  assert.equal(projected.workerInbound, 22000 + 3 + 11 + 2 + 1 + 2);
+  const projected = state.projectAccounting({ fixtureTables: 26, fixtureSolves: 2, coldStarts: 11, metricProbes: 1, pendingReplays: 1, closeSmokeProbes: 2 });
+  assert.equal(projected.queuedDoCommands, 43780 + 26 + 2 * 2 + 2);
+  assert.equal(projected.workerInbound, 22000 + 26 + 2 + 11 + 1 + 1 + 2);
   assert.equal(projected.doFetchArrivals, projected.workerInbound);
   assert.throws(() => state.assertAccountingWithinLimits({ ...baseline, workerInbound: 25001 }), /workerInbound/i);
   assert.throws(() => state.assertAccountingWithinLimits({ ...baseline, queuedDoCommands: 50001 }), /queuedDoCommands/i);
