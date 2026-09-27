@@ -20,7 +20,7 @@ async function runner() { return import('../scripts/remote-worker-dds-soak.mjs')
 test('deployment manifest binds the exact wasm and harness bytes to a deterministic build ID', async () => {
   const mod = await deployment(); const root = repo();
   try {
-    const manifest = mod.createDeploymentManifest({ root, workerVersionId: 'v-123' });
+    const manifest = mod.createDeploymentManifest({ root, verifiedDeployment: { versionId: 'v-123', apiVerified: true, wranglerVersion: '4.0.0' } });
     assert.equal(manifest.version, 1);
     assert.match(manifest.buildId, /^[a-f0-9]{64}$/);
     assert.match(manifest.assets.wasm.sha256, /^[a-f0-9]{64}$/);
@@ -33,7 +33,7 @@ test('deployment manifest binds the exact wasm and harness bytes to a determinis
 test('deployment manifest rejects a missing version instead of assuming compatibility', async () => {
   const mod = await deployment(); const root = repo();
   try {
-    const manifest = mod.createDeploymentManifest({ root, workerVersionId: 'v-123' }); delete manifest.version;
+    const manifest = mod.createDeploymentManifest({ root, verifiedDeployment: { versionId: 'v-123', apiVerified: true, wranglerVersion: '4.0.0' } }); delete manifest.version;
     assert.throws(() => mod.assertDeploymentManifest(manifest, { root }), /version/i);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -41,8 +41,8 @@ test('deployment manifest rejects a missing version instead of assuming compatib
 test('deployment manifest records Wasm bytes and requires an explicit deployed Worker version', async () => {
   const mod = await deployment(); const root = repo();
   try {
-    assert.throws(() => mod.createDeploymentManifest({ root }), /Worker version ID/i);
-    const manifest = mod.createDeploymentManifest({ root, workerVersionId: 'v-123' });
+    assert.throws(() => mod.createDeploymentManifest({ root, workerVersionId: 'v-123' }), /verified deployment/i);
+    const manifest = mod.createDeploymentManifest({ root, verifiedDeployment: { versionId: 'v-123', apiVerified: true, wranglerVersion: '4.0.0' } });
     assert.equal(manifest.assets.wasm.bytes, 7);
     assert.equal(manifest.workerVersionId, 'v-123');
   } finally { rmSync(root, { recursive: true, force: true }); }

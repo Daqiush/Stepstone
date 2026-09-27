@@ -32,8 +32,8 @@ test('creates the pinned deterministic manifest', async () => {
   assert.equal(manifest.randomGenerator, 'xorshift32');
   assert.equal(manifest.shards.length, 11);
   assert.deepEqual(manifest.shards, Array.from({ length: 11 }, (_, shard) => ({ shard, startIndex: shard * 2000, endIndex: shard * 2000 + 1999 })));
-  assert.equal(manifest.accountingSchemaVersion, 2);
-  assert.equal(manifest.journalSchemaVersion, 2);
+  assert.equal(manifest.accountingSchemaVersion, 3);
+  assert.equal(manifest.journalSchemaVersion, 3);
   assert.match(manifest.hashes.randomGenerator, /^[a-f0-9]{64}$/);
   assert.match(manifest.hashes.fixtureCorpus, /^[a-f0-9]{64}$/);
 });
@@ -135,7 +135,7 @@ test('allows a documented fresh activation at the next shard boundary', async ()
     const journal = [];
     for (let index = 0; index <= 2000; index++) {
       const { route, body } = boundaryRequest(index);
-      journal.push({ type: 'intent', index, operationId: `op-${index}`, route,
+      journal.push({ type: 'intent', runId: 'unbound-run', index, operationId: `op-${index}`, route,
         requestHash: state.requestHash(route, body), canonicalRequest: state.canonicalRequest(route, body) });
       journal.push({ type: 'completion', index, operationId: `op-${index}`,
         responseHash: state.sha256Utf8(state.canonicalJson({ ok: true })), activationId: activation(index < 2000 ? 1 : 2),

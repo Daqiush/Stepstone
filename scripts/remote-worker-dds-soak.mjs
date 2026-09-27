@@ -109,15 +109,14 @@ async function runCli() {
   const operations = createSeededOperations(); const coverage = validateCoverage(operations);
   const fixtures = JSON.parse(readFileSync(resolve(ROOT, 'workers/test/fixtures/dds-parity.json'), 'utf8'));
   const resume = options.resume;
-  const priorEvidencePath = resolve(runDir, 'evidence.json');
   const runId = resume
-    ? JSON.parse(readFileSync(priorEvidencePath, 'utf8')).runId
+    ? JSON.parse(readFileSync(resolve(runDir, 'manifest.json'), 'utf8')).runId
     : `soak-${randomUUID()}`;
   if (typeof runId !== 'string' || !runId) throw new Error('Resumed run has no persisted run identity');
   const projection = projectAccounting({ fixtures: fixtures.length, metricProbes: 1, pendingReplays: 1 });
   const requestForIndex = (index) => operations[index];
-  const state = resume ? recoverSoakState({ dir: runDir, root: ROOT, requestForIndex, projection }) : createSoakState({ dir: runDir, root: ROOT, requestForIndex, projection });
-  const evidence = { version: 1, endpoint, runId, buildId: deployment.buildId, workerVersionId: deployment.workerVersionId,
+  const state = resume ? recoverSoakState({ dir: runDir, root: ROOT, requestForIndex, projection }) : createSoakState({ dir: runDir, root: ROOT, requestForIndex, projection, runId });
+  const evidence = resume ? JSON.parse(readFileSync(resolve(runDir, 'evidence.json'), 'utf8')) : { version: 1, endpoint, runId, buildId: deployment.buildId, workerVersionId: deployment.workerVersionId,
     deploymentAssets: deployment.assets, fixtureHash: state.manifest.hashes.fixtureCorpus, projection, coverage, fixtures: [], operations: [], candidateDifferences: [] };
   if (!resume) writeReportCheckpoint(resolve(runDir, 'evidence.json'), evidence);
   // The deployed Worker must explicitly identify the exact manifest being run.
@@ -152,7 +151,7 @@ async function runCli() {
         wasmElapsedMs: remote.operationResult.metrics?.solveMs ?? remote.operationResult.solveResponse?.metrics?.solveMs ?? null,
         orderedPingDelayMs: remote.operationResult.queueDelayMs ?? null, activationId: remote.operationResult.activationId, accounting: remote.accounting, ...checked });
       if (checked.candidateDifference) evidence.candidateDifferences.push({ id: operation.id, ...checked.candidateDifference });
-      if ((index + 1) % 100 === 0) writeReportCheckpoint(resolve(runDir, 'evidence.json'), evidence);
+      writeReportCheckpoint(resolve(runDir, 'evidence.json'), evidence);
     } catch (error) { state.recordFailure({ operationId, error: error.message }); throw error; }
   }
   writeReportCheckpoint(resolve(runDir, 'evidence.json'), evidence);

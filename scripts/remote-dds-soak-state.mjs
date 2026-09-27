@@ -5,8 +5,8 @@ import { syncParentDirectory, writeReportCheckpoint } from './worker-dds-checkpo
 import { canonicalHarnessRequest } from '../workers/src/remote-test-canonical.mjs';
 
 export const SOAK_SEED = 20260923;
-export const ACCOUNTING_SCHEMA_VERSION = 2;
-export const JOURNAL_SCHEMA_VERSION = 2;
+export const ACCOUNTING_SCHEMA_VERSION = 3;
+export const JOURNAL_SCHEMA_VERSION = 3;
 export const ACCOUNTING_LIMITS = Object.freeze({ workerInbound: 25000, queuedDoCommands: 50000, sqliteRows: Object.freeze({ reads: 25000, writes: 25000 }) });
 const JOURNAL = 'journal.jsonl';
 const MANIFEST = 'manifest.json';
@@ -35,14 +35,15 @@ function defaultPaths(root) {
   };
 }
 
-export function createRunManifest({ root = resolve(import.meta.dirname, '..'), randomGeneratorFile, fixtureCorpusFile } = {}) {
+export function createRunManifest({ root = resolve(import.meta.dirname, '..'), randomGeneratorFile, fixtureCorpusFile, runId = 'unbound-run' } = {}) {
+  if (typeof runId !== 'string' || !runId) throw new Error('runId is required');
   const defaults = defaultPaths(root);
   const paths = {
     randomGeneratorFile: randomGeneratorFile ?? defaults.randomGeneratorFile,
     fixtureCorpusFile: fixtureCorpusFile ?? defaults.fixtureCorpusFile,
   };
   return {
-    version: JOURNAL_SCHEMA_VERSION,
+    version: JOURNAL_SCHEMA_VERSION, runId,
     seed: SOAK_SEED,
     randomGenerator: 'xorshift32',
     hashes: { randomGenerator: hashFile(paths.randomGeneratorFile), fixtureCorpus: hashFile(paths.fixtureCorpusFile) },
@@ -140,7 +141,8 @@ function validateManifest(manifest, expected) {
   }
   if (!equalCanonical(manifest, expected)) throw new Error('Run manifest hash or deterministic configuration changed');
 }
-function validateIntent(record, cursor, requestForIndex) {
+function validateIntent(record, cursor, requestForIndex, runId) {
+  if (record.runId !== runId) throw new Error('Journal intent run identity changed');
   if (!Number.isSafeInteger(record.index) || record.index !== cursor || typeof record.operationId !== 'string' || !record.operationId) throw new Error('Journal intent is non-contiguous or invalid');
   const generated = requestForIndex(record.index);
   const canonical = canonicalRequest(generated.route, generated.body);
@@ -149,14 +151,14 @@ function validateIntent(record, cursor, requestForIndex) {
   }
 }
 
-function replayJournal(records, requestForIndex) {
+function replayJournal(records, requestForIndex, runId) {
   let cursor = 0, pending = null, terminalFailure = null, activationIds = {}, remoteSnapshots = {}, observed = zeroAccounting();
   const operationIds = new Set();
   for (const record of records) {
     if (record.type === 'intent') {
       if (pending || terminalFailure) throw new Error('Journal contains duplicate or post-terminal intent');
       if (operationIds.has(record.operationId)) throw new Error('Journal contains duplicate operation ID');
-      validateIntent(record, cursor, requestForIndex); pending = record;
+      validateIntent(record, cursor, requestForIndex, runId); pending = record;
       operationIds.add(record.operationId);
     } else if (record.type === 'completion') {
       if (!pending || record.operationId !== pending.operationId || record.index !== pending.index || !/^[a-f0-9]{64}$/.test(record.responseHash ?? '')) throw new Error('Journal completion is invalid or duplicate');
@@ -178,11 +180,11 @@ function makeReport(snapshot) {
   return { version: 1, completedCursor: snapshot.cursor, observed: snapshot.observed, activationIds: snapshot.activationIds, terminalFailure: snapshot.terminalFailure ?? null };
 }
 
-export function createSoakState({ dir, root, requestForIndex, projection = projectAccounting() }) {
+export function createSoakState({ dir, root, requestForIndex, projection = projectAccounting(), runId = 'unbound-run' }) {
   if (typeof requestForIndex !== 'function') throw new Error('requestForIndex is required');
   assertAccountingWithinLimits(projection);
   mkdirSync(dir, { recursive: true });
-  const manifest = createRunManifest({ root });
+  const manifest = createRunManifest({ root, runId });
   if (existsSync(file(dir, MANIFEST))) throw new Error('Soak state already exists; use recoverSoakState');
   writeReportCheckpoint(file(dir, MANIFEST), manifest);
   const state = { cursor: 0, pending: null, terminalFailure: null, activationIds: {}, remoteSnapshots: {}, operationIds: new Set(), observed: zeroAccounting() };
@@ -217,8 +219,8 @@ function buildStateApi({ dir, requestForIndex, manifest, state, projection }) {
       assertAccountingWithinLimits(projection);
       if (state.pending || state.terminalFailure) throw new Error('Cannot dispatch while pending or terminally failed');
       if (state.operationIds.has(operationId)) throw new Error('Operation ID must be globally unique and monotonic');
-      const record = { type: 'intent', index, operationId, route, requestHash: requestHash(route, body), canonicalRequest: canonicalRequest(route, body) };
-      validateIntent(record, state.cursor, requestForIndex);
+      const record = { type: 'intent', runId: manifest.runId, index, operationId, route, requestHash: requestHash(route, body), canonicalRequest: canonicalRequest(route, body) };
+      validateIntent(record, state.cursor, requestForIndex, manifest.runId);
       appendDurable(file(dir, JOURNAL), record); state.pending = record; state.operationIds.add(operationId); return record;
     },
     recordCompletion: finish,
@@ -237,8 +239,8 @@ export function recoverSoakState({ dir, root, requestForIndex, projection = proj
   if (typeof requestForIndex !== 'function') throw new Error('requestForIndex is required');
   assertAccountingWithinLimits(projection);
   const manifest = readJson(file(dir, MANIFEST), 'manifest');
-  validateManifest(manifest, createRunManifest({ root }));
-  const state = replayJournal(readJournal(dir), requestForIndex);
+  validateManifest(manifest, createRunManifest({ root, runId: manifest.runId }));
+  const state = replayJournal(readJournal(dir), requestForIndex, manifest.runId);
   const api = buildStateApi({ dir, requestForIndex, manifest, state, projection });
   // A journal is authoritative. Replacing a stale or torn checkpoint is safe.
   writeReportCheckpoint(file(dir, REPORT), api.report);
