@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { authorizeHarnessRequest } from '../src/remote-test-auth.mjs';
+import { fetchHarness } from '../src/harness-router.mjs';
 
 const keyBytes = new Uint8Array(32).fill(7);
 const key = Buffer.from(keyBytes).toString('base64url');
@@ -106,4 +107,58 @@ test('remote authorization stream-buffers an unknown-length body and supplies re
   }), remoteEnv());
   assert.equal(result.mode, 'remote');
   assert.equal(new TextDecoder().decode(result.body), '{"deal":{}}');
+});
+
+test('remote routing rebuilds the request and forwards only validated identity metadata', async () => {
+  const received = [];
+  const env = {
+    ...remoteEnv(),
+    DDS_FEASIBILITY_ROOM: {
+      idFromName(name) { received.push({ kind: 'id', name }); return { name }; },
+      get(id) {
+        received.push({ kind: 'get', id });
+        return { async fetch(forwarded) {
+          received.push({
+            kind: 'fetch', method: forwarded.method, body: await forwarded.text(),
+            headers: Object.fromEntries(forwarded.headers),
+          });
+          return new Response('forwarded');
+        } };
+      },
+    },
+  };
+  const encoder = new TextEncoder();
+  const response = await fetchHarness(request('/__dds/solve', {
+    headers: { ...metadata, 'x-dds-test-key': key, 'x-untrusted-header': 'discard-me' },
+    body: new ReadableStream({ start(controller) {
+      controller.enqueue(encoder.encode('{"deal":'));
+      controller.enqueue(encoder.encode('{}}'));
+      controller.close();
+    } }),
+    duplex: 'half',
+  }), env);
+  assert.equal(await response.text(), 'forwarded');
+  assert.equal(received[0].name, 'remote-feasibility:run_20260927-A:10');
+  assert.equal(received[2].method, 'POST');
+  assert.equal(received[2].body, '{"deal":{}}');
+  assert.deepEqual(received[2].headers, {
+    'x-dds-operation-id': 'op.000001',
+    'x-dds-request-hash': 'a'.repeat(64),
+    'x-dds-run-id': 'run_20260927-A',
+    'x-dds-shard': '10',
+  });
+});
+
+test('local routing retains the fixed feasibility room', async () => {
+  const names = [];
+  const env = {
+    DDS_LOCAL_TEST: 'true',
+    DDS_FEASIBILITY_ROOM: {
+      idFromName(name) { names.push(name); return name; },
+      get() { return { fetch: async () => new Response('local') }; },
+    },
+  };
+  const response = await fetchHarness(request('/__dds/ping', { body: '{}' }), env);
+  assert.equal(await response.text(), 'local');
+  assert.deepEqual(names, ['single-feasibility-room']);
 });
