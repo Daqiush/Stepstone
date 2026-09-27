@@ -32,7 +32,8 @@ test('creates the pinned deterministic manifest', async () => {
   assert.equal(manifest.randomGenerator, 'xorshift32');
   assert.equal(manifest.shards.length, 11);
   assert.deepEqual(manifest.shards, Array.from({ length: 11 }, (_, shard) => ({ shard, startIndex: shard * 2000, endIndex: shard * 2000 + 1999 })));
-  assert.equal(manifest.accountingSchemaVersion, 1);
+  assert.equal(manifest.accountingSchemaVersion, 2);
+  assert.equal(manifest.journalSchemaVersion, 2);
   assert.match(manifest.hashes.randomGenerator, /^[a-f0-9]{64}$/);
   assert.match(manifest.hashes.fixtureCorpus, /^[a-f0-9]{64}$/);
 });
@@ -172,6 +173,18 @@ test('rejects a duplicate operation id anywhere in a recovered journal', async (
       requestHash: state.requestHash(request(1).route, request(1).body), canonicalRequest: state.canonicalRequest(request(1).route, request(1).body) };
     writeFileSync(join(dir, 'journal.jsonl'), `${readFileSync(join(dir, 'journal.jsonl'))}${JSON.stringify(duplicate)}\n`);
     assert.throws(() => state.recoverSoakState({ dir, root: ROOT, requestForIndex: request }), /duplicate operation/i);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('fails closed instead of resuming a version-one cumulative-accounting journal', async () => {
+  state ??= await import('../scripts/remote-dds-soak-state.mjs');
+  const dir = tempRun();
+  try {
+    state.createSoakState({ dir, root: ROOT, requestForIndex: request });
+    const manifest = JSON.parse(readFileSync(join(dir, 'manifest.json'), 'utf8'));
+    manifest.accountingSchemaVersion = 1;
+    writeFileSync(join(dir, 'manifest.json'), JSON.stringify(manifest));
+    assert.throws(() => state.recoverSoakState({ dir, root: ROOT, requestForIndex: request }), /schema version|new run/i);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

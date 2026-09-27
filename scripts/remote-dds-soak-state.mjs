@@ -5,7 +5,8 @@ import { syncParentDirectory, writeReportCheckpoint } from './worker-dds-checkpo
 import { canonicalHarnessRequest } from '../workers/src/remote-test-canonical.mjs';
 
 export const SOAK_SEED = 20260923;
-export const ACCOUNTING_SCHEMA_VERSION = 1;
+export const ACCOUNTING_SCHEMA_VERSION = 2;
+export const JOURNAL_SCHEMA_VERSION = 2;
 export const ACCOUNTING_LIMITS = Object.freeze({ workerInbound: 25000, queuedDoCommands: 50000, sqliteRows: Object.freeze({ reads: 25000, writes: 25000 }) });
 const JOURNAL = 'journal.jsonl';
 const MANIFEST = 'manifest.json';
@@ -41,12 +42,13 @@ export function createRunManifest({ root = resolve(import.meta.dirname, '..'), r
     fixtureCorpusFile: fixtureCorpusFile ?? defaults.fixtureCorpusFile,
   };
   return {
-    version: 1,
+    version: JOURNAL_SCHEMA_VERSION,
     seed: SOAK_SEED,
     randomGenerator: 'xorshift32',
     hashes: { randomGenerator: hashFile(paths.randomGeneratorFile), fixtureCorpus: hashFile(paths.fixtureCorpusFile) },
     shards: Array.from({ length: 11 }, (_, shard) => ({ shard, startIndex: shard * 2000, endIndex: shard * 2000 + 1999 })),
     accountingSchemaVersion: ACCOUNTING_SCHEMA_VERSION,
+    journalSchemaVersion: JOURNAL_SCHEMA_VERSION,
   };
 }
 
@@ -133,6 +135,9 @@ export function projectAccounting({ fixtures = 0, coldStarts = 0, metricProbes =
 }
 
 function validateManifest(manifest, expected) {
+  if (manifest?.accountingSchemaVersion !== ACCOUNTING_SCHEMA_VERSION || manifest?.journalSchemaVersion !== JOURNAL_SCHEMA_VERSION) {
+    throw new Error('Unsupported remote soak journal/accounting schema version; start a new run');
+  }
   if (!equalCanonical(manifest, expected)) throw new Error('Run manifest hash or deterministic configuration changed');
 }
 function validateIntent(record, cursor, requestForIndex) {
