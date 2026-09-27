@@ -38,8 +38,10 @@ export async function verifyWorkersDeployment({ fetchImpl = fetch, accountId, sc
   if (!response.ok || payload?.result?.version !== expectedVersionId) throw new Error('Workers API did not verify the deployed version ID');
   return assertVerifiedDeployment({ versionId: expectedVersionId, apiVerified: true, wranglerVersion });
 }
-export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImpl = fetch, wrangler = 'wrangler', accountId, scriptName, apiToken }) {
-  const deployed = JSON.parse(String(execFile(wrangler, ['deploy', '--json'], { encoding: 'utf8' })));
+export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImpl = fetch, wrangler = 'wrangler', root = resolve(import.meta.dirname, '..'), accountId, scriptName, apiToken }) {
+  const assets = { wasm: asset(root, WASM_PATH, 'Wasm'), harness: Object.fromEntries(harnessPaths(root).map((path) => [path, asset(root, path, 'harness')])) };
+  const buildId = sha256(canonicalJson({ version: DEPLOYMENT_MANIFEST_VERSION, assets }));
+  const deployed = JSON.parse(String(execFile(wrangler, ['deploy', '--json', '--config', resolve(root, 'workers/wrangler.jsonc'), '--var', `DDS_DEPLOYMENT_BUILD_ID:${buildId}`], { encoding: 'utf8', cwd: root })));
   const versionId = deployed?.version_id ?? deployed?.versionId;
   const wranglerVersion = String(execFile(wrangler, ['--version'], { encoding: 'utf8' })).trim();
   return verifyWorkersDeployment({ fetchImpl, accountId, scriptName, apiToken, expectedVersionId: versionId, wranglerVersion });
@@ -50,8 +52,8 @@ export function createDeploymentManifest({ root = resolve(import.meta.dirname, '
     wasm: asset(root, WASM_PATH, 'Wasm'),
     harness: Object.fromEntries(harnessPaths(root).map((path) => [path, asset(root, path, 'harness')])),
   };
-  const unsigned = { version: DEPLOYMENT_MANIFEST_VERSION, workerVersionId: deployment.versionId, verifiedDeployment: deployment, assets };
-  return { ...unsigned, buildId: sha256(canonicalJson(unsigned)) };
+  const fingerprint = { version: DEPLOYMENT_MANIFEST_VERSION, assets };
+  return { ...fingerprint, workerVersionId: deployment.versionId, verifiedDeployment: deployment, buildId: sha256(canonicalJson(fingerprint)) };
 }
 
 export function assertDeploymentManifest(manifest, { root = resolve(import.meta.dirname, '..') } = {}) {

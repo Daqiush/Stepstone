@@ -113,11 +113,17 @@ async function runCli() {
     ? JSON.parse(readFileSync(resolve(runDir, 'manifest.json'), 'utf8')).runId
     : `soak-${randomUUID()}`;
   if (typeof runId !== 'string' || !runId) throw new Error('Resumed run has no persisted run identity');
-  const projection = projectAccounting({ fixtures: fixtures.length, metricProbes: 1, pendingReplays: 1 });
+  const projection = projectAccounting({ fixtureTables: fixtures.filter((item) => item.kind === 'table').length,
+    fixtureSolves: fixtures.filter((item) => item.kind === 'solve').length, metricProbes: 1, pendingReplays: 1 });
   const requestForIndex = (index) => operations[index];
   const state = resume ? recoverSoakState({ dir: runDir, root: ROOT, requestForIndex, projection }) : createSoakState({ dir: runDir, root: ROOT, requestForIndex, projection, runId });
   const evidence = resume ? JSON.parse(readFileSync(resolve(runDir, 'evidence.json'), 'utf8')) : { version: 1, endpoint, runId, buildId: deployment.buildId, workerVersionId: deployment.workerVersionId,
     deploymentAssets: deployment.assets, fixtureHash: state.manifest.hashes.fixtureCorpus, projection, coverage, fixtures: [], operations: [], candidateDifferences: [] };
+  if (resume && Array.isArray(state.evidence)) {
+    const saved = new Set(evidence.operations.map((operation) => operation.id));
+    for (const operation of state.evidence) if (operation?.id && !saved.has(operation.id)) evidence.operations.push(operation);
+    writeReportCheckpoint(resolve(runDir, 'evidence.json'), evidence);
+  }
   if (!resume) writeReportCheckpoint(resolve(runDir, 'evidence.json'), evidence);
   // The deployed Worker must explicitly identify the exact manifest being run.
   // This request is budgeted before any fixture or generated DDS dispatch.
