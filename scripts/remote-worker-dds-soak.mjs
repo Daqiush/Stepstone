@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { createRandomCaseGenerator } from './worker-dds-random-cases.mjs';
 import { compareDdsResults, normalizeDdsResult, validateWorkerSolveCandidates } from './worker-dds-benchmark-validation.mjs';
@@ -30,6 +31,17 @@ export function assertRunDirectory(dir, resume) {
 export function assertEndpointBuild(payload, buildId) {
   if (payload?.buildId !== buildId) throw new Error(`Remote endpoint build ID mismatch: expected ${buildId}, received ${payload?.buildId ?? 'missing'}`);
   return payload;
+}
+export function assertEndpointVersion(payload, workerVersionId) {
+  if (payload?.workerVersionId !== workerVersionId) throw new Error(`Remote endpoint Worker version ID mismatch: expected ${workerVersionId}, received ${payload?.workerVersionId ?? 'missing'}`);
+  return payload;
+}
+export function parseOptions(args = process.argv.slice(2), env = process.env) {
+  const get = (name, fallback = null) => { const at = args.indexOf(name); return at < 0 ? fallback : args[at + 1]; };
+  if (args.includes('--count')) throw new Error('--count is not supported; the remote soak always runs exactly 22000 operations');
+  const endpoint = assertRemoteEndpoint(get('--url', ''));
+  if (!env.DDS_REMOTE_TEST_KEY) throw new Error('DDS_REMOTE_TEST_KEY is required');
+  return { endpoint, runDir: get('--run-dir', 'workers/test/results/remote-soak'), deploymentManifest: get('--deployment-manifest', 'workers/test/results/remote-dds-deployment.json'), resume: args.includes('--resume') };
 }
 export function createSeededOperations(seed = SOAK_SEED) {
   const random = createRandomCaseGenerator(seed);
@@ -79,32 +91,41 @@ async function runFixtureChecks({ endpoint, key, runId, fixtures, buildId, evide
     const remote = await remotePost(endpoint, { key, runId, operationId: `fixture.${String(index).padStart(6, '0')}`, route, body, shard: 0 });
     const op = { kind, id: item.id, item: kind === 'table' ? { hands: item.hands } : { deal: JSON.parse(body).deal } };
     const worker = unwrap(op, remote); const expected = item.expected?.table ?? item.expected;
-    if (JSON.stringify(normalizeDdsResult(kind, worker)) !== JSON.stringify(normalizeDdsResult(kind, expected))) throw new Error(`Fixture parity mismatch: ${item.id}`);
+    const native = kind === 'table' ? await calcDDTable(item.hands) : await solveBoard(op.item.deal);
+    if (JSON.stringify(normalizeDdsResult(kind, worker)) !== JSON.stringify(normalizeDdsResult(kind, native))) throw new Error(`Fixture native parity mismatch: ${item.id}`);
+    if (JSON.stringify(normalizeDdsResult(kind, native)) !== JSON.stringify(normalizeDdsResult(kind, expected))) throw new Error(`Fixture corpus drift: ${item.id}`);
     if (index === 0 && remote.operationResult.buildId !== undefined) assertEndpointBuild(remote.operationResult, buildId);
-    evidence.fixtures.push({ id: item.id, route, accounting: remote.accounting });
+    evidence.fixtures.push({ id: item.id, route, input: JSON.parse(body), nativeBaseline: native, remote: remote.operationResult, accounting: remote.accounting });
   }
 }
 function option(name, fallback) { const at = process.argv.indexOf(name); return at < 0 ? fallback : process.argv[at + 1]; }
 async function runCli() {
-  const endpoint = assertRemoteEndpoint(option('--url', ''));
+  const options = parseOptions();
+  const endpoint = options.endpoint;
   const key = process.env.DDS_REMOTE_TEST_KEY;
-  if (!key) throw new Error('DDS_REMOTE_TEST_KEY is required');
-  const runDir = assertRunDirectory(resolve(ROOT, option('--run-dir', 'workers/test/results/remote-soak')), process.argv.includes('--resume'));
-  const manifestPath = resolve(ROOT, option('--deployment-manifest', 'workers/test/results/remote-dds-deployment.json'));
+  const runDir = assertRunDirectory(resolve(ROOT, options.runDir), options.resume);
+  const manifestPath = resolve(ROOT, options.deploymentManifest);
   const deployment = assertDeploymentManifest(JSON.parse(readFileSync(manifestPath, 'utf8')), { root: ROOT });
   const operations = createSeededOperations(); const coverage = validateCoverage(operations);
   const fixtures = JSON.parse(readFileSync(resolve(ROOT, 'workers/test/fixtures/dds-parity.json'), 'utf8'));
-  const runId = `soak-${deployment.buildId.slice(0, 16)}`;
+  const resume = options.resume;
+  const priorEvidencePath = resolve(runDir, 'evidence.json');
+  const runId = resume
+    ? JSON.parse(readFileSync(priorEvidencePath, 'utf8')).runId
+    : `soak-${randomUUID()}`;
+  if (typeof runId !== 'string' || !runId) throw new Error('Resumed run has no persisted run identity');
   const projection = projectAccounting({ fixtures: fixtures.length, metricProbes: 1, pendingReplays: 1 });
   const requestForIndex = (index) => operations[index];
-  const resume = process.argv.includes('--resume');
   const state = resume ? recoverSoakState({ dir: runDir, root: ROOT, requestForIndex, projection }) : createSoakState({ dir: runDir, root: ROOT, requestForIndex, projection });
-  const evidence = { version: 1, endpoint, runId, buildId: deployment.buildId, projection, coverage, fixtures: [], operations: [], candidateDifferences: [] };
+  const evidence = { version: 1, endpoint, runId, buildId: deployment.buildId, workerVersionId: deployment.workerVersionId,
+    deploymentAssets: deployment.assets, fixtureHash: state.manifest.hashes.fixtureCorpus, projection, coverage, fixtures: [], operations: [], candidateDifferences: [] };
+  if (!resume) writeReportCheckpoint(resolve(runDir, 'evidence.json'), evidence);
   // The deployed Worker must explicitly identify the exact manifest being run.
   // This request is budgeted before any fixture or generated DDS dispatch.
   const preflightBody = '{}';
-  const preflight = await remotePost(endpoint, { key, runId, operationId: 'preflight.build', route: '/__dds/ping', body: preflightBody, shard: 0 });
-  assertEndpointBuild(preflight, deployment.buildId);
+  const preflight = await remotePost(endpoint, { key, runId, operationId: 'preflight.metrics', route: '/__dds/metrics', body: preflightBody, shard: 0 });
+  assertEndpointBuild(preflight.operationResult, deployment.buildId);
+  assertEndpointVersion(preflight.operationResult, deployment.workerVersionId);
   evidence.preflight = { accounting: preflight.accounting, activationId: preflight.operationResult.activationId };
   if (!resume || state.report.completedCursor === 0) await runFixtureChecks({ endpoint, key, runId, fixtures, buildId: deployment.buildId, evidence });
   const dispatch = async (operation, operationId) => remotePost(endpoint, { key, runId, operationId, route: operation.route, body: operation.body, shard: operation.shard });
@@ -112,7 +133,11 @@ async function runCli() {
     const pending = state.recovery.intent, operation = operations[pending.index];
     const remote = await dispatch(operation, pending.operationId); const native = await baseline(operation); const checked = verify(operation, native, remote);
     state.completeReplay({ operationId: pending.operationId, response: remote.operationResult, activationId: remote.operationResult.activationId, observed: remote.accounting });
-    evidence.operations.push({ id: operation.id, replay: true, ...checked });
+    evidence.operations.push({ id: operation.id, replay: true, input: JSON.parse(operation.body), nativeBaseline: native, remote: remote.operationResult,
+      remoteMetrics: remote.operationResult.metrics ?? remote.operationResult.solveResponse?.metrics ?? null,
+      heapBytes: remote.operationResult.metrics?.heapBytes ?? remote.operationResult.solveResponse?.metrics?.heapBytes ?? null,
+      wasmElapsedMs: remote.operationResult.metrics?.solveMs ?? remote.operationResult.solveResponse?.metrics?.solveMs ?? null,
+      orderedPingDelayMs: remote.operationResult.queueDelayMs ?? null, ...checked });
   }
   for (let index = state.report.completedCursor; index < operations.length; index++) {
     const operation = operations[index], operationId = `op.${String(index).padStart(6, '0')}`;
@@ -121,7 +146,11 @@ async function runCli() {
       const remote = await dispatch(operation, operationId); const nativeStarted = performance.now(); const native = await baseline(operation); const nativeMs = performance.now() - nativeStarted;
       const checked = verify(operation, native, remote);
       state.recordCompletion({ operationId, response: remote.operationResult, activationId: remote.operationResult.activationId, observed: remote.accounting });
-      evidence.operations.push({ id: operation.id, index, route: operation.route, nativeMs, activationId: remote.operationResult.activationId, accounting: remote.accounting, ...checked });
+      evidence.operations.push({ id: operation.id, index, route: operation.route, input: JSON.parse(operation.body), nativeBaseline: native, nativeMs,
+        remote: remote.operationResult, remoteMetrics: remote.operationResult.metrics ?? remote.operationResult.solveResponse?.metrics ?? null,
+        heapBytes: remote.operationResult.metrics?.heapBytes ?? remote.operationResult.solveResponse?.metrics?.heapBytes ?? null,
+        wasmElapsedMs: remote.operationResult.metrics?.solveMs ?? remote.operationResult.solveResponse?.metrics?.solveMs ?? null,
+        orderedPingDelayMs: remote.operationResult.queueDelayMs ?? null, activationId: remote.operationResult.activationId, accounting: remote.accounting, ...checked });
       if (checked.candidateDifference) evidence.candidateDifferences.push({ id: operation.id, ...checked.candidateDifference });
       if ((index + 1) % 100 === 0) writeReportCheckpoint(resolve(runDir, 'evidence.json'), evidence);
     } catch (error) { state.recordFailure({ operationId, error: error.message }); throw error; }

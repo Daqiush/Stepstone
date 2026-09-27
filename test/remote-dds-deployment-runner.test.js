@@ -20,7 +20,7 @@ async function runner() { return import('../scripts/remote-worker-dds-soak.mjs')
 test('deployment manifest binds the exact wasm and harness bytes to a deterministic build ID', async () => {
   const mod = await deployment(); const root = repo();
   try {
-    const manifest = mod.createDeploymentManifest({ root });
+    const manifest = mod.createDeploymentManifest({ root, workerVersionId: 'v-123' });
     assert.equal(manifest.version, 1);
     assert.match(manifest.buildId, /^[a-f0-9]{64}$/);
     assert.match(manifest.assets.wasm.sha256, /^[a-f0-9]{64}$/);
@@ -33,8 +33,18 @@ test('deployment manifest binds the exact wasm and harness bytes to a determinis
 test('deployment manifest rejects a missing version instead of assuming compatibility', async () => {
   const mod = await deployment(); const root = repo();
   try {
-    const manifest = mod.createDeploymentManifest({ root }); delete manifest.version;
+    const manifest = mod.createDeploymentManifest({ root, workerVersionId: 'v-123' }); delete manifest.version;
     assert.throws(() => mod.assertDeploymentManifest(manifest, { root }), /version/i);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('deployment manifest records Wasm bytes and requires an explicit deployed Worker version', async () => {
+  const mod = await deployment(); const root = repo();
+  try {
+    assert.throws(() => mod.createDeploymentManifest({ root }), /Worker version ID/i);
+    const manifest = mod.createDeploymentManifest({ root, workerVersionId: 'v-123' });
+    assert.equal(manifest.assets.wasm.bytes, 7);
+    assert.equal(manifest.workerVersionId, 'v-123');
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -61,4 +71,13 @@ test('runner plans exactly 22,000 seeded cases across eleven shards and requires
     writeFileSync(join(root, 'present'), 'x');
     assert.throws(() => mod.assertRunDirectory(root, false), /--resume/i);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('runner options require a URL and key without exposing the key or accepting an operation-count override', async () => {
+  const mod = await runner();
+  assert.throws(() => mod.parseOptions(['--url', 'https://a.workers.dev'], {}), /DDS_REMOTE_TEST_KEY/i);
+  assert.throws(() => mod.parseOptions(['--url', 'https://a.workers.dev', '--count', '1'], { DDS_REMOTE_TEST_KEY: 'secret-value' }), /count/i);
+  const options = mod.parseOptions(['--url', 'https://a.workers.dev', '--run-dir', 'x'], { DDS_REMOTE_TEST_KEY: 'secret-value' });
+  assert.equal(options.endpoint, 'https://a.workers.dev');
+  assert.equal(JSON.stringify(options).includes('secret-value'), false);
 });

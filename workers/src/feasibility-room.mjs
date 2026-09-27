@@ -178,7 +178,9 @@ export class FeasibilityRoom {
     if (path === '/__dds/metrics') {
       await request.text();
       return Response.json({ ok: true, completedOperations: this.completedOperations,
-        initMs: this.initMs, heapBytes: this.heapBytes?.() ?? null });
+        initMs: this.initMs, heapBytes: this.heapBytes?.() ?? null,
+        buildId: this.env.DDS_DEPLOYMENT_BUILD_ID || null,
+        workerVersionId: this.env.DDS_DEPLOYMENT_VERSION_ID || null });
     }
     let body;
     try { body = await request.json(); }
