@@ -22,6 +22,10 @@ function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
+export function sameBytes(expected, current) {
+  return expected.equals(current);
+}
+
 function git(repoRoot, args) {
   return execFileSync('git', args, { cwd: repoRoot, encoding: 'buffer' });
 }
@@ -69,12 +73,13 @@ export function assertRemoteSoakPrerequisites({
       return { path, expectedSha256, currentSha256: 'MISSING', issue: 'Missing required path' };
     }
 
-    const currentSha256 = sha256(readFileSync(currentPath));
+    const current = readFileSync(currentPath);
+    const currentSha256 = sha256(current);
     return {
       path,
       expectedSha256,
       currentSha256,
-      issue: currentSha256 === expectedSha256 ? null : 'Hash mismatch',
+      issue: sameBytes(expected, current) ? null : 'Byte mismatch',
     };
   });
   const failures = entries.filter((entry) => entry.issue);

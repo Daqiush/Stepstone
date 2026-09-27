@@ -45,6 +45,14 @@ async function loadChecker() {
   return import('../scripts/assert-remote-soak-prerequisites.mjs');
 }
 
+test('compares prerequisite contents byte-for-byte independently of hash reporting', async () => {
+  const { sameBytes } = await loadChecker();
+
+  assert.equal(sameBytes(Buffer.from([0x00, 0x61]), Buffer.from([0x00, 0x61])), true);
+  assert.equal(sameBytes(Buffer.from([0x00, 0x61]), Buffer.from([0x00, 0x62])), false);
+  assert.equal(sameBytes(Buffer.from([0x00, 0x61]), Buffer.from([0x00, 0x61, 0x00])), false);
+});
+
 test('rejects a missing required prerequisite and reports expected/current hashes', async () => {
   const { assertRemoteSoakPrerequisites } = await loadChecker();
   const { repo, baseline } = createBaselineRepo();
@@ -74,7 +82,7 @@ test('rejects an altered prerequisite even when the baseline commit is an ancest
     assert.throws(
       () => assertRemoteSoakPrerequisites({ repoRoot: repo, baseline }),
       (error) => {
-        assert.match(error.message, new RegExp(`Hash mismatch: ${alteredPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+        assert.match(error.message, new RegExp(`Byte mismatch: ${alteredPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
         assert.match(error.message, /expected sha256: [a-f0-9]{64}/);
         assert.match(error.message, /current sha256: [a-f0-9]{64}/);
         return true;
