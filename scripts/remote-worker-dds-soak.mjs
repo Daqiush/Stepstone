@@ -117,12 +117,20 @@ async function runCli() {
     ? JSON.parse(readFileSync(resolve(runDir, 'manifest.json'), 'utf8')).runId
     : `soak-${randomUUID()}`;
   if (typeof runId !== 'string' || !runId) throw new Error('Resumed run has no persisted run identity');
-  const projectionArgs = { fixtureTables: fixtures.filter((item) => item.kind === 'table').length,
-    fixtureSolves: fixtures.filter((item) => item.kind === 'solve').length, metricProbes: 1, pendingReplays: 0 };
+  const fixtureTables = fixtures.filter((item) => item.kind === 'table').length;
+  const fixtureSolves = fixtures.filter((item) => item.kind === 'solve').length;
+  const projectionArgs = { fixtureTables, fixtureSolves, metricProbes: 1, pendingReplays: 0 };
   let projection = projectAccounting(projectionArgs);
   const requestForIndex = (index) => operations[index];
   const state = resume ? recoverSoakState({ dir: runDir, root: ROOT, requestForIndex, projection: projectAccounting({ ...projectionArgs, pendingReplays: 1 }) }) : createSoakState({ dir: runDir, root: ROOT, requestForIndex, projection, runId });
-  if (state.recovery?.kind === 'replay-pending') projection = projectAccounting({ ...projectionArgs, pendingReplays: 1 });
+  if (resume) {
+    // Every resumed attempt issues another preflight. A run interrupted before
+    // its first durable operation also executes its fixture corpus again.
+    projection = projectAccounting({ ...projectionArgs, metricProbes: 2,
+      fixtureTables: state.report.completedCursor === 0 ? fixtureTables * 2 : fixtureTables,
+      fixtureSolves: state.report.completedCursor === 0 ? fixtureSolves * 2 : fixtureSolves,
+      pendingReplays: state.recovery?.kind === 'replay-pending' ? 1 : 0 });
+  }
   const evidence = resume ? JSON.parse(readFileSync(resolve(runDir, 'evidence.json'), 'utf8')) : { version: 1, endpoint, runId, buildId: deployment.buildId, workerVersionId: deployment.workerVersionId,
     deploymentAssets: deployment.assets, fixtureHash: state.manifest.hashes.fixtureCorpus, projection, coverage, fixtures: [], operations: [], candidateDifferences: [] };
   if (resume && Array.isArray(state.evidence)) {
