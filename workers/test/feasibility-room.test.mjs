@@ -45,11 +45,14 @@ async function runtime(bindings = {}) {
   const base = `http://127.0.0.1:${port}`;
   let ready = false;
   let readinessResponse;
+  const readinessHeaders = { 'content-type': 'application/json' };
+  if (bindings.DDS_REMOTE_TEST === 'true') Object.assign(readinessHeaders,
+    remoteHeaders('readiness-run', 'ping.000001', '0'.repeat(64)));
   for (let attempt = 0; attempt < 150; attempt += 1) {
     if (child.exitCode !== null) break;
     try {
       const response = await fetch(`${base}/__dds/ping`, {
-        method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+        method: 'POST', headers: readinessHeaders, body: '{}',
         signal: AbortSignal.timeout(1000),
       });
       await response.arrayBuffer();
@@ -85,15 +88,31 @@ async function runtime(bindings = {}) {
   return runner;
 }
 
-async function post(mf, route, body = {}) {
+async function post(mf, route, body = {}, headers = {}) {
   const response = await mf.dispatchFetch(`http://localhost${route}`, {
-    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body),
   });
   const text = await response.text();
   let parsed;
   try { parsed = JSON.parse(text); }
   catch { throw new Error(`Unexpected Worker response ${response.status}: ${text.slice(0, 500)}`); }
   return { status: response.status, body: parsed };
+}
+
+const remoteKey = Buffer.from(new Uint8Array(32).fill(7)).toString('base64url');
+
+function remoteHeaders(runId, operationId, requestHash, shard = '0') {
+  return {
+    'x-dds-test-key': remoteKey,
+    'x-dds-run-id': runId,
+    'x-dds-operation-id': operationId,
+    'x-dds-request-hash': requestHash,
+    'x-dds-shard': shard,
+  };
+}
+
+async function remoteRuntime() {
+  return runtime({ DDS_REMOTE_TEST: 'true', DDS_REMOTE_TEST_KEY: remoteKey });
 }
 
 let mf;
@@ -223,6 +242,62 @@ test('local ordered probe measures a distinct ping blocked behind its paired sol
     assert.ok(body.solveCompletedMs >= 100);
     assert.ok(body.queueDelayMs >= body.solveCompletedMs);
     assert.equal((await post(isolated, '/__dds/ping')).body.completedOperations, before + 1);
+  } finally { await isolated.dispose(); }
+});
+
+test('remote operation replays a persisted table result without new queued work', async () => {
+  const isolated = await remoteRuntime();
+  const headers = remoteHeaders('run_20260927-A', 'table.000001', 'a'.repeat(64));
+  try {
+    const first = await post(isolated, '/__dds/table', { hands: oneTrickDeal.hands }, headers);
+    const second = await post(isolated, '/__dds/table', { hands: oneTrickDeal.hands }, headers);
+    assert.equal(first.status, 200);
+    assert.equal(second.status, 200);
+    assert.deepEqual(second.body.operationResult, first.body.operationResult);
+    assert.equal(first.body.replayed, false);
+    assert.equal(second.body.replayed, true);
+    assert.match(first.body.operationResult.activationId, /^[0-9a-f-]{36}$/i);
+    assert.equal(second.body.operationResult.activationId, first.body.operationResult.activationId);
+    assert.deepEqual(first.body.accounting, {
+      workerInbound: 1, doFetchArrivals: 1, queuedDoCommands: 1, sqliteRows: 2,
+    });
+    assert.deepEqual(second.body.accounting, {
+      workerInbound: 2, doFetchArrivals: 2, queuedDoCommands: 1, sqliteRows: 3,
+    });
+  } finally { await isolated.dispose(); }
+});
+
+test('remote operation conflict is opaque and operation ids are isolated by run id', async () => {
+  const isolated = await remoteRuntime();
+  try {
+    const firstHeaders = remoteHeaders('run_20260927-A', 'same.000001', 'b'.repeat(64));
+    const first = await post(isolated, '/__dds/solve', { deal: oneTrickDeal }, firstHeaders);
+    assert.equal(first.status, 200);
+    const conflict = await post(isolated, '/__dds/solve', { deal: oneTrickDeal },
+      remoteHeaders('run_20260927-A', 'same.000001', 'c'.repeat(64)));
+    assert.equal(conflict.status, 409);
+    assert.deepEqual(conflict.body, { ok: false, error: { code: 'OPERATION_CONFLICT' } });
+    const isolatedRun = await post(isolated, '/__dds/solve', { deal: oneTrickDeal },
+      remoteHeaders('run_20260927-B', 'same.000001', 'c'.repeat(64)));
+    assert.equal(isolatedRun.status, 200);
+    assert.deepEqual(isolatedRun.body.operationResult.result, { score: 1, cards: [{ suit: 'S', rank: 14 }] });
+    assert.equal(isolatedRun.body.replayed, false);
+  } finally { await isolated.dispose(); }
+});
+
+test('remote operation replays an ordered solve without enqueueing its solve and ping again', async () => {
+  const isolated = await remoteRuntime();
+  const headers = remoteHeaders('run_20260927-A', 'probe.000001', 'd'.repeat(64));
+  try {
+    const first = await post(isolated, '/__dds/ordered-probe', { deal: oneTrickDeal }, headers);
+    const second = await post(isolated, '/__dds/ordered-probe', { deal: oneTrickDeal }, headers);
+    assert.equal(first.status, 200);
+    assert.equal(second.status, 200);
+    assert.deepEqual(second.body.operationResult, first.body.operationResult);
+    assert.equal(second.body.replayed, true);
+    assert.deepEqual(second.body.accounting, {
+      workerInbound: 2, doFetchArrivals: 2, queuedDoCommands: 2, sqliteRows: 3,
+    });
   } finally { await isolated.dispose(); }
 });
 

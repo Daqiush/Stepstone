@@ -12,10 +12,27 @@ export class FeasibilityRoom {
     this.env = env;
     this.completedOperations = 0;
     this.queued = Promise.resolve();
+    this.remoteDecisions = Promise.resolve();
+    this.activationId = crypto.randomUUID();
+    this.accounting = {
+      workerInbound: 0,
+      doFetchArrivals: 0,
+      queuedDoCommands: 0,
+      sqliteRows: 0,
+    };
+    this.sql = state.storage.sql;
     this.injectFailure = env.DDS_LOCAL_TEST === 'true' && env.DDS_TEST_FAIL_FIRST_SOLVE === 'true';
     this.injectInitFailure = env.DDS_LOCAL_TEST === 'true' && env.DDS_TEST_FAIL_FIRST_INIT === 'true';
     this.delayMs = env.DDS_LOCAL_TEST === 'true' ? Number(env.DDS_TEST_SOLVE_DELAY_MS || 0) : 0;
     state.blockConcurrencyWhile(async () => {
+      this.sql.exec(`CREATE TABLE IF NOT EXISTS test_operations (
+        run_id TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        request_hash TEXT NOT NULL,
+        response_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (run_id, operation_id)
+      )`);
       await this.initialize();
       this.initFailurePending = !this.client;
     });
@@ -48,8 +65,67 @@ export class FeasibilityRoom {
   }
 
   fetch(request) {
+    if (this.remoteIdentity(request)) return this.remoteFetch(request);
     if (new URL(request.url).pathname === '/__dds/ordered-probe') return this.orderedProbe(request);
     return this.enqueue(() => this.handle(request));
+  }
+
+  remoteIdentity(request) {
+    const runId = request.headers.get('x-dds-run-id');
+    const operationId = request.headers.get('x-dds-operation-id');
+    const requestHash = request.headers.get('x-dds-request-hash');
+    return runId && operationId && requestHash ? { runId, operationId, requestHash } : null;
+  }
+
+  serializeRemoteDecision(command) {
+    const operation = this.remoteDecisions.then(command);
+    this.remoteDecisions = operation.then(() => {}, () => {});
+    return operation;
+  }
+
+  accountingSnapshot() {
+    return { ...this.accounting };
+  }
+
+  remoteEnvelope(operationResult, replayed) {
+    return Response.json({
+      operationResult,
+      replayed,
+      accounting: this.accountingSnapshot(),
+    });
+  }
+
+  async remoteFetch(request) {
+    const identity = this.remoteIdentity(request);
+    this.accounting.workerInbound += 1;
+    this.accounting.doFetchArrivals += 1;
+    return this.serializeRemoteDecision(() => this.resolveRemoteOperation(request, identity));
+  }
+
+  async resolveRemoteOperation(request, identity) {
+    const rows = this.sql.exec(
+      'SELECT request_hash, response_json FROM test_operations WHERE run_id = ? AND operation_id = ?',
+      identity.runId, identity.operationId,
+    ).toArray();
+    this.accounting.sqliteRows += 1;
+    const stored = rows[0];
+    if (stored) {
+      if (stored.request_hash !== identity.requestHash) return failure('OPERATION_CONFLICT', 409);
+      return this.remoteEnvelope(JSON.parse(stored.response_json), true);
+    }
+
+    const path = new URL(request.url).pathname;
+    const response = path === '/__dds/ordered-probe'
+      ? await this.orderedProbe(request, true)
+      : await this.enqueue(() => this.handle(request, true));
+    if (!response.ok) return response;
+    const operationResult = { ...(await response.json()), activationId: this.activationId };
+    this.sql.exec(
+      'INSERT INTO test_operations (run_id, operation_id, request_hash, response_json, created_at) VALUES (?, ?, ?, ?, ?)',
+      identity.runId, identity.operationId, identity.requestHash, JSON.stringify(operationResult), Date.now(),
+    );
+    this.accounting.sqliteRows += 1;
+    return this.remoteEnvelope(operationResult, false);
   }
 
   enqueue(command) {
@@ -58,7 +134,7 @@ export class FeasibilityRoom {
     return operation;
   }
 
-  async orderedProbe(request) {
+  async orderedProbe(request, remote = false) {
     let body;
     try { body = await request.json(); }
     catch { return failure('INVALID_DEAL', 400); }
@@ -71,6 +147,7 @@ export class FeasibilityRoom {
     const ping = new Request(new URL('/__dds/ping', request.url), {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
     });
+    if (remote) this.accounting.queuedDoCommands += 2;
     const pair = await runOrderedQueueProbe({
       enqueueSolve: () => this.enqueue(async () => (await this.handle(solve)).json()),
       enqueuePing: () => this.enqueue(async () => (await this.handle(ping)).json()),
@@ -79,7 +156,7 @@ export class FeasibilityRoom {
     return Response.json({ ok: true, ...pair });
   }
 
-  async handle(request) {
+  async handle(request, remote = false) {
     const path = new URL(request.url).pathname;
     if (path === '/__dds/ping') {
       await request.text();
@@ -100,6 +177,7 @@ export class FeasibilityRoom {
     if (!this.client) await this.initialize();
     if (!this.client) return failure('DDS_FAILURE', 500);
     try {
+      if (remote && (path === '/__dds/table' || path === '/__dds/solve')) this.accounting.queuedDoCommands += 1;
       if (path === '/__dds/solve' && this.delayMs > 0) {
         await new Promise((resolve) => setTimeout(resolve, this.delayMs));
       }
