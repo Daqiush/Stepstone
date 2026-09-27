@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 import { canonicalJson } from './remote-dds-soak-state.mjs';
 import { writeReportCheckpoint } from './worker-dds-checkpoint.mjs';
 
@@ -37,6 +38,12 @@ export async function verifyWorkersDeployment({ fetchImpl = fetch, accountId, sc
   if (!response.ok || payload?.result?.version !== expectedVersionId) throw new Error('Workers API did not verify the deployed version ID');
   return assertVerifiedDeployment({ versionId: expectedVersionId, apiVerified: true, wranglerVersion });
 }
+export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImpl = fetch, wrangler = 'wrangler', accountId, scriptName, apiToken }) {
+  const deployed = JSON.parse(String(execFile(wrangler, ['deploy', '--json'], { encoding: 'utf8' })));
+  const versionId = deployed?.version_id ?? deployed?.versionId;
+  const wranglerVersion = String(execFile(wrangler, ['--version'], { encoding: 'utf8' })).trim();
+  return verifyWorkersDeployment({ fetchImpl, accountId, scriptName, apiToken, expectedVersionId: versionId, wranglerVersion });
+}
 export function createDeploymentManifest({ root = resolve(import.meta.dirname, '..'), verifiedDeployment } = {}) {
   const deployment = assertVerifiedDeployment(verifiedDeployment);
   const assets = {
@@ -61,15 +68,12 @@ export function assertDeploymentManifest(manifest, { root = resolve(import.meta.
 }
 
 function option(name, fallback) { const at = process.argv.indexOf(name); return at < 0 ? fallback : process.argv[at + 1]; }
-function runCli() {
+async function runCli() {
   const out = option('--out', null);
   if (!out) throw new Error('--out is required');
-  const verifiedPath = option('--verified-deployment', '');
-  if (!verifiedPath) throw new Error('--verified-deployment is required (a Workers API-verified deployment record)');
-  const manifest = createDeploymentManifest({ verifiedDeployment: JSON.parse(readFileSync(resolve(process.cwd(), verifiedPath), 'utf8')) });
+  if (!process.argv.includes('--deploy-and-verify')) throw new Error('--deploy-and-verify is required; verified deployment JSON is not accepted');
+  const manifest = createDeploymentManifest({ verifiedDeployment: await deployAndVerifyWorkers({ accountId: process.env.CLOUDFLARE_ACCOUNT_ID, scriptName: process.env.CLOUDFLARE_WORKER_NAME, apiToken: process.env.CLOUDFLARE_API_TOKEN }) });
   writeReportCheckpoint(resolve(process.cwd(), out), manifest);
   console.log(`Generated remote DDS deployment manifest: ${manifest.buildId}`);
 }
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  try { runCli(); } catch (error) { console.error(error.message); process.exitCode = 1; }
-}
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) runCli().catch((error) => { console.error(error.message); process.exitCode = 1; });

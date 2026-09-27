@@ -144,12 +144,13 @@ async function runCli() {
     try {
       const remote = await dispatch(operation, operationId); const nativeStarted = performance.now(); const native = await baseline(operation); const nativeMs = performance.now() - nativeStarted;
       const checked = verify(operation, native, remote);
-      state.recordCompletion({ operationId, response: remote.operationResult, activationId: remote.operationResult.activationId, observed: remote.accounting });
-      evidence.operations.push({ id: operation.id, index, route: operation.route, input: JSON.parse(operation.body), nativeBaseline: native, nativeMs,
+      const operationEvidence = { id: operation.id, index, route: operation.route, input: JSON.parse(operation.body), nativeBaseline: native, nativeMs,
         remote: remote.operationResult, remoteMetrics: remote.operationResult.metrics ?? remote.operationResult.solveResponse?.metrics ?? null,
         heapBytes: remote.operationResult.metrics?.heapBytes ?? remote.operationResult.solveResponse?.metrics?.heapBytes ?? null,
         wasmElapsedMs: remote.operationResult.metrics?.solveMs ?? remote.operationResult.solveResponse?.metrics?.solveMs ?? null,
-        orderedPingDelayMs: remote.operationResult.queueDelayMs ?? null, activationId: remote.operationResult.activationId, accounting: remote.accounting, ...checked });
+        orderedPingDelayMs: remote.operationResult.queueDelayMs ?? null, activationId: remote.operationResult.activationId, accounting: remote.accounting, ...checked };
+      state.recordCompletion({ operationId, response: remote.operationResult, activationId: remote.operationResult.activationId, observed: remote.accounting, evidence: operationEvidence });
+      evidence.operations.push(operationEvidence);
       if (checked.candidateDifference) evidence.candidateDifferences.push({ id: operation.id, ...checked.candidateDifference });
       writeReportCheckpoint(resolve(runDir, 'evidence.json'), evidence);
     } catch (error) { state.recordFailure({ operationId, error: error.message }); throw error; }

@@ -204,3 +204,16 @@ test('projects and enforces all accounting dimensions including replay arrival c
   assert.throws(() => state.assertAccountingWithinLimits({ ...baseline, sqliteRows: { ...baseline.sqliteRows, reads: 25001 } }), /sqliteRows\.reads/i);
   assert.throws(() => state.assertAccountingWithinLimits({ ...baseline, sqliteRows: { ...baseline.sqliteRows, writes: 25001 } }), /sqliteRows\.writes/i);
 });
+
+test('completion journals full evidence atomically and recovery restores it', async () => {
+  state ??= await import('../scripts/remote-dds-soak-state.mjs');
+  const dir = tempRun();
+  try {
+    const run = state.createSoakState({ dir, root: ROOT, requestForIndex: request });
+    run.recordIntent({ index: 0, operationId: 'op-0', ...request(0) });
+    const evidence = { input: { x: 1 }, nativeBaseline: { score: 2 }, remote: { ok: true } };
+    run.recordCompletion({ operationId: 'op-0', response: { ok: true }, activationId: activation(1), observed: accounting(), evidence });
+    const recovered = state.recoverSoakState({ dir, root: ROOT, requestForIndex: request });
+    assert.deepEqual(recovered.evidence, [evidence]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
