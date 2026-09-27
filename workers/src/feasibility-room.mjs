@@ -91,6 +91,7 @@ export class FeasibilityRoom {
     return Response.json({
       operationResult,
       replayed,
+      buildId: this.env.DDS_DEPLOYMENT_BUILD_ID || null,
       accounting: this.accountingSnapshot(),
     });
   }

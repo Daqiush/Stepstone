@@ -16,7 +16,9 @@
     "test:server:smoke": "node scripts/smoke-server.js",
     "benchmark:workers-dds": "node scripts/benchmark-worker-dds.mjs --seed 20260923 --iterations 100000 --url http://127.0.0.1:8787 --out workers/test/results/dds-feasibility.json",
     "simulate:workers-budget": "node scripts/simulate-worker-room-budget.mjs --report workers/test/results/dds-feasibility.json",
-    "check:workers-dds": "node scripts/check-worker-dds-gates.mjs --report workers/test/results/dds-feasibility.json"
+    "check:workers-dds": "node scripts/check-worker-dds-gates.mjs --report workers/test/results/dds-feasibility.json",
+    "prepare:remote-workers-dds": "node scripts/prepare-remote-dds-deployment.mjs --out workers/test/results/remote-dds-deployment.json",
+    "soak:remote-workers-dds": "node scripts/remote-worker-dds-soak.mjs"
   },
   "dependencies": {
     "express": "^4.18.2",
