@@ -37,3 +37,15 @@ test('a failed atomic replacement leaves the previous report intact', async () =
     assert.deepEqual(readdirSync(dir), ['report.json']);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('syncs the parent directory after durable create and atomic replacement', async () => {
+  const { writeReportCheckpoint } = await checkpoint;
+  const dir = mkdtempSync(join(tmpdir(), 'dds-checkpoint-'));
+  try {
+    const synced = [];
+    writeReportCheckpoint(join(dir, 'report.json'), { status: 'new' }, {
+      syncDirectory: (directory) => synced.push(directory),
+    });
+    assert.deepEqual(synced, [dir, dir]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

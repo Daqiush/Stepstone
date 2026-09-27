@@ -10,6 +10,7 @@ const ROOT = resolve(__dirname, '..');
 
 function tempRun() { return mkdtempSync(join(tmpdir(), 'remote-dds-soak-state-')); }
 function request(index) { return { route: '/__dds/solve', body: `{"z":2,"index":${index},"a":1}` }; }
+function activation(index) { return `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`; }
 function accounting(overrides = {}) {
   return { workerInbound: 1, doFetchArrivals: 1, queuedDoCommands: 2, sqliteRows: { reads: 1, writes: 1 }, ...overrides };
 }
@@ -56,7 +57,7 @@ test('completion is contiguous, persists response hash, and advances the cursor 
   try {
     const run = state.createSoakState({ dir, root: ROOT, requestForIndex: request });
     run.recordIntent({ index: 0, operationId: 'op-0', ...request(0) });
-    run.recordCompletion({ operationId: 'op-0', response: { ok: true }, activationId: 'a1', observed: accounting() });
+    run.recordCompletion({ operationId: 'op-0', response: { ok: true }, activationId: activation(1), observed: accounting() });
     assert.equal(run.report.completedCursor, 1);
     const lines = readFileSync(join(dir, 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
     assert.equal(lines[1].responseHash, state.sha256Utf8(state.canonicalJson({ ok: true })));
@@ -71,7 +72,7 @@ test('fails closed on journal gap, duplicate, invalid JSON, changed deterministi
     try {
       const run = state.createSoakState({ dir, root: ROOT, requestForIndex: request });
       run.recordIntent({ index: 0, operationId: 'op-0', ...request(0) });
-      run.recordCompletion({ operationId: 'op-0', response: { ok: true }, observed: accounting() });
+      run.recordCompletion({ operationId: 'op-0', response: { ok: true }, activationId: activation(1), observed: accounting() });
       if (scenario === 'gap') writeFileSync(join(dir, 'journal.jsonl'), `${readFileSync(join(dir, 'journal.jsonl'))}${JSON.stringify({ type: 'intent', index: 2, operationId: 'op-2', ...request(2), requestHash: state.requestHash('/__dds/solve', request(2).body) })}\n`);
       if (scenario === 'duplicate') writeFileSync(join(dir, 'journal.jsonl'), `${readFileSync(join(dir, 'journal.jsonl'))}${JSON.stringify({ type: 'completion', index: 0, operationId: 'op-0', responseHash: 'a'.repeat(64), observed: accounting() })}\n`);
       if (scenario === 'invalid-json') writeFileSync(join(dir, 'journal.jsonl'), `${readFileSync(join(dir, 'journal.jsonl'))}{broken\n`);
@@ -96,10 +97,11 @@ test('a terminal failure holds cursor and a replay needs matching response and a
   try {
     const run = state.createSoakState({ dir: replayDir, root: ROOT, requestForIndex: request });
     run.recordIntent({ index: 0, operationId: 'op-0', ...request(0) });
-    assert.throws(() => run.completeReplay({ operationId: 'wrong', response: { ok: true }, activationId: 'a1', observed: accounting() }), /operation ID/i);
-    run.completeReplay({ operationId: 'op-0', response: { ok: true }, activationId: 'a1', observed: accounting() });
+    assert.throws(() => run.completeReplay({ operationId: 'wrong', response: { ok: true }, activationId: activation(1), observed: accounting() }), /operation ID/i);
+    assert.throws(() => run.completeReplay({ operationId: 'op-0', response: { ok: true }, observed: accounting() }), /activation/i);
+    run.completeReplay({ operationId: 'op-0', response: { ok: true }, activationId: activation(1), observed: accounting() });
     run.recordIntent({ index: 1, operationId: 'op-1', ...request(1) });
-    assert.throws(() => run.completeReplay({ operationId: 'op-1', response: { ok: true }, activationId: 'a2', observed: accounting() }), /activation/i);
+    assert.throws(() => run.completeReplay({ operationId: 'op-1', response: { ok: true }, activationId: activation(2), observed: accounting() }), /activation/i);
   } finally { rmSync(replayDir, { recursive: true, force: true }); }
 });
 
@@ -113,7 +115,7 @@ test('recovery closes every crash window using the fsynced journal as authority'
       if (window === 'intent-fsynced' || window === 'remote-committed') {
         assert.equal(state.recoverSoakState({ dir, root: ROOT, requestForIndex: request }).recovery.kind, 'replay-pending', window);
       } else {
-        run.recordCompletion({ operationId: 'op-0', response: { ok: true }, activationId: 'a1', observed: accounting() });
+        run.recordCompletion({ operationId: 'op-0', response: { ok: true }, activationId: activation(1), observed: accounting() });
         if (window === 'completion-fsynced') writeFileSync(join(dir, 'report.json'), JSON.stringify({ completedCursor: 0 }));
         const resumed = state.recoverSoakState({ dir, root: ROOT, requestForIndex: request });
         assert.equal(resumed.recovery.kind, 'ready', window);
@@ -135,13 +137,41 @@ test('allows a documented fresh activation at the next shard boundary', async ()
       journal.push({ type: 'intent', index, operationId: `op-${index}`, route,
         requestHash: state.requestHash(route, body), canonicalRequest: state.canonicalRequest(route, body) });
       journal.push({ type: 'completion', index, operationId: `op-${index}`,
-        responseHash: state.sha256Utf8(state.canonicalJson({ ok: true })), activationId: index < 2000 ? 'first' : 'second',
+        responseHash: state.sha256Utf8(state.canonicalJson({ ok: true })), activationId: activation(index < 2000 ? 1 : 2),
         observed: accounting({ queuedDoCommands: 1 }) });
     }
     writeFileSync(join(dir, 'journal.jsonl'), `${journal.map(JSON.stringify).join('\n')}\n`);
     const recovered = state.recoverSoakState({ dir, root: ROOT, requestForIndex: boundaryRequest });
     assert.equal(recovered.recovery.kind, 'ready');
-    assert.deepEqual(recovered.report.activationIds, { 0: 'first', 1: 'second' });
+    assert.deepEqual(recovered.report.activationIds, { 0: activation(1), 1: activation(2) });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('normalizes cumulative Worker accounting snapshots to per-operation deltas', async () => {
+  state ??= await import('../scripts/remote-dds-soak-state.mjs');
+  const dir = tempRun();
+  try {
+    const run = state.createSoakState({ dir, root: ROOT, requestForIndex: request });
+    run.recordIntent({ index: 0, operationId: 'op-0', ...request(0) });
+    run.recordCompletion({ operationId: 'op-0', response: { ok: true }, activationId: activation(1), observed: accounting() });
+    const secondSnapshot = accounting({ workerInbound: 2, doFetchArrivals: 2, queuedDoCommands: 4, sqliteRows: { reads: 2, writes: 2 } });
+    run.recordIntent({ index: 1, operationId: 'op-1', ...request(1) });
+    run.recordCompletion({ operationId: 'op-1', response: { ok: true }, activationId: activation(1), observed: secondSnapshot });
+    assert.deepEqual(run.report.observed, secondSnapshot);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('rejects a duplicate operation id anywhere in a recovered journal', async () => {
+  state ??= await import('../scripts/remote-dds-soak-state.mjs');
+  const dir = tempRun();
+  try {
+    const run = state.createSoakState({ dir, root: ROOT, requestForIndex: request });
+    run.recordIntent({ index: 0, operationId: 'op-0', ...request(0) });
+    run.recordCompletion({ operationId: 'op-0', response: { ok: true }, activationId: activation(1), observed: accounting() });
+    const duplicate = { type: 'intent', index: 1, operationId: 'op-0', route: request(1).route,
+      requestHash: state.requestHash(request(1).route, request(1).body), canonicalRequest: state.canonicalRequest(request(1).route, request(1).body) };
+    writeFileSync(join(dir, 'journal.jsonl'), `${readFileSync(join(dir, 'journal.jsonl'))}${JSON.stringify(duplicate)}\n`);
+    assert.throws(() => state.recoverSoakState({ dir, root: ROOT, requestForIndex: request }), /duplicate operation/i);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

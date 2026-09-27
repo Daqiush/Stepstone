@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, closeSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, resolve } from 'node:path';
-import { writeReportCheckpoint } from './worker-dds-checkpoint.mjs';
+import { syncParentDirectory, writeReportCheckpoint } from './worker-dds-checkpoint.mjs';
 import { canonicalHarnessRequest } from '../workers/src/remote-test-canonical.mjs';
 
 export const SOAK_SEED = 20260923;
@@ -10,6 +10,7 @@ export const ACCOUNTING_LIMITS = Object.freeze({ workerInbound: 25000, queuedDoC
 const JOURNAL = 'journal.jsonl';
 const MANIFEST = 'manifest.json';
 const REPORT = 'report.json';
+const ACTIVATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export function canonicalJson(value) {
   if (value === undefined) return undefined;
@@ -56,6 +57,7 @@ function appendDurable(path, record) {
   const fd = openSync(path, 'a');
   try { appendFileSync(fd, `${canonicalJson(record)}\n`, 'utf8'); fsyncSync(fd); }
   finally { closeSync(fd); }
+  syncParentDirectory(resolve(path, '..'));
 }
 function readJson(path, label) {
   try { return JSON.parse(readFileSync(path, 'utf8')); }
@@ -83,6 +85,18 @@ function addAccounting(total, delta) {
     next.sqliteRows[key] += delta.sqliteRows[key];
   }
   return next;
+}
+function accountingDelta(snapshot, prior = zeroAccounting()) {
+  const delta = zeroAccounting();
+  for (const key of ['workerInbound', 'doFetchArrivals', 'queuedDoCommands']) {
+    if (!Number.isSafeInteger(snapshot?.[key]) || snapshot[key] < prior[key]) throw new Error(`Worker accounting snapshot regressed at ${key}`);
+    delta[key] = snapshot[key] - prior[key];
+  }
+  for (const key of ['reads', 'writes']) {
+    if (!Number.isSafeInteger(snapshot?.sqliteRows?.[key]) || snapshot.sqliteRows[key] < prior.sqliteRows[key]) throw new Error(`Worker accounting snapshot regressed at sqliteRows.${key}`);
+    delta.sqliteRows[key] = snapshot.sqliteRows[key] - prior.sqliteRows[key];
+  }
+  return delta;
 }
 
 export function assertAccountingWithinLimits(accounting) {
@@ -131,26 +145,28 @@ function validateIntent(record, cursor, requestForIndex) {
 }
 
 function replayJournal(records, requestForIndex) {
-  let cursor = 0, pending = null, terminalFailure = null, activationIds = {}, observed = zeroAccounting();
+  let cursor = 0, pending = null, terminalFailure = null, activationIds = {}, remoteSnapshots = {}, observed = zeroAccounting();
+  const operationIds = new Set();
   for (const record of records) {
     if (record.type === 'intent') {
       if (pending || terminalFailure) throw new Error('Journal contains duplicate or post-terminal intent');
+      if (operationIds.has(record.operationId)) throw new Error('Journal contains duplicate operation ID');
       validateIntent(record, cursor, requestForIndex); pending = record;
+      operationIds.add(record.operationId);
     } else if (record.type === 'completion') {
       if (!pending || record.operationId !== pending.operationId || record.index !== pending.index || !/^[a-f0-9]{64}$/.test(record.responseHash ?? '')) throw new Error('Journal completion is invalid or duplicate');
-      if (record.activationId !== undefined && record.activationId !== null) {
-        const shard = Math.floor(pending.index / 2000);
-        if (typeof record.activationId !== 'string' || (activationIds[shard] && activationIds[shard] !== record.activationId)) throw new Error('Activation ID changed inside a shard');
-        activationIds[shard] = record.activationId;
-      }
+      const shard = Math.floor(pending.index / 2000);
+      if (typeof record.activationId !== 'string' || !ACTIVATION_ID.test(record.activationId) || (activationIds[shard] && activationIds[shard] !== record.activationId)) throw new Error('Activation ID missing, invalid, or changed inside a shard');
+      activationIds[shard] = record.activationId;
       observed = addAccounting(observed, record.observed); assertAccountingWithinLimits(observed);
+      if (record.remoteSnapshot) remoteSnapshots[shard] = record.remoteSnapshot;
       cursor += 1; pending = null;
     } else if (record.type === 'failed') {
       if (!pending || record.operationId !== pending.operationId || record.index !== pending.index || typeof record.error !== 'string') throw new Error('Journal failure is invalid');
       terminalFailure = record; pending = null;
     } else throw new Error('Journal record type is invalid');
   }
-  return { cursor, pending, terminalFailure, activationIds, observed };
+  return { cursor, pending, terminalFailure, activationIds, remoteSnapshots, operationIds, observed };
 }
 
 function makeReport(snapshot) {
@@ -164,7 +180,7 @@ export function createSoakState({ dir, root, requestForIndex, projection = proje
   const manifest = createRunManifest({ root });
   if (existsSync(file(dir, MANIFEST))) throw new Error('Soak state already exists; use recoverSoakState');
   writeReportCheckpoint(file(dir, MANIFEST), manifest);
-  const state = { cursor: 0, pending: null, terminalFailure: null, activationIds: {}, observed: zeroAccounting() };
+  const state = { cursor: 0, pending: null, terminalFailure: null, activationIds: {}, remoteSnapshots: {}, operationIds: new Set(), observed: zeroAccounting() };
   const api = buildStateApi({ dir, requestForIndex, manifest, state, projection });
   writeReportCheckpoint(file(dir, REPORT), api.report);
   return api;
@@ -179,11 +195,12 @@ function buildStateApi({ dir, requestForIndex, manifest, state, projection }) {
   const finish = ({ operationId, response, activationId, observed }) => {
     requirePending(operationId);
     const shard = Math.floor(state.pending.index / 2000);
-    if (activationId !== undefined && activationId !== null && state.activationIds[shard] && state.activationIds[shard] !== activationId) throw new Error('Activation ID changed after replay');
+    if (typeof activationId !== 'string' || !ACTIVATION_ID.test(activationId) || (state.activationIds[shard] && state.activationIds[shard] !== activationId)) throw new Error('Activation ID missing, invalid, or changed after replay');
     const responseHash = sha256Utf8(canonicalJson(response));
-    const nextObserved = addAccounting(state.observed, observed); assertAccountingWithinLimits(nextObserved);
-    appendDurable(file(dir, JOURNAL), { type: 'completion', index: state.pending.index, operationId, responseHash, activationId, observed });
-    state.cursor += 1; state.pending = null; state.observed = nextObserved; if (activationId) state.activationIds[shard] = activationId;
+    const delta = accountingDelta(observed, state.remoteSnapshots[shard]);
+    const nextObserved = addAccounting(state.observed, delta); assertAccountingWithinLimits(nextObserved);
+    appendDurable(file(dir, JOURNAL), { type: 'completion', index: state.pending.index, operationId, responseHash, activationId, observed: delta, remoteSnapshot: observed });
+    state.cursor += 1; state.pending = null; state.observed = nextObserved; state.activationIds[shard] = activationId; state.remoteSnapshots[shard] = observed;
     saveReport();
   };
   const api = {
@@ -194,9 +211,10 @@ function buildStateApi({ dir, requestForIndex, manifest, state, projection }) {
       // provide the whole-run projection, including fixtures, probes and replays.
       assertAccountingWithinLimits(projection);
       if (state.pending || state.terminalFailure) throw new Error('Cannot dispatch while pending or terminally failed');
+      if (state.operationIds.has(operationId)) throw new Error('Operation ID must be globally unique and monotonic');
       const record = { type: 'intent', index, operationId, route, requestHash: requestHash(route, body), canonicalRequest: canonicalRequest(route, body) };
       validateIntent(record, state.cursor, requestForIndex);
-      appendDurable(file(dir, JOURNAL), record); state.pending = record; return record;
+      appendDurable(file(dir, JOURNAL), record); state.pending = record; state.operationIds.add(operationId); return record;
     },
     recordCompletion: finish,
     completeReplay: finish,
