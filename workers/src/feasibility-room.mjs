@@ -148,11 +148,23 @@ export class FeasibilityRoom {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
     });
     if (remote) this.accounting.queuedDoCommands += 2;
+    let solveStatus;
+    let pingStatus;
     const pair = await runOrderedQueueProbe({
-      enqueueSolve: () => this.enqueue(async () => (await this.handle(solve)).json()),
-      enqueuePing: () => this.enqueue(async () => (await this.handle(ping)).json()),
+      enqueueSolve: () => this.enqueue(async () => {
+        const response = await this.handle(solve);
+        solveStatus = response.status;
+        return response.json();
+      }),
+      enqueuePing: () => this.enqueue(async () => {
+        const response = await this.handle(ping);
+        pingStatus = response.status;
+        return response.json();
+      }),
       now: () => performance.now(),
     });
+    if (!pair.solveResponse?.ok) return failure(pair.solveResponse?.error?.code || 'DDS_FAILURE', solveStatus || 500);
+    if (!pair.pingResponse?.ok) return failure(pair.pingResponse?.error?.code || 'DDS_FAILURE', pingStatus || 500);
     return Response.json({ ok: true, ...pair });
   }
 

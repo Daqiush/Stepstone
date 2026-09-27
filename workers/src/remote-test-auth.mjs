@@ -39,6 +39,15 @@ function remoteIdentity(headers) {
   return { runId, operationId, requestHash, shard };
 }
 
+async function canonicalRequestHash(path, body) {
+  const canonical = new TextEncoder().encode(JSON.stringify({
+    body: new TextDecoder().decode(body),
+    route: path,
+  }));
+  const digest = await crypto.subtle.digest('SHA-256', canonical);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
 async function bufferRequestBody(request) {
   const contentLength = request.headers.get('content-length');
   if (contentLength !== null && (!/^[0-9]+$/.test(contentLength) || Number(contentLength) > MAX_REQUEST_BYTES)) {
@@ -86,5 +95,6 @@ export async function authorizeHarnessRequest(request, env) {
   }
   const body = await bufferRequestBody(request);
   if (!body) return { mode: 'deny', response: new Response(null, { status: 413 }) };
+  if (await canonicalRequestHash(new URL(request.url).pathname, body) !== identity.requestHash) return opaqueNotFound();
   return { mode: 'remote', body, identity };
 }
