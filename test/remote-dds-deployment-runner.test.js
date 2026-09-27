@@ -81,3 +81,10 @@ test('runner options require a URL and key without exposing the key or accepting
   assert.equal(options.endpoint, 'https://a.workers.dev');
   assert.equal(JSON.stringify(options).includes('secret-value'), false);
 });
+
+test('runner fails closed when observed accounting differs from its declared projection', async () => {
+  const mod = await runner();
+  const accounting = { workerInbound: 1, doFetchArrivals: 1, queuedDoCommands: 0, sqliteRows: { reads: 1, writes: 1 } };
+  assert.deepEqual(mod.reconcileObservedProjection(accounting, accounting), accounting);
+  assert.throws(() => mod.reconcileObservedProjection(accounting, { ...accounting, workerInbound: 2 }), /reconcile/i);
+});

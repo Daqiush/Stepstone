@@ -36,6 +36,10 @@ export function assertEndpointVersion(payload, workerVersionId) {
   if (payload?.workerVersionId !== workerVersionId) throw new Error(`Remote endpoint Worker version ID mismatch: expected ${workerVersionId}, received ${payload?.workerVersionId ?? 'missing'}`);
   return payload;
 }
+export function reconcileObservedProjection(observed, projection) {
+  if (JSON.stringify(observed) !== JSON.stringify(projection)) throw new Error('Observed remote accounting does not reconcile to the declared projection');
+  return observed;
+}
 export function parseOptions(args = process.argv.slice(2), env = process.env) {
   const get = (name, fallback = null) => { const at = args.indexOf(name); return at < 0 ? fallback : args[at + 1]; };
   if (args.includes('--count')) throw new Error('--count is not supported; the remote soak always runs exactly 22000 operations');
@@ -137,12 +141,13 @@ async function runCli() {
   if (state.recovery?.kind === 'replay-pending') {
     const pending = state.recovery.intent, operation = operations[pending.index];
     const remote = await dispatch(operation, pending.operationId); const native = await baseline(operation); const checked = verify(operation, native, remote);
-    state.completeReplay({ operationId: pending.operationId, response: remote.operationResult, activationId: remote.operationResult.activationId, observed: remote.accounting });
-    evidence.operations.push({ id: operation.id, replay: true, input: JSON.parse(operation.body), nativeBaseline: native, remote: remote.operationResult,
+    const replayEvidence = { id: operation.id, replay: true, input: JSON.parse(operation.body), nativeBaseline: native, remote: remote.operationResult,
       remoteMetrics: remote.operationResult.metrics ?? remote.operationResult.solveResponse?.metrics ?? null,
       heapBytes: remote.operationResult.metrics?.heapBytes ?? remote.operationResult.solveResponse?.metrics?.heapBytes ?? null,
       wasmElapsedMs: remote.operationResult.metrics?.solveMs ?? remote.operationResult.solveResponse?.metrics?.solveMs ?? null,
-      orderedPingDelayMs: remote.operationResult.queueDelayMs ?? null, ...checked });
+      orderedPingDelayMs: remote.operationResult.queueDelayMs ?? null, ...checked };
+    state.completeReplay({ operationId: pending.operationId, response: remote.operationResult, activationId: remote.operationResult.activationId, observed: remote.accounting, evidence: replayEvidence });
+    evidence.operations.push(replayEvidence);
   }
   for (let index = state.report.completedCursor; index < operations.length; index++) {
     const operation = operations[index], operationId = `op.${String(index).padStart(6, '0')}`;
@@ -162,6 +167,7 @@ async function runCli() {
     } catch (error) { state.recordFailure({ operationId, error: error.message }); throw error; }
   }
   writeReportCheckpoint(resolve(runDir, 'evidence.json'), evidence);
+  reconcileObservedProjection(state.report.observed, projection);
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   runCli().catch((error) => { console.error(error.message); process.exitCode = 1; });
