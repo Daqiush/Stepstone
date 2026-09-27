@@ -103,7 +103,8 @@ async function runFixtureChecks({ endpoint, key, runId, fixtures, buildId, evide
     if (JSON.stringify(normalizeDdsResult(kind, native)) !== JSON.stringify(normalizeDdsResult(kind, expected))) throw new Error(`Fixture corpus drift: ${item.id}`);
     if (index === 0 && remote.operationResult.buildId !== undefined) assertEndpointBuild(remote.operationResult, buildId);
     const fixtureEvidence = { id: item.id, route, input: JSON.parse(body), nativeBaseline: native, remote: remote.operationResult, accounting: remote.accounting, replayed: remote.replayed };
-    state.recordAuxiliaryResponse({ operationId, route, replayed: remote.replayed, response: remote.operationResult, evidence: fixtureEvidence });
+    state.recordAuxiliaryResponse({ operationId, route, replayed: remote.replayed, response: remote.operationResult,
+      evidence: fixtureEvidence, evidenceKind: 'fixture', remoteAccounting: remote.accounting, shard: 0 });
     evidence.fixtures.push(fixtureEvidence);
   }
 }
@@ -143,6 +144,11 @@ async function runCli() {
     for (const operation of state.evidence) if (operation?.id && !saved.has(operation.id)) evidence.operations.push(operation);
     writeReportCheckpoint(resolve(runDir, 'evidence.json'), evidence);
   }
+  if (resume && Array.isArray(state.fixtureEvidence)) {
+    const saved = new Set(evidence.fixtures.map((fixture) => fixture.id));
+    for (const fixture of state.fixtureEvidence) if (fixture?.id && !saved.has(fixture.id)) evidence.fixtures.push(fixture);
+    writeReportCheckpoint(resolve(runDir, 'evidence.json'), evidence);
+  }
   if (!resume) writeReportCheckpoint(resolve(runDir, 'evidence.json'), evidence);
   // The deployed Worker must explicitly identify the exact manifest being run.
   // This request is budgeted before any fixture or generated DDS dispatch.
@@ -151,7 +157,8 @@ async function runCli() {
     const preflight = await remotePost(endpoint, { key, runId, operationId: 'preflight.metrics', route: '/__dds/metrics', body: preflightBody, shard: 0 });
     assertEndpointBuild(preflight.operationResult, deployment.buildId);
     assertEndpointVersion(preflight.operationResult, deployment.workerVersionId);
-    state.recordAuxiliaryResponse({ operationId: 'preflight.metrics', route: '/__dds/metrics', replayed: preflight.replayed, response: preflight.operationResult });
+    state.recordAuxiliaryResponse({ operationId: 'preflight.metrics', route: '/__dds/metrics', replayed: preflight.replayed,
+      response: preflight.operationResult, remoteAccounting: preflight.accounting, shard: 0 });
     evidence.preflight = { accounting: preflight.accounting, activationId: preflight.operationResult.activationId, replayed: preflight.replayed };
     writeReportCheckpoint(resolve(runDir, 'evidence.json'), evidence);
   }
@@ -165,7 +172,8 @@ async function runCli() {
       heapBytes: remote.operationResult.metrics?.heapBytes ?? remote.operationResult.solveResponse?.metrics?.heapBytes ?? null,
       wasmElapsedMs: remote.operationResult.metrics?.solveMs ?? remote.operationResult.solveResponse?.metrics?.solveMs ?? null,
       orderedPingDelayMs: remote.operationResult.queueDelayMs ?? null, ...checked };
-    state.completeReplay({ operationId: pending.operationId, response: remote.operationResult, activationId: remote.operationResult.activationId, replayed: remote.replayed, evidence: replayEvidence });
+    state.completeReplay({ operationId: pending.operationId, response: remote.operationResult, activationId: remote.operationResult.activationId,
+      replayed: remote.replayed, evidence: replayEvidence, remoteAccounting: remote.accounting });
     evidence.operations.push(replayEvidence);
   }
   for (let index = state.report.completedCursor; index < operations.length; index++) {
@@ -179,7 +187,8 @@ async function runCli() {
         heapBytes: remote.operationResult.metrics?.heapBytes ?? remote.operationResult.solveResponse?.metrics?.heapBytes ?? null,
         wasmElapsedMs: remote.operationResult.metrics?.solveMs ?? remote.operationResult.solveResponse?.metrics?.solveMs ?? null,
         orderedPingDelayMs: remote.operationResult.queueDelayMs ?? null, activationId: remote.operationResult.activationId, accounting: remote.accounting, ...checked };
-      state.recordCompletion({ operationId, response: remote.operationResult, activationId: remote.operationResult.activationId, replayed: remote.replayed, evidence: operationEvidence });
+      state.recordCompletion({ operationId, response: remote.operationResult, activationId: remote.operationResult.activationId,
+        replayed: remote.replayed, evidence: operationEvidence, remoteAccounting: remote.accounting });
       evidence.operations.push(operationEvidence);
       if (checked.candidateDifference) evidence.candidateDifferences.push({ id: operation.id, ...checked.candidateDifference });
       writeReportCheckpoint(resolve(runDir, 'evidence.json'), evidence);

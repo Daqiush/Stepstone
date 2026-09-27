@@ -343,6 +343,21 @@ test('remote duplicate delivery serializes a delayed solve into one persisted ex
   } finally { await isolated.dispose(); }
 });
 
+test('remote replay retains the first execution accounting for a client crash recovery', async () => {
+  const isolated = await remoteRuntime();
+  const solve = { deal: oneTrickDeal };
+  const headers = remoteHeaders('/__dds/solve', solve, 'run_20260927-A', 'solve.recover.000001');
+  try {
+    const first = await post(isolated, '/__dds/solve', solve, headers);
+    const replay = await post(isolated, '/__dds/solve', solve, headers);
+    assert.deepEqual(first.body.operationResult.executionAccounting, {
+      workerInbound: 1, doFetchArrivals: 1, queuedDoCommands: 1, sqliteRows: { reads: 1, writes: 1 },
+    });
+    assert.deepEqual(replay.body.operationResult.executionAccounting, first.body.operationResult.executionAccounting);
+    assert.equal(replay.body.replayed, true);
+  } finally { await isolated.dispose(); }
+});
+
 test('remote boundary rejects a changed payload reusing the original operation hash', async () => {
   const isolated = await remoteRuntime();
   const firstBody = { deal: oneTrickDeal };

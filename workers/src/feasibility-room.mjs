@@ -96,6 +96,13 @@ export class FeasibilityRoom {
     });
   }
 
+  executionAccounting(path) {
+    const queuedDoCommands = path === '/__dds/ordered-probe' ? 2
+      : path === '/__dds/table' || path === '/__dds/solve' ? 1 : 0;
+    return { workerInbound: 1, doFetchArrivals: 1, queuedDoCommands,
+      sqliteRows: { reads: 1, writes: 1 } };
+  }
+
   async remoteFetch(request) {
     const identity = this.remoteIdentity(request);
     this.accounting.workerInbound += 1;
@@ -120,7 +127,8 @@ export class FeasibilityRoom {
       ? await this.orderedProbe(request, true)
       : await this.enqueue(() => this.handle(request, true));
     if (!response.ok) return response;
-    const operationResult = { ...(await response.json()), activationId: this.activationId };
+    const operationResult = { ...(await response.json()), activationId: this.activationId,
+      executionAccounting: this.executionAccounting(path) };
     this.sql.exec(
       'INSERT INTO test_operations (run_id, operation_id, request_hash, response_json, created_at) VALUES (?, ?, ?, ?, ?)',
       identity.runId, identity.operationId, identity.requestHash, JSON.stringify(operationResult), Date.now(),

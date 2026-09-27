@@ -32,8 +32,8 @@ test('creates the pinned deterministic manifest', async () => {
   assert.equal(manifest.randomGenerator, 'xorshift32');
   assert.equal(manifest.shards.length, 11);
   assert.deepEqual(manifest.shards, Array.from({ length: 11 }, (_, shard) => ({ shard, startIndex: shard * 2000, endIndex: shard * 2000 + 1999 })));
-  assert.equal(manifest.accountingSchemaVersion, 4);
-  assert.equal(manifest.journalSchemaVersion, 4);
+  assert.equal(manifest.accountingSchemaVersion, 5);
+  assert.equal(manifest.journalSchemaVersion, 5);
   assert.match(manifest.hashes.randomGenerator, /^[a-f0-9]{64}$/);
   assert.match(manifest.hashes.fixtureCorpus, /^[a-f0-9]{64}$/);
 });
@@ -228,12 +228,12 @@ test('persists physical auxiliary and replay requests as an exact ledger across 
     const run = state.createSoakState({ dir, root: ROOT, requestForIndex: request });
     run.recordAuxiliaryResponse({ operationId: 'preflight.metrics', route: '/__dds/metrics', replayed: false, response: { ok: true } });
     run.recordIntent({ index: 0, operationId: 'op-0', ...request(0) });
-    run.completeReplay({ operationId: 'op-0', response: { ok: true }, activationId: activation(1), replayed: true });
+    run.completeReplay({ operationId: 'op-0', response: { ok: true, executionAccounting: { workerInbound: 1, doFetchArrivals: 1, queuedDoCommands: 1, sqliteRows: { reads: 1, writes: 1 } } }, activationId: activation(1), replayed: true });
     const resumed = state.recoverSoakState({ dir, root: ROOT, requestForIndex: request });
     assert.deepEqual(resumed.report.observed, {
-      workerInbound: 2, doFetchArrivals: 2, queuedDoCommands: 0, sqliteRows: { reads: 2, writes: 1 },
+      workerInbound: 3, doFetchArrivals: 3, queuedDoCommands: 1, sqliteRows: { reads: 3, writes: 2 },
     });
-    assert.equal(resumed.physicalOperations.length, 2);
+    assert.equal(resumed.physicalOperations.length, 3);
     assert.equal(resumed.hasPhysicalOperation('preflight.metrics'), true);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -252,15 +252,48 @@ test('mocked transport ledger stays exact for fresh and resumed fixture, pending
     run = state.recoverSoakState({ dir, root: ROOT, requestForIndex: request });
     assert.equal(run.hasPhysicalOperation('preflight.metrics'), true);
     assert.equal(run.hasPhysicalOperation('fixture.000000'), true);
-    run.completeReplay({ operationId: 'op-0', response: { ok: true }, activationId: activation(1), replayed: remote(true).replayed });
+    run.completeReplay({ operationId: 'op-0', response: { ok: true, executionAccounting: { workerInbound: 1, doFetchArrivals: 1, queuedDoCommands: 1, sqliteRows: { reads: 1, writes: 1 } } }, activationId: activation(1), replayed: remote(true).replayed });
     // Mid-fixture/new request remains an execution and pays queue+write exactly once.
     run.recordIntent({ index: 1, operationId: 'op-1', ...request(1) });
     run.recordCompletion({ operationId: 'op-1', response: { ok: true }, activationId: activation(1), replayed: remote(false).replayed });
     const resumed = state.recoverSoakState({ dir, root: ROOT, requestForIndex: request });
     assert.deepEqual(resumed.report.observed, {
-      workerInbound: 4, doFetchArrivals: 4, queuedDoCommands: 2, sqliteRows: { reads: 4, writes: 3 },
+      workerInbound: 5, doFetchArrivals: 5, queuedDoCommands: 3, sqliteRows: { reads: 5, writes: 4 },
     });
     assert.deepEqual(state.ledgerAccounting(resumed.physicalOperations), resumed.report.observed);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('fails closed when independently observed remote accounting disagrees with the physical ledger', async () => {
+  state ??= await import('../scripts/remote-dds-soak-state.mjs');
+  const dir = tempRun();
+  try {
+    const run = state.createSoakState({ dir, root: ROOT, requestForIndex: request });
+    assert.throws(() => run.recordAuxiliaryResponse({ operationId: 'preflight.metrics', route: '/__dds/metrics', replayed: false,
+      response: { ok: true }, remoteAccounting: { workerInbound: 2, doFetchArrivals: 1, queuedDoCommands: 0, sqliteRows: { reads: 1, writes: 1 } } }), /remote accounting snapshot/i);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('recovery reconstructs an executed-but-locally-lost request from persisted remote execution accounting and retains auxiliary evidence', async () => {
+  state ??= await import('../scripts/remote-dds-soak-state.mjs');
+  const dir = tempRun();
+  try {
+    const run = state.createSoakState({ dir, root: ROOT, requestForIndex: request });
+    const auxiliaryEvidence = { id: 'fixture-A', nativeBaseline: { score: 1 }, remote: { ok: true } };
+    run.recordAuxiliaryResponse({ operationId: 'fixture.000000', route: '/__dds/table', replayed: false, response: { ok: true }, evidence: auxiliaryEvidence, evidenceKind: 'fixture',
+      remoteAccounting: { workerInbound: 1, doFetchArrivals: 1, queuedDoCommands: 1, sqliteRows: { reads: 1, writes: 1 } } });
+    run.recordIntent({ index: 0, operationId: 'op-0', ...request(0) });
+    const resumed = state.recoverSoakState({ dir, root: ROOT, requestForIndex: request });
+    const original = { workerInbound: 1, doFetchArrivals: 1, queuedDoCommands: 1, sqliteRows: { reads: 1, writes: 1 } };
+    resumed.completeReplay({ operationId: 'op-0', activationId: activation(1), replayed: true,
+      response: { ok: true, executionAccounting: original },
+      remoteAccounting: { workerInbound: 3, doFetchArrivals: 3, queuedDoCommands: 2, sqliteRows: { reads: 3, writes: 2 } },
+      evidence: { id: 'op-0', remote: { ok: true } } });
+    const recovered = state.recoverSoakState({ dir, root: ROOT, requestForIndex: request });
+    assert.deepEqual(recovered.report.observed, { workerInbound: 3, doFetchArrivals: 3, queuedDoCommands: 2, sqliteRows: { reads: 3, writes: 2 } });
+    assert.deepEqual(recovered.fixtureEvidence, [auxiliaryEvidence]);
+    assert.deepEqual(recovered.evidence, [{ id: 'op-0', remote: { ok: true } }]);
+    assert.equal(recovered.physicalOperations.filter((record) => record.operationId === 'op-0').length, 2);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
