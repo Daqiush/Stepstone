@@ -5,8 +5,8 @@ import { syncParentDirectory, writeReportCheckpoint } from './worker-dds-checkpo
 import { canonicalHarnessRequest } from '../workers/src/remote-test-canonical.mjs';
 
 export const SOAK_SEED = 20260923;
-export const ACCOUNTING_SCHEMA_VERSION = 5;
-export const JOURNAL_SCHEMA_VERSION = 5;
+export const ACCOUNTING_SCHEMA_VERSION = 6;
+export const JOURNAL_SCHEMA_VERSION = 6;
 export const ACCOUNTING_LIMITS = Object.freeze({ workerInbound: 25000, queuedDoCommands: 50000, sqliteRows: Object.freeze({ reads: 25000, writes: 25000 }) });
 const JOURNAL = 'journal.jsonl';
 const MANIFEST = 'manifest.json';
@@ -162,7 +162,7 @@ function validateIntent(record, cursor, requestForIndex, runId) {
 }
 
 function replayJournal(records, requestForIndex, runId) {
-  let cursor = 0, pending = null, terminalFailure = null, activationIds = {}, observed = zeroAccounting(); const evidence = [], fixtureEvidence = [], physicalOperations = [], perShard = new Map();
+  let cursor = 0, pending = null, terminalFailure = null, activationIds = {}, observed = zeroAccounting(); const evidence = [], fixtureEvidence = [], physicalOperations = [], perShard = new Map(), auxiliaryIntents = new Map();
   const operationIds = new Set();
   for (const record of records) {
     if (record.type === 'intent') {
@@ -170,6 +170,10 @@ function replayJournal(records, requestForIndex, runId) {
       if (operationIds.has(record.operationId)) throw new Error('Journal contains duplicate operation ID');
       validateIntent(record, cursor, requestForIndex, runId); pending = record;
       operationIds.add(record.operationId);
+    } else if (record.type === 'auxiliary-intent') {
+      if (record.runId !== runId || typeof record.operationId !== 'string' || !record.operationId || typeof record.route !== 'string' || !record.route || typeof record.canonicalRequest !== 'string' || !/^[a-f0-9]{64}$/.test(record.requestHash ?? '')) throw new Error('Journal auxiliary intent is invalid');
+      if (auxiliaryIntents.has(record.operationId)) throw new Error('Journal contains duplicate auxiliary operation ID');
+      auxiliaryIntents.set(record.operationId, record);
     } else if (record.type === 'physical') {
       if (typeof record.operationId !== 'string' || !record.operationId || typeof record.physicalId !== 'string' || !record.physicalId) throw new Error('Journal physical request is invalid');
       const delta = actualRequestAccounting(record);
@@ -197,7 +201,7 @@ function replayJournal(records, requestForIndex, runId) {
       terminalFailure = record; pending = null;
     } else throw new Error('Journal record type is invalid');
   }
-  return { cursor, pending, terminalFailure, activationIds, operationIds, observed, evidence, fixtureEvidence, physicalOperations };
+  return { cursor, pending, terminalFailure, activationIds, operationIds, observed, evidence, fixtureEvidence, physicalOperations, auxiliaryIntents };
 }
 
 function makeReport(snapshot) {
@@ -211,7 +215,7 @@ export function createSoakState({ dir, root, requestForIndex, projection = proje
   const manifest = createRunManifest({ root, runId });
   if (existsSync(file(dir, MANIFEST))) throw new Error('Soak state already exists; use recoverSoakState');
   writeReportCheckpoint(file(dir, MANIFEST), manifest);
-  const state = { cursor: 0, pending: null, terminalFailure: null, activationIds: {}, operationIds: new Set(), observed: zeroAccounting(), physicalOperations: [] };
+  const state = { cursor: 0, pending: null, terminalFailure: null, activationIds: {}, operationIds: new Set(), observed: zeroAccounting(), physicalOperations: [], auxiliaryIntents: new Map() };
   const api = buildStateApi({ dir, requestForIndex, manifest, state, projection });
   writeReportCheckpoint(file(dir, REPORT), api.report);
   return api;
@@ -236,6 +240,11 @@ function buildStateApi({ dir, requestForIndex, manifest, state, projection }) {
     state.observed = nextObserved; state.physicalOperations.push(physical);
     return physical;
   };
+  const recoverOriginalExecution = ({ operationId, route, response, shard }) => {
+    const original = actualRequestAccounting({ route, replayed: false });
+    if (!sameAccounting(response?.executionAccounting, original)) throw new Error('Replay is missing the persisted original execution accounting');
+    recordPhysical({ operationId, route, replayed: false, response, shard, recovered: true });
+  };
   const finish = ({ operationId, response, activationId, replayed = false, evidence, remoteAccounting }) => {
     requirePending(operationId);
     const shard = Math.floor(state.pending.index / 2000);
@@ -243,9 +252,7 @@ function buildStateApi({ dir, requestForIndex, manifest, state, projection }) {
     const responseHash = sha256Utf8(canonicalJson(response));
     const previousPhysical = state.physicalOperations.some((record) => record.operationId === operationId);
     if (replayed && !previousPhysical) {
-      const original = actualRequestAccounting({ route: state.pending.route, replayed: false });
-      if (!sameAccounting(response?.executionAccounting, original)) throw new Error('Replay is missing the persisted original execution accounting');
-      recordPhysical({ operationId, route: state.pending.route, replayed: false, response, shard, recovered: true });
+      recoverOriginalExecution({ operationId, route: state.pending.route, response, shard });
     }
     recordPhysical({ operationId, route: state.pending.route, replayed, response, shard, remoteAccounting });
     appendDurable(file(dir, JOURNAL), { type: 'completion', index: state.pending.index, operationId, responseHash, activationId, evidence });
@@ -267,8 +274,22 @@ function buildStateApi({ dir, requestForIndex, manifest, state, projection }) {
     },
     recordCompletion: finish,
     completeReplay: finish,
+    recordAuxiliaryIntent({ operationId, route, body, shard = 0 }) {
+      const canonical = canonicalRequest(route, body);
+      const existing = state.auxiliaryIntents.get(operationId);
+      if (existing) {
+        if (existing.route !== route || existing.canonicalRequest !== canonical || existing.shard !== String(shard)) throw new Error('Auxiliary intent changed during recovery');
+        return existing;
+      }
+      const record = { type: 'auxiliary-intent', runId: manifest.runId, operationId, route, shard: String(shard),
+        requestHash: sha256Utf8(canonical), canonicalRequest: canonical };
+      appendDurable(file(dir, JOURNAL), record); state.auxiliaryIntents.set(operationId, record); return record;
+    },
     recordAuxiliaryResponse({ operationId, route, replayed = false, response, evidence, evidenceKind = 'auxiliary', remoteAccounting, shard = 0 }) {
+      const intent = state.auxiliaryIntents.get(operationId);
+      if (!intent || intent.route !== route || intent.shard !== String(shard)) throw new Error('Auxiliary response has no matching durable intent');
       if (state.physicalOperations.some((record) => record.operationId === operationId)) throw new Error('Physical operation was already recorded');
+      if (replayed) recoverOriginalExecution({ operationId, route, response, shard });
       recordPhysical({ operationId, route, replayed, response, evidence, evidenceKind, remoteAccounting, shard });
       saveReport();
     },
@@ -280,6 +301,7 @@ function buildStateApi({ dir, requestForIndex, manifest, state, projection }) {
     },
     get physicalOperations() { return state.physicalOperations; },
     hasPhysicalOperation(operationId) { return state.physicalOperations.some((record) => record.operationId === operationId); },
+    hasAuxiliaryIntent(operationId) { return state.auxiliaryIntents.has(operationId); },
   };
   return api;
 }

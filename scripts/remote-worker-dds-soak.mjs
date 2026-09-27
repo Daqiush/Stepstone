@@ -95,6 +95,7 @@ async function runFixtureChecks({ endpoint, key, runId, fixtures, buildId, evide
     const operationId = `fixture.${String(index).padStart(6, '0')}`;
     if (state.hasPhysicalOperation(operationId)) continue;
     const body = JSON.stringify(kind === 'table' ? { hands: item.hands } : { deal: item.deal ?? { trump: item.trump, trickLeader: item.trickLeader, trickPlayed: item.trickPlayed, hands: item.hands } });
+    state.recordAuxiliaryIntent({ operationId, route, body, shard: 0 });
     const remote = await remotePost(endpoint, { key, runId, operationId, route, body, shard: 0 });
     const op = { kind, id: item.id, item: kind === 'table' ? { hands: item.hands } : { deal: JSON.parse(body).deal } };
     const worker = unwrap(op, remote); const expected = item.expected?.table ?? item.expected;
@@ -154,6 +155,7 @@ async function runCli() {
   // This request is budgeted before any fixture or generated DDS dispatch.
   const preflightBody = '{}';
   if (!state.hasPhysicalOperation('preflight.metrics')) {
+    state.recordAuxiliaryIntent({ operationId: 'preflight.metrics', route: '/__dds/metrics', body: preflightBody, shard: 0 });
     const preflight = await remotePost(endpoint, { key, runId, operationId: 'preflight.metrics', route: '/__dds/metrics', body: preflightBody, shard: 0 });
     assertEndpointBuild(preflight.operationResult, deployment.buildId);
     assertEndpointVersion(preflight.operationResult, deployment.workerVersionId);
