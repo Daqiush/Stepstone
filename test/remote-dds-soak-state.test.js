@@ -11,7 +11,7 @@ const ROOT = resolve(__dirname, '..');
 function tempRun() { return mkdtempSync(join(tmpdir(), 'remote-dds-soak-state-')); }
 function request(index) { return { route: '/__dds/solve', body: `{"z":2,"index":${index},"a":1}` }; }
 function accounting(overrides = {}) {
-  return { workerInbound: 1, doFetchArrivals: 1, queuedDoCommands: 2, sqliteReads: 1, sqliteWrites: 1, ...overrides };
+  return { workerInbound: 1, doFetchArrivals: 1, queuedDoCommands: 2, sqliteRows: { reads: 1, writes: 1 }, ...overrides };
 }
 
 test('request hash exactly matches the remote UTF-8 body-string canonicalization', async () => {
@@ -150,6 +150,7 @@ test('projects and enforces all accounting dimensions including replay arrival c
   const baseline = state.projectAccounting();
   assert.equal(baseline.workerInbound, 22000);
   assert.equal(baseline.queuedDoCommands, 43780);
+  assert.deepEqual(baseline.sqliteRows, { reads: 22000, writes: 22000 });
   const projected = state.projectAccounting({ fixtures: 3, coldStarts: 11, metricProbes: 2, pendingReplays: 1, closeSmokeProbes: 2 });
   assert.equal(projected.queuedDoCommands, 43780 + 3 * 2 + 2 + 2);
   assert.equal(projected.workerInbound, 22000 + 3 + 11 + 2 + 1 + 2);
@@ -157,6 +158,6 @@ test('projects and enforces all accounting dimensions including replay arrival c
   assert.throws(() => state.assertAccountingWithinLimits({ ...baseline, workerInbound: 25001 }), /workerInbound/i);
   assert.throws(() => state.assertAccountingWithinLimits({ ...baseline, queuedDoCommands: 50001 }), /queuedDoCommands/i);
   assert.doesNotThrow(() => state.assertAccountingWithinLimits(baseline));
-  assert.throws(() => state.assertAccountingWithinLimits({ ...baseline, sqliteReads: 25001 }), /sqliteReads/i);
-  assert.throws(() => state.assertAccountingWithinLimits({ ...baseline, sqliteWrites: 25001 }), /sqliteWrites/i);
+  assert.throws(() => state.assertAccountingWithinLimits({ ...baseline, sqliteRows: { ...baseline.sqliteRows, reads: 25001 } }), /sqliteRows\.reads/i);
+  assert.throws(() => state.assertAccountingWithinLimits({ ...baseline, sqliteRows: { ...baseline.sqliteRows, writes: 25001 } }), /sqliteRows\.writes/i);
 });

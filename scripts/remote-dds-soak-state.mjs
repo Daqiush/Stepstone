@@ -6,7 +6,7 @@ import { canonicalHarnessRequest } from '../workers/src/remote-test-canonical.mj
 
 export const SOAK_SEED = 20260923;
 export const ACCOUNTING_SCHEMA_VERSION = 1;
-export const ACCOUNTING_LIMITS = Object.freeze({ workerInbound: 25000, queuedDoCommands: 50000, sqliteReads: 25000, sqliteWrites: 25000 });
+export const ACCOUNTING_LIMITS = Object.freeze({ workerInbound: 25000, queuedDoCommands: 50000, sqliteRows: Object.freeze({ reads: 25000, writes: 25000 }) });
 const JOURNAL = 'journal.jsonl';
 const MANIFEST = 'manifest.json';
 const REPORT = 'report.json';
@@ -71,21 +71,31 @@ function readJournal(dir) {
     catch { throw new Error(`Invalid journal JSON at line ${index + 1}`); }
   });
 }
-function zeroAccounting() { return { workerInbound: 0, doFetchArrivals: 0, queuedDoCommands: 0, sqliteReads: 0, sqliteWrites: 0 }; }
+function zeroAccounting() { return { workerInbound: 0, doFetchArrivals: 0, queuedDoCommands: 0, sqliteRows: { reads: 0, writes: 0 } }; }
 function addAccounting(total, delta) {
   const next = { ...total };
-  for (const key of Object.keys(next)) {
+  for (const key of ['workerInbound', 'doFetchArrivals', 'queuedDoCommands']) {
     if (!Number.isSafeInteger(delta?.[key]) || delta[key] < 0) throw new Error(`Invalid observed accounting ${key}`);
     next[key] += delta[key];
+  }
+  for (const key of ['reads', 'writes']) {
+    if (!Number.isSafeInteger(delta?.sqliteRows?.[key]) || delta.sqliteRows[key] < 0) throw new Error(`Invalid observed accounting sqliteRows.${key}`);
+    next.sqliteRows[key] += delta.sqliteRows[key];
   }
   return next;
 }
 
 export function assertAccountingWithinLimits(accounting) {
   for (const [key, limit] of Object.entries(ACCOUNTING_LIMITS)) {
+    if (key === 'sqliteRows') continue;
     if (!Number.isSafeInteger(accounting?.[key]) || accounting[key] > limit) throw new Error(`${key} exceeds remote soak limit ${limit}`);
   }
   if (!Number.isSafeInteger(accounting?.doFetchArrivals) || accounting.doFetchArrivals < 0) throw new Error('Invalid doFetchArrivals');
+  for (const [key, limit] of Object.entries(ACCOUNTING_LIMITS.sqliteRows)) {
+    if (!Number.isSafeInteger(accounting?.sqliteRows?.[key]) || accounting.sqliteRows[key] < 0 || accounting.sqliteRows[key] > limit) {
+      throw new Error(`sqliteRows.${key} exceeds remote soak limit ${limit}`);
+    }
+  }
   return accounting;
 }
 
@@ -101,8 +111,10 @@ export function projectAccounting({ fixtures = 0, coldStarts = 0, metricProbes =
     workerInbound,
     doFetchArrivals: workerInbound,
     queuedDoCommands: 43780 + fixtures * 2 + metricProbes + closeSmokeProbes,
-    sqliteReads: 22000 + fixtures + pendingReplays + metricProbes + closeSmokeProbes,
-    sqliteWrites: 22000 + fixtures + metricProbes + closeSmokeProbes,
+    sqliteRows: {
+      reads: 22000 + fixtures + pendingReplays + metricProbes + closeSmokeProbes,
+      writes: 22000 + fixtures + metricProbes + closeSmokeProbes,
+    },
   };
 }
 
