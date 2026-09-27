@@ -5,8 +5,8 @@ import { syncParentDirectory, writeReportCheckpoint } from './worker-dds-checkpo
 import { canonicalHarnessRequest } from '../workers/src/remote-test-canonical.mjs';
 
 export const SOAK_SEED = 20260923;
-export const ACCOUNTING_SCHEMA_VERSION = 3;
-export const JOURNAL_SCHEMA_VERSION = 3;
+export const ACCOUNTING_SCHEMA_VERSION = 4;
+export const JOURNAL_SCHEMA_VERSION = 4;
 export const ACCOUNTING_LIMITS = Object.freeze({ workerInbound: 25000, queuedDoCommands: 50000, sqliteRows: Object.freeze({ reads: 25000, writes: 25000 }) });
 const JOURNAL = 'journal.jsonl';
 const MANIFEST = 'manifest.json';
@@ -89,17 +89,19 @@ function addAccounting(total, delta) {
   }
   return next;
 }
-function accountingDelta(snapshot, prior = zeroAccounting()) {
-  const delta = zeroAccounting();
-  for (const key of ['workerInbound', 'doFetchArrivals', 'queuedDoCommands']) {
-    if (!Number.isSafeInteger(snapshot?.[key]) || snapshot[key] < prior[key]) throw new Error(`Worker accounting snapshot regressed at ${key}`);
-    delta[key] = snapshot[key] - prior[key];
-  }
-  for (const key of ['reads', 'writes']) {
-    if (!Number.isSafeInteger(snapshot?.sqliteRows?.[key]) || snapshot.sqliteRows[key] < prior.sqliteRows[key]) throw new Error(`Worker accounting snapshot regressed at sqliteRows.${key}`);
-    delta.sqliteRows[key] = snapshot.sqliteRows[key] - prior.sqliteRows[key];
-  }
-  return delta;
+export function actualRequestAccounting({ route, replayed }) {
+  if (typeof replayed !== 'boolean') throw new Error('Remote replay decision is required for actual accounting');
+  const queued = replayed ? 0 : route === '/__dds/ordered-probe' ? 2
+    : route === '/__dds/table' || route === '/__dds/solve' ? 1
+      : route === '/__dds/metrics' || route === '/__dds/ping' ? 0 : null;
+  if (queued === null) throw new Error(`Unsupported remote accounting route: ${route}`);
+  return { workerInbound: 1, doFetchArrivals: 1, queuedDoCommands: queued,
+    sqliteRows: { reads: 1, writes: replayed ? 0 : 1 } };
+}
+
+export function ledgerAccounting(physicalOperations) {
+  if (!Array.isArray(physicalOperations)) throw new Error('Physical request ledger is required');
+  return physicalOperations.reduce((total, record) => addAccounting(total, actualRequestAccounting(record)), zeroAccounting());
 }
 
 export function assertAccountingWithinLimits(accounting) {
@@ -155,7 +157,7 @@ function validateIntent(record, cursor, requestForIndex, runId) {
 }
 
 function replayJournal(records, requestForIndex, runId) {
-  let cursor = 0, pending = null, terminalFailure = null, activationIds = {}, remoteSnapshots = {}, observed = zeroAccounting(); const evidence = [];
+  let cursor = 0, pending = null, terminalFailure = null, activationIds = {}, observed = zeroAccounting(); const evidence = [], physicalOperations = [];
   const operationIds = new Set();
   for (const record of records) {
     if (record.type === 'intent') {
@@ -163,13 +165,16 @@ function replayJournal(records, requestForIndex, runId) {
       if (operationIds.has(record.operationId)) throw new Error('Journal contains duplicate operation ID');
       validateIntent(record, cursor, requestForIndex, runId); pending = record;
       operationIds.add(record.operationId);
+    } else if (record.type === 'physical') {
+      if (typeof record.operationId !== 'string' || !record.operationId || typeof record.physicalId !== 'string' || !record.physicalId) throw new Error('Journal physical request is invalid');
+      const delta = actualRequestAccounting(record);
+      observed = addAccounting(observed, delta); assertAccountingWithinLimits(observed);
+      physicalOperations.push(record);
     } else if (record.type === 'completion') {
       if (!pending || record.operationId !== pending.operationId || record.index !== pending.index || !/^[a-f0-9]{64}$/.test(record.responseHash ?? '')) throw new Error('Journal completion is invalid or duplicate');
       const shard = Math.floor(pending.index / 2000);
       if (typeof record.activationId !== 'string' || !ACTIVATION_ID.test(record.activationId) || (activationIds[shard] && activationIds[shard] !== record.activationId)) throw new Error('Activation ID missing, invalid, or changed inside a shard');
       activationIds[shard] = record.activationId;
-      observed = addAccounting(observed, record.observed); assertAccountingWithinLimits(observed);
-      if (record.remoteSnapshot) remoteSnapshots[shard] = record.remoteSnapshot;
       if (record.evidence !== undefined) evidence.push(record.evidence);
       cursor += 1; pending = null;
     } else if (record.type === 'failed') {
@@ -177,7 +182,7 @@ function replayJournal(records, requestForIndex, runId) {
       terminalFailure = record; pending = null;
     } else throw new Error('Journal record type is invalid');
   }
-  return { cursor, pending, terminalFailure, activationIds, remoteSnapshots, operationIds, observed, evidence };
+  return { cursor, pending, terminalFailure, activationIds, operationIds, observed, evidence, physicalOperations };
 }
 
 function makeReport(snapshot) {
@@ -191,7 +196,7 @@ export function createSoakState({ dir, root, requestForIndex, projection = proje
   const manifest = createRunManifest({ root, runId });
   if (existsSync(file(dir, MANIFEST))) throw new Error('Soak state already exists; use recoverSoakState');
   writeReportCheckpoint(file(dir, MANIFEST), manifest);
-  const state = { cursor: 0, pending: null, terminalFailure: null, activationIds: {}, remoteSnapshots: {}, operationIds: new Set(), observed: zeroAccounting() };
+  const state = { cursor: 0, pending: null, terminalFailure: null, activationIds: {}, operationIds: new Set(), observed: zeroAccounting(), physicalOperations: [] };
   const api = buildStateApi({ dir, requestForIndex, manifest, state, projection });
   writeReportCheckpoint(file(dir, REPORT), api.report);
   return api;
@@ -203,15 +208,23 @@ function buildStateApi({ dir, requestForIndex, manifest, state, projection }) {
     if (!state.pending) throw new Error('No pending intent');
     if (state.pending.operationId !== operationId) throw new Error('Operation ID does not match pending intent');
   };
-  const finish = ({ operationId, response, activationId, observed, evidence }) => {
+  const recordPhysical = ({ operationId, route, replayed, response }) => {
+    const delta = actualRequestAccounting({ route, replayed });
+    const physical = { type: 'physical', physicalId: `request.${String(state.physicalOperations.length).padStart(8, '0')}`,
+      operationId, route, replayed, responseHash: sha256Utf8(canonicalJson(response)) };
+    const nextObserved = addAccounting(state.observed, delta); assertAccountingWithinLimits(nextObserved);
+    appendDurable(file(dir, JOURNAL), physical);
+    state.observed = nextObserved; state.physicalOperations.push(physical);
+    return physical;
+  };
+  const finish = ({ operationId, response, activationId, replayed = false, evidence }) => {
     requirePending(operationId);
     const shard = Math.floor(state.pending.index / 2000);
     if (typeof activationId !== 'string' || !ACTIVATION_ID.test(activationId) || (state.activationIds[shard] && state.activationIds[shard] !== activationId)) throw new Error('Activation ID missing, invalid, or changed after replay');
     const responseHash = sha256Utf8(canonicalJson(response));
-    const delta = accountingDelta(observed, state.remoteSnapshots[shard]);
-    const nextObserved = addAccounting(state.observed, delta); assertAccountingWithinLimits(nextObserved);
-    appendDurable(file(dir, JOURNAL), { type: 'completion', index: state.pending.index, operationId, responseHash, activationId, observed: delta, remoteSnapshot: observed, evidence });
-    state.cursor += 1; state.pending = null; state.observed = nextObserved; state.activationIds[shard] = activationId; state.remoteSnapshots[shard] = observed;
+    recordPhysical({ operationId, route: state.pending.route, replayed, response });
+    appendDurable(file(dir, JOURNAL), { type: 'completion', index: state.pending.index, operationId, responseHash, activationId, evidence });
+    state.cursor += 1; state.pending = null; state.activationIds[shard] = activationId;
     saveReport();
   };
   const api = {
@@ -229,12 +242,20 @@ function buildStateApi({ dir, requestForIndex, manifest, state, projection }) {
     },
     recordCompletion: finish,
     completeReplay: finish,
+    recordAuxiliaryResponse({ operationId, route, replayed = false, response, evidence }) {
+      if (state.physicalOperations.some((record) => record.operationId === operationId)) throw new Error('Physical operation was already recorded');
+      recordPhysical({ operationId, route, replayed, response });
+      void evidence;
+      saveReport();
+    },
     recordFailure({ operationId, error }) {
       requirePending(operationId);
       if (typeof error !== 'string' || !error) throw new Error('Failure error is required');
       appendDurable(file(dir, JOURNAL), { type: 'failed', index: state.pending.index, operationId, error });
       state.terminalFailure = { type: 'failed', index: state.pending.index, operationId, error }; state.pending = null; saveReport();
     },
+    get physicalOperations() { return state.physicalOperations; },
+    hasPhysicalOperation(operationId) { return state.physicalOperations.some((record) => record.operationId === operationId); },
   };
   return api;
 }
@@ -250,5 +271,6 @@ export function recoverSoakState({ dir, root, requestForIndex, projection = proj
   writeReportCheckpoint(file(dir, REPORT), api.report);
   api.recovery = state.terminalFailure ? { kind: 'failed', failure: state.terminalFailure }
     : state.pending ? { kind: 'replay-pending', intent: state.pending } : { kind: 'ready' };
-  api.evidence = state.evidence; return api;
+  api.evidence = state.evidence;
+  return api;
 }

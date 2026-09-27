@@ -32,8 +32,8 @@ test('creates the pinned deterministic manifest', async () => {
   assert.equal(manifest.randomGenerator, 'xorshift32');
   assert.equal(manifest.shards.length, 11);
   assert.deepEqual(manifest.shards, Array.from({ length: 11 }, (_, shard) => ({ shard, startIndex: shard * 2000, endIndex: shard * 2000 + 1999 })));
-  assert.equal(manifest.accountingSchemaVersion, 3);
-  assert.equal(manifest.journalSchemaVersion, 3);
+  assert.equal(manifest.accountingSchemaVersion, 4);
+  assert.equal(manifest.journalSchemaVersion, 4);
   assert.match(manifest.hashes.randomGenerator, /^[a-f0-9]{64}$/);
   assert.match(manifest.hashes.fixtureCorpus, /^[a-f0-9]{64}$/);
 });
@@ -148,7 +148,7 @@ test('allows a documented fresh activation at the next shard boundary', async ()
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('normalizes cumulative Worker accounting snapshots to per-operation deltas', async () => {
+test('derives direct-solve accounting from durable physical responses rather than cumulative snapshots', async () => {
   state ??= await import('../scripts/remote-dds-soak-state.mjs');
   const dir = tempRun();
   try {
@@ -158,7 +158,7 @@ test('normalizes cumulative Worker accounting snapshots to per-operation deltas'
     const secondSnapshot = accounting({ workerInbound: 2, doFetchArrivals: 2, queuedDoCommands: 4, sqliteRows: { reads: 2, writes: 2 } });
     run.recordIntent({ index: 1, operationId: 'op-1', ...request(1) });
     run.recordCompletion({ operationId: 'op-1', response: { ok: true }, activationId: activation(1), observed: secondSnapshot });
-    assert.deepEqual(run.report.observed, secondSnapshot);
+    assert.deepEqual(run.report.observed, { workerInbound: 2, doFetchArrivals: 2, queuedDoCommands: 2, sqliteRows: { reads: 2, writes: 2 } });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -203,6 +203,65 @@ test('projects and enforces all accounting dimensions including replay arrival c
   assert.doesNotThrow(() => state.assertAccountingWithinLimits(baseline));
   assert.throws(() => state.assertAccountingWithinLimits({ ...baseline, sqliteRows: { ...baseline.sqliteRows, reads: 25001 } }), /sqliteRows\.reads/i);
   assert.throws(() => state.assertAccountingWithinLimits({ ...baseline, sqliteRows: { ...baseline.sqliteRows, writes: 25001 } }), /sqliteRows\.writes/i);
+});
+
+test('derives a durable physical-request ledger from the remote replay decision instead of cumulative snapshots', async () => {
+  state ??= await import('../scripts/remote-dds-soak-state.mjs');
+  assert.deepEqual(state.actualRequestAccounting({ route: '/__dds/metrics', replayed: false }), {
+    workerInbound: 1, doFetchArrivals: 1, queuedDoCommands: 0, sqliteRows: { reads: 1, writes: 1 },
+  });
+  assert.deepEqual(state.actualRequestAccounting({ route: '/__dds/table', replayed: false }), {
+    workerInbound: 1, doFetchArrivals: 1, queuedDoCommands: 1, sqliteRows: { reads: 1, writes: 1 },
+  });
+  assert.deepEqual(state.actualRequestAccounting({ route: '/__dds/ordered-probe', replayed: false }), {
+    workerInbound: 1, doFetchArrivals: 1, queuedDoCommands: 2, sqliteRows: { reads: 1, writes: 1 },
+  });
+  assert.deepEqual(state.actualRequestAccounting({ route: '/__dds/ordered-probe', replayed: true }), {
+    workerInbound: 1, doFetchArrivals: 1, queuedDoCommands: 0, sqliteRows: { reads: 1, writes: 0 },
+  });
+});
+
+test('persists physical auxiliary and replay requests as an exact ledger across recovery', async () => {
+  state ??= await import('../scripts/remote-dds-soak-state.mjs');
+  const dir = tempRun();
+  try {
+    const run = state.createSoakState({ dir, root: ROOT, requestForIndex: request });
+    run.recordAuxiliaryResponse({ operationId: 'preflight.metrics', route: '/__dds/metrics', replayed: false, response: { ok: true } });
+    run.recordIntent({ index: 0, operationId: 'op-0', ...request(0) });
+    run.completeReplay({ operationId: 'op-0', response: { ok: true }, activationId: activation(1), replayed: true });
+    const resumed = state.recoverSoakState({ dir, root: ROOT, requestForIndex: request });
+    assert.deepEqual(resumed.report.observed, {
+      workerInbound: 2, doFetchArrivals: 2, queuedDoCommands: 0, sqliteRows: { reads: 2, writes: 1 },
+    });
+    assert.equal(resumed.physicalOperations.length, 2);
+    assert.equal(resumed.hasPhysicalOperation('preflight.metrics'), true);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('mocked transport ledger stays exact for fresh and resumed fixture, pending-cache, and new-execution paths', async () => {
+  state ??= await import('../scripts/remote-dds-soak-state.mjs');
+  const dir = tempRun();
+  const remote = (replayed) => ({ ok: true, replayed });
+  try {
+    // Fresh preflight and first fixture are durable; a resume must not send them again.
+    let run = state.createSoakState({ dir, root: ROOT, requestForIndex: request });
+    run.recordAuxiliaryResponse({ operationId: 'preflight.metrics', route: '/__dds/metrics', replayed: remote(false).replayed, response: { ok: true } });
+    run.recordAuxiliaryResponse({ operationId: 'fixture.000000', route: '/__dds/table', replayed: remote(false).replayed, response: { ok: true } });
+    run.recordIntent({ index: 0, operationId: 'op-0', ...request(0) });
+    // Crash after intent; the next physical request is a cache hit, so it adds no queue/write cost.
+    run = state.recoverSoakState({ dir, root: ROOT, requestForIndex: request });
+    assert.equal(run.hasPhysicalOperation('preflight.metrics'), true);
+    assert.equal(run.hasPhysicalOperation('fixture.000000'), true);
+    run.completeReplay({ operationId: 'op-0', response: { ok: true }, activationId: activation(1), replayed: remote(true).replayed });
+    // Mid-fixture/new request remains an execution and pays queue+write exactly once.
+    run.recordIntent({ index: 1, operationId: 'op-1', ...request(1) });
+    run.recordCompletion({ operationId: 'op-1', response: { ok: true }, activationId: activation(1), replayed: remote(false).replayed });
+    const resumed = state.recoverSoakState({ dir, root: ROOT, requestForIndex: request });
+    assert.deepEqual(resumed.report.observed, {
+      workerInbound: 4, doFetchArrivals: 4, queuedDoCommands: 2, sqliteRows: { reads: 4, writes: 3 },
+    });
+    assert.deepEqual(state.ledgerAccounting(resumed.physicalOperations), resumed.report.observed);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('completion journals full evidence atomically and recovery restores it', async () => {
