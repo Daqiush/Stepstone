@@ -36,6 +36,10 @@ export function assertEndpointVersion(payload, workerVersionId) {
   if (payload?.workerVersionId !== workerVersionId) throw new Error(`Remote endpoint Worker version ID mismatch: expected ${workerVersionId}, received ${payload?.workerVersionId ?? 'missing'}`);
   return payload;
 }
+export function buildPreflightEvidence(remote) {
+  return { accounting: remote.accounting, activationId: remote.operationResult.activationId, replayed: remote.replayed,
+    endpointBuildId: remote.operationResult.buildId, endpointWorkerVersionId: remote.operationResult.workerVersionId };
+}
 export function reconcileObservedLedger(observed, physicalOperations) {
   const actual = ledgerAccounting(physicalOperations);
   if (JSON.stringify(observed) !== JSON.stringify(actual)) throw new Error('Observed remote accounting does not reconcile to the durable physical-request ledger');
@@ -186,7 +190,7 @@ async function runCli() {
     assertEndpointVersion(preflight.operationResult, deployment.workerVersionId);
     state.recordAuxiliaryResponse({ operationId: 'preflight.metrics', route: '/__dds/metrics', replayed: preflight.replayed,
       response: preflight.operationResult, remoteAccounting: preflight.accounting, shard: 0 });
-    evidence.preflight = { accounting: preflight.accounting, activationId: preflight.operationResult.activationId, replayed: preflight.replayed };
+    evidence.preflight = buildPreflightEvidence(preflight);
     writeReportCheckpoint(resolve(runDir, 'evidence.json'), evidence);
   }
   await runFixtureChecks({ endpoint, key, runId, fixtures, buildId: deployment.buildId, evidence, state });

@@ -19,6 +19,7 @@
     "check:workers-dds": "node scripts/check-worker-dds-gates.mjs --report workers/test/results/dds-feasibility.json",
     "prepare:remote-workers-dds": "node scripts/prepare-remote-dds-deployment.mjs --out workers/test/results/remote-dds-deployment.json",
     "soak:remote-workers-dds": "node scripts/remote-worker-dds-soak.mjs",
+    "check:remote-workers-dds": "node scripts/check-remote-worker-dds-gates.mjs",
     "remote:dds-soak": "node scripts/remote-worker-dds-soak.mjs"
   },
   "dependencies": {
