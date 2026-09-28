@@ -34,7 +34,10 @@ async function validRun() {
   for (const [index, fixture] of fixtures.entries()) {
     const operationId = `fixture.${String(index).padStart(6, '0')}`;
     const route = fixture.kind === 'table' ? '/__dds/table' : '/__dds/ordered-probe';
-    const remote = { ok: true, activationId: activation(0), metrics: { heapBytes: 18_939_904, solveMs: 3.25 } };
+    const native = fixture.expected?.table ?? fixture.expected;
+    const metrics = { heapBytes: 18_939_904, solveMs: 3.25 };
+    const remote = fixture.kind === 'table' ? { ok: true, result: native, activationId: activation(0), metrics }
+      : { ok: true, solveResponse: { ok: true, result: native, metrics }, pingResponse: { ok: true }, activationId: activation(0) };
     const entry = { type: 'physical', operationId, route, replayed: false, shard: '0', response: remote, responseHash: sha256Utf8(canonicalJson(remote)) };
     physical.push(entry); journal.push({ type: 'auxiliary-intent', runId, operationId, route }, entry);
   }
@@ -46,8 +49,14 @@ async function validRun() {
     const operationId = `op.${String(index).padStart(6, '0')}`;
     const route = kind === 'table' ? '/__dds/table' : '/__dds/ordered-probe';
     const body = JSON.stringify(kind === 'table' ? { hands: item.hands } : { deal: item.deal });
-    const remote = { ok: true, activationId: activation(shard) };
-    const evidenceItem = { id: item.id, index, kind, shard, depth: kind === 'solve' ? item.depth : undefined, input: JSON.parse(body), nativeBaseline: { score: 0 }, remote,
+    const deal = item.deal;
+    const currentSeat = kind === 'solve' ? ['N', 'E', 'S', 'W'][(['N', 'E', 'S', 'W'].indexOf(deal.trickLeader) + deal.trickPlayed.length) % 4] : null;
+    const currentHand = kind === 'solve' ? deal.hands[currentSeat] : null, ledSuit = kind === 'solve' ? deal.trickPlayed[0]?.suit : null;
+    const native = kind === 'table' ? Array.from({ length: 5 }, () => Array(4).fill(0)) : { score: 0, cards: [currentHand.find((card) => card.suit === ledSuit) ?? currentHand[0]] };
+    const metrics = { heapBytes: 18_939_904, solveMs: 3.25 };
+    const remote = kind === 'table' ? { ok: true, result: native, activationId: activation(shard), metrics }
+      : { ok: true, solveResponse: { ok: true, result: native, metrics }, pingResponse: { ok: true }, activationId: activation(shard) };
+    const evidenceItem = { id: item.id, index, kind, shard, depth: kind === 'solve' ? item.depth : undefined, input: JSON.parse(body), nativeBaseline: native, remote,
       heapBytes: 18_939_904, wasmElapsedMs: 3.25, activationId: activation(shard),
       ...(kind === 'solve' ? { orderedPingDelayMs: 2.5 } : {}) };
     operations.push(evidenceItem);
@@ -63,12 +72,15 @@ async function validRun() {
     sqliteRows: { reads: physical.length, writes: physical.length } };
   const depths = Array(13).fill(0);
   for (const operation of operations) if (operation.kind === 'solve') depths[operation.depth]++;
+  const physicalById = new Map(physical.map((entry) => [entry.operationId, entry]));
   const evidence = { version: 1, runId, buildId: deployment.buildId, workerVersionId: deployment.workerVersionId,
     deploymentAssets: deployment.assets, fixtureHash: hashFile(fixturePath),
     preflight: { remote: preflightRemote, activationId: activation(0), endpointBuildId: deployment.buildId, endpointWorkerVersionId: deployment.workerVersionId },
     coverage: { shards: Array(11).fill(2000), depths },
-    fixtures: fixtures.map((fixture) => ({ id: fixture.id, kind: fixture.kind, input: fixture.kind === 'table' ? { hands: fixture.hands } : { deal: fixture.deal ?? { trump: fixture.trump, trickLeader: fixture.trickLeader, trickPlayed: fixture.trickPlayed, hands: fixture.hands } }, nativeBaseline: fixture.expected?.table ?? fixture.expected, remote: { ok: true, activationId: activation(0), metrics: { heapBytes: 18_939_904, solveMs: 3.25 } }, remoteMetrics: { heapBytes: 18_939_904, solveMs: 3.25 } })), operations, candidateDifferences: [] };
-  const physicalById = new Map(physical.map((entry) => [entry.operationId, entry]));
+    fixtures: fixtures.map((fixture, index) => {
+      const physicalFixture = physicalById.get(`fixture.${String(index).padStart(6, '0')}`);
+      return { id: fixture.id, kind: fixture.kind, input: fixture.kind === 'table' ? { hands: fixture.hands } : { deal: fixture.deal ?? { trump: fixture.trump, trickLeader: fixture.trickLeader, trickPlayed: fixture.trickPlayed, hands: fixture.hands } }, nativeBaseline: fixture.expected?.table ?? fixture.expected, remote: physicalFixture.response, remoteMetrics: physicalFixture.response.metrics ?? physicalFixture.response.solveResponse.metrics };
+    }), operations, candidateDifferences: [] };
   physicalById.get('preflight.metrics').evidenceHash = sha256Utf8(canonicalJson(evidence.preflight));
   for (const [index, fixture] of evidence.fixtures.entries()) physicalById.get(`fixture.${String(index).padStart(6, '0')}`).evidenceHash = sha256Utf8(canonicalJson(fixture));
   for (let index = 0; index < operations.length; index++) physicalById.get(`op.${String(index).padStart(6, '0')}`).evidenceHash = sha256Utf8(canonicalJson(operations[index]));
@@ -121,6 +133,7 @@ for (const [name, mutate] of [
   ['fixture-first', (r) => { const first = r.journal.findIndex((x) => x.type === 'physical' && x.operationId.startsWith('fixture.')); const random = r.journal.findIndex((x) => x.type === 'physical' && x.operationId === 'op.000000'); [r.journal[first], r.journal[random]] = [r.journal[random], r.journal[first]]; }],
   ['fixture-first', (r) => { delete r.evidence.fixtures[0].nativeBaseline; }],
   ['fixture-first', (r) => { r.evidence.fixtures[0].input = { detached: true }; }],
+  ['fixture-first', (r) => { r.evidence.fixtures[0].remote.result = [[0]]; }],
   ['journal', (r) => { r.journal.push({ type: 'failed', operationId: 'op.021999' }); }],
   ['parity', (r) => { r.evidence.operations[0].parityMismatch = true; }],
   ['candidate-diagnostics', (r) => { r.evidence.candidateDifferences.push({ id: 'random-1', why: 'unreconciled' }); }],

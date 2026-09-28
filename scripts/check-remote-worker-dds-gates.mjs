@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { ACCOUNTING_SCHEMA_VERSION, JOURNAL_SCHEMA_VERSION, SOAK_SEED, canonicalJson, canonicalRequest, ledgerAccounting, requestHash, sha256Utf8 } from './remote-dds-soak-state.mjs';
 import { assertDeploymentManifest } from './prepare-remote-dds-deployment.mjs';
 import { createRandomCaseGenerator } from './worker-dds-random-cases.mjs';
+import { compareDdsResults, validateWorkerSolveCandidates } from './worker-dds-benchmark-validation.mjs';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const COUNT = 22000;
@@ -39,6 +40,14 @@ function bindsEvidence(record, evidence, route, shard) {
   return !!record && record.route === route && record.shard === String(shard) && record.response !== undefined
     && record.responseHash === sha256Utf8(canonicalJson(record.response)) && record.evidenceHash === sha256Utf8(canonicalJson(evidence))
     && equal(record.response, evidence.remote);
+}
+function remoteDdsResult(kind, remote) { return kind === 'table' ? remote?.result : remote?.solveResponse?.result; }
+function validatesDdsPayload(kind, native, remote, deal) {
+  try {
+    const worker = remoteDdsResult(kind, remote);
+    if (kind === 'solve') validateWorkerSolveCandidates(worker, deal);
+    return !compareDdsResults(kind, native, worker).parityMismatch;
+  } catch { return false; }
 }
 function activationForShard(report, evidence, journal) {
   const values = Array.from({ length: SHARDS }, () => new Set());
@@ -87,7 +96,10 @@ function validateCorpus({ evidence, manifest, journal }) {
   }
   for (let index = 0; index < COUNT; index++) {
     const operation = operations[index], operationId = `op.${String(index).padStart(6, '0')}`;
-    if (operation.nativeBaseline === undefined || !bindsEvidence(physicalByOperation.get(operationId)?.at(-1), operation, operation.kind === 'table' ? '/__dds/table' : '/__dds/ordered-probe', operation.shard)) return false;
+    const physical = physicalByOperation.get(operationId)?.at(-1);
+    const deal = operation.kind === 'solve' ? operation.input?.deal : null;
+    if (operation.nativeBaseline === undefined || !bindsEvidence(physical, operation, operation.kind === 'table' ? '/__dds/table' : '/__dds/ordered-probe', operation.shard)
+      || physical?.response?.activationId !== operation.activationId || !validatesDdsPayload(operation.kind, operation.nativeBaseline, operation.remote, deal)) return false;
   }
   return true;
 }
@@ -99,7 +111,8 @@ function validateFixtures({ evidence, journal }) {
     const metrics = item?.remoteMetrics ?? item?.remote?.metrics ?? item?.remote?.solveResponse?.metrics;
     const input = fixture.kind === 'table' ? { hands: fixture.hands } : { deal: fixture.deal ?? { trump: fixture.trump, trickLeader: fixture.trickLeader, trickPlayed: fixture.trickPlayed, hands: fixture.hands } };
     const native = fixture.expected?.table ?? fixture.expected;
-    return item?.id === fixture.id && item?.kind === fixture.kind && equal(item.input, input) && equal(item.nativeBaseline, native) && item.remote?.ok === true && metrics
+    const deal = fixture.kind === 'solve' ? input.deal : null;
+    return item?.id === fixture.id && item?.kind === fixture.kind && equal(item.input, input) && equal(item.nativeBaseline, native) && item.remote?.ok === true && metrics && validatesDdsPayload(fixture.kind, item.nativeBaseline, item.remote, deal)
       && !item.parityMismatch && !item.networkError && !item.protocolError && !item.error && ACTIVATION.test(item.remote?.activationId ?? '');
   })) return false;
   const physical = journal.filter((entry) => entry.type === 'physical');
