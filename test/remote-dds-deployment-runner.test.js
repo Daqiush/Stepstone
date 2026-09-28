@@ -8,6 +8,7 @@ function repo() {
   const root = mkdtempSync(join(tmpdir(), 'remote-dds-deployment-'));
   mkdirSync(join(root, 'workers/vendor/bridge-dds'), { recursive: true });
   mkdirSync(join(root, 'workers/src'), { recursive: true });
+  writeFileSync(join(root, 'workers/wrangler.jsonc'), JSON.stringify({ name: 'test-worker', main: 'src/index.mjs', workers_dev: false }));
   writeFileSync(join(root, 'workers/vendor/bridge-dds/dds-worker.wasm'), 'wasm-v1');
   writeFileSync(join(root, 'workers/src/harness-router.mjs'), 'router-v1');
   writeFileSync(join(root, 'workers/src/feasibility-room.mjs'), 'room-v1');
@@ -20,7 +21,7 @@ async function runner() { return import('../scripts/remote-worker-dds-soak.mjs')
 test('deployment manifest binds the exact wasm and harness bytes to a deterministic build ID', async () => {
   const mod = await deployment(); const root = repo();
   try {
-    const manifest = mod.createDeploymentManifest({ root, verifiedDeployment: { versionId: 'v-123', apiVerified: true, wranglerVersion: '4.0.0' } });
+    const manifest = mod.createDeploymentManifest({ root, verifiedDeployment: { versionId: 'v-123', apiVerified: true, wranglerVersion: '4.0.0', workersDevUrl: 'https://temporary.example.workers.dev' } });
     assert.equal(manifest.version, 1);
     assert.match(manifest.buildId, /^[a-f0-9]{64}$/);
     assert.match(manifest.assets.wasm.sha256, /^[a-f0-9]{64}$/);
@@ -33,7 +34,7 @@ test('deployment manifest binds the exact wasm and harness bytes to a determinis
 test('deployment manifest rejects a missing version instead of assuming compatibility', async () => {
   const mod = await deployment(); const root = repo();
   try {
-    const manifest = mod.createDeploymentManifest({ root, verifiedDeployment: { versionId: 'v-123', apiVerified: true, wranglerVersion: '4.0.0' } }); delete manifest.version;
+    const manifest = mod.createDeploymentManifest({ root, verifiedDeployment: { versionId: 'v-123', apiVerified: true, wranglerVersion: '4.0.0', workersDevUrl: 'https://temporary.example.workers.dev' } }); delete manifest.version;
     assert.throws(() => mod.assertDeploymentManifest(manifest, { root }), /version/i);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -42,9 +43,103 @@ test('deployment manifest records Wasm bytes and requires an explicit deployed W
   const mod = await deployment(); const root = repo();
   try {
     assert.throws(() => mod.createDeploymentManifest({ root, workerVersionId: 'v-123' }), /verified deployment/i);
-    const manifest = mod.createDeploymentManifest({ root, verifiedDeployment: { versionId: 'v-123', apiVerified: true, wranglerVersion: '4.0.0' } });
+    const manifest = mod.createDeploymentManifest({ root, verifiedDeployment: { versionId: 'v-123', apiVerified: true, wranglerVersion: '4.0.0', workersDevUrl: 'https://temporary.example.workers.dev' } });
     assert.equal(manifest.assets.wasm.bytes, 7);
     assert.equal(manifest.workerVersionId, 'v-123');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('deployment verification reads the exact deployed script-version resource and rejects a mismatched API id', async () => {
+  const mod = await deployment();
+  const calls = [];
+  const verified = await mod.verifyWorkersDeployment({
+    accountId: 'acct / one', scriptName: 'temporary dds', apiToken: 'test-token', expectedVersionId: 'version-123', wranglerVersion: '4.33.0',
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return { ok: true, json: async () => ({ success: true, result: { id: 'version-123' } }) };
+    },
+  });
+  assert.equal(calls[0].url, 'https://api.cloudflare.com/client/v4/accounts/acct%20%2F%20one/workers/scripts/temporary%20dds/versions/version-123');
+  assert.equal(calls[0].options.headers.authorization, 'Bearer test-token');
+  assert.equal(verified.versionId, 'version-123');
+  await assert.rejects(() => mod.verifyWorkersDeployment({
+    accountId: 'acct', scriptName: 'script', apiToken: 'test-token', expectedVersionId: 'version-123', wranglerVersion: '4.33.0',
+    fetchImpl: async () => ({ ok: true, json: async () => ({ success: true, result: { id: 'other-version' } }) }),
+  }), /did not verify/i);
+});
+
+test('deployment integration parses Wrangler JSON, verifies the returned version, and fails closed without secure inputs', async () => {
+  const mod = await deployment(); const root = repo();
+  try {
+    const calls = [];
+    const verified = await mod.deployAndVerifyWorkers({ root, accountId: 'acct', scriptName: 'temp-dds', apiToken: 'token', remoteTestKey: 'a'.repeat(43),
+      execFile: (command, args) => {
+        calls.push({ command, args });
+        if (args[0] === 'secret') return '';
+        if (args[0] === 'deploy') return JSON.stringify({ version_id: 'deployed-v1', url: 'https://temp-dds.example.workers.dev' });
+        if (args[0] === '--version') return '4.33.0\n';
+        throw new Error('unexpected command');
+      },
+      fetchImpl: async (url) => {
+        assert.match(url, /workers\/scripts\/temp-dds\/versions\/deployed-v1$/);
+        return { ok: true, json: async () => ({ result: { id: 'deployed-v1' } }) };
+      },
+    });
+    assert.equal(verified.versionId, 'deployed-v1');
+    assert.ok(calls[1].args.includes('--json'));
+    await assert.rejects(() => mod.deployAndVerifyWorkers({ root, accountId: 'acct', scriptName: 'temp-dds', apiToken: '' }), /requires account/i);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('temporary remote deployment enables only workers.dev and keeps the test key out of generated configuration', async () => {
+  const mod = await deployment(); const root = repo();
+  try {
+    writeFileSync(join(root, 'workers/wrangler.jsonc'), JSON.stringify({ name: 'normal-worker', main: 'src/index.mjs', workers_dev: false, routes: [{ pattern: 'stepstone.hogetsu.uk/*' }] }));
+    const config = mod.createTemporaryWorkersConfig({ root, scriptName: 'dds-soak-temporary' });
+    assert.equal(config.name, 'dds-soak-temporary');
+    assert.equal(config.workers_dev, true);
+    assert.equal('routes' in config, false);
+    assert.equal(JSON.stringify(config).includes('DDS_REMOTE_TEST_KEY'), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('temporary remote deployment requires an in-memory test key and obtains a workers.dev URL from Wrangler output', async () => {
+  const mod = await deployment(); const root = repo();
+  try {
+    const calls = [];
+    const deployed = await mod.deployAndVerifyWorkers({ root, accountId: 'acct', scriptName: 'dds-soak-temporary', apiToken: 'token', remoteTestKey: 'a'.repeat(43),
+      execFile: (command, args, options = {}) => {
+        calls.push({ command, args, options });
+        if (args[0] === 'secret') { assert.equal(options.input, 'a'.repeat(43)); return ''; }
+        if (args[0] === 'deploy') return JSON.stringify({ version_id: 'deployed-v1', url: 'https://dds-soak-temporary.example.workers.dev' });
+        if (args[0] === '--version') return '4.33.0\n';
+        throw new Error('unexpected command');
+      },
+      fetchImpl: async () => ({ ok: true, json: async () => ({ result: { id: 'deployed-v1' } }) }),
+    });
+    assert.equal(deployed.workersDevUrl, 'https://dds-soak-temporary.example.workers.dev');
+    assert.equal(calls[0].args.slice(0, 3).join(' '), 'secret put DDS_REMOTE_TEST_KEY');
+    await assert.rejects(() => mod.deployAndVerifyWorkers({ root, accountId: 'acct', scriptName: 'dds-soak-temporary', apiToken: 'token' }), /test key/i);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('temporary Worker teardown disables remote testing before deleting and confirming API absence', async () => {
+  const mod = await deployment(); const root = repo();
+  try {
+    const calls = [];
+    await mod.teardownTemporaryWorkers({ root, accountId: 'acct', scriptName: 'dds-soak-temporary', apiToken: 'token',
+      execFile: (command, args) => { calls.push({ command, args }); return args[0] === 'deploy' ? JSON.stringify({ version_id: 'disabled-v1' }) : ''; },
+      fetchImpl: async (url, options = {}) => {
+        calls.push({ url, options });
+        if (options.method === 'DELETE') return { ok: true, json: async () => ({ success: true }) };
+        return { ok: false, status: 404, json: async () => ({ success: false }) };
+      },
+    });
+    assert.ok(calls.find((call) => call.args?.includes('DDS_REMOTE_TEST:false')));
+    assert.equal(calls.find((call) => call.options?.method === 'DELETE').url, 'https://api.cloudflare.com/client/v4/accounts/acct/workers/scripts/dds-soak-temporary');
+    await assert.rejects(() => mod.teardownTemporaryWorkers({ root, accountId: 'acct', scriptName: 'dds-soak-temporary', apiToken: 'token',
+      execFile: () => '', fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({}) }),
+    }), /still exists/i);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -88,4 +183,24 @@ test('runner fails closed when observed accounting differs from its durable phys
   const ledger = [{ route: '/__dds/metrics', replayed: false }];
   assert.deepEqual(mod.reconcileObservedLedger(accounting, ledger), accounting);
   assert.throws(() => mod.reconcileObservedLedger({ ...accounting, workerInbound: 2 }, ledger), /reconcile/i);
+});
+
+test('completion projection requires one durable preflight, every fixture, and every seeded operation before accepting its physical ledger', async () => {
+  const mod = await runner();
+  const operations = [
+    { route: '/__dds/table', shard: 0 },
+    { route: '/__dds/ordered-probe', shard: 0 },
+  ];
+  const fixtures = [{ kind: 'table' }, { kind: 'solve' }];
+  const physical = [
+    { operationId: 'preflight.metrics', route: '/__dds/metrics', replayed: false },
+    { operationId: 'fixture.000000', route: '/__dds/table', replayed: false },
+    { operationId: 'fixture.000001', route: '/__dds/ordered-probe', replayed: false },
+    { operationId: 'op.000000', route: '/__dds/table', replayed: false },
+    { operationId: 'op.000001', route: '/__dds/ordered-probe', replayed: false },
+  ];
+  const projection = mod.projectCompletionLedger({ operations, fixtures, physicalOperations: physical });
+  assert.deepEqual(projection, { workerInbound: 5, doFetchArrivals: 5, queuedDoCommands: 6, sqliteRows: { reads: 5, writes: 5 } });
+  assert.throws(() => mod.projectCompletionLedger({ operations, fixtures, physicalOperations: physical.filter((item) => item.operationId !== 'preflight.metrics') }), /preflight/i);
+  assert.throws(() => mod.projectCompletionLedger({ operations, fixtures, physicalOperations: [...physical, { operationId: 'preflight.metrics', route: '/__dds/metrics', replayed: false }] }), /more than two|preflight/i);
 });

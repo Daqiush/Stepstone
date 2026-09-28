@@ -41,6 +41,30 @@ export function reconcileObservedLedger(observed, physicalOperations) {
   if (JSON.stringify(observed) !== JSON.stringify(actual)) throw new Error('Observed remote accounting does not reconcile to the durable physical-request ledger');
   return observed;
 }
+// The completion projection is built from the immutable workload identity, not
+// a mutable counter. A recovered execution may have an original request and a
+// single replay, but it may never silently add another preflight or fixture.
+export function projectCompletionLedger({ operations, fixtures, physicalOperations }) {
+  if (!Array.isArray(operations) || !Array.isArray(fixtures) || !Array.isArray(physicalOperations)) throw new Error('Completion projection requires operations, fixtures, and physical ledger');
+  const expected = new Map([['preflight.metrics', '/__dds/metrics']]);
+  fixtures.forEach((fixture, index) => expected.set(`fixture.${String(index).padStart(6, '0')}`, fixture.kind === 'table' ? '/__dds/table' : fixture.kind === 'solve' ? '/__dds/ordered-probe' : null));
+  operations.forEach((operation, index) => expected.set(`op.${String(index).padStart(6, '0')}`, operation.route));
+  if ([...expected.values()].some((route) => !route)) throw new Error('Completion projection contains an unsupported fixture route');
+  const grouped = new Map();
+  for (const physical of physicalOperations) {
+    if (!expected.has(physical.operationId)) throw new Error(`Completion ledger has an unexpected operation: ${physical.operationId}`);
+    if (physical.route !== expected.get(physical.operationId)) throw new Error(`Completion ledger route changed: ${physical.operationId}`);
+    const records = grouped.get(physical.operationId) ?? []; records.push(physical); grouped.set(physical.operationId, records);
+  }
+  for (const [operationId] of expected) {
+    const records = grouped.get(operationId) ?? [];
+    if (!records.length) throw new Error(`Completion ledger is missing required operation: ${operationId}`);
+    if (records.length > 2 || (records.length === 2 && !(records[0].replayed === false && records[1].replayed === true))) {
+      throw new Error(`Completion ledger has an invalid replay count: ${operationId}`);
+    }
+  }
+  return ledgerAccounting(physicalOperations);
+}
 export function parseOptions(args = process.argv.slice(2), env = process.env) {
   const get = (name, fallback = null) => { const at = args.indexOf(name); return at < 0 ? fallback : args[at + 1]; };
   if (args.includes('--count')) throw new Error('--count is not supported; the remote soak always runs exactly 22000 operations');
@@ -197,7 +221,9 @@ async function runCli() {
     } catch (error) { state.recordFailure({ operationId, error: error.message }); throw error; }
   }
   writeReportCheckpoint(resolve(runDir, 'evidence.json'), evidence);
-  reconcileObservedLedger(state.report.observed, state.physicalOperations);
+  const completionProjection = projectCompletionLedger({ operations, fixtures, physicalOperations: state.physicalOperations });
+  const observed = reconcileObservedLedger(state.report.observed, state.physicalOperations);
+  if (JSON.stringify(completionProjection) !== JSON.stringify(observed)) throw new Error('Completion projection does not reconcile to the durable physical-request ledger');
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   runCli().catch((error) => { console.error(error.message); process.exitCode = 1; });
