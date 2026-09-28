@@ -341,3 +341,17 @@ test('completion journals full evidence atomically and recovery restores it', as
     assert.deepEqual(recovered.evidence, [evidence]);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('recovery rejects a physical response whose canonical digest was altered', async () => {
+  state ??= await import('../scripts/remote-dds-soak-state.mjs');
+  const dir = tempRun();
+  try {
+    const run = state.createSoakState({ dir, root: ROOT, requestForIndex: request });
+    run.recordIntent({ index: 0, operationId: 'op-0', ...request(0) });
+    run.recordCompletion({ operationId: 'op-0', response: { ok: true }, activationId: activation(1), observed: accounting(), evidence: { id: 'random-0' } });
+    const journal = readFileSync(join(dir, 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    journal.find((entry) => entry.type === 'physical').responseHash = '0'.repeat(64);
+    writeFileSync(join(dir, 'journal.jsonl'), `${journal.map(JSON.stringify).join('\n')}\n`);
+    assert.throws(() => state.recoverSoakState({ dir, root: ROOT, requestForIndex: request }), /physical response/i);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

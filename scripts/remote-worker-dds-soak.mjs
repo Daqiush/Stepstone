@@ -37,7 +37,7 @@ export function assertEndpointVersion(payload, workerVersionId) {
   return payload;
 }
 export function buildPreflightEvidence(remote) {
-  return { accounting: remote.accounting, activationId: remote.operationResult.activationId, replayed: remote.replayed,
+  return { accounting: remote.accounting, remote: remote.operationResult, activationId: remote.operationResult.activationId, replayed: remote.replayed,
     endpointBuildId: remote.operationResult.buildId, endpointWorkerVersionId: remote.operationResult.workerVersionId };
 }
 export function reconcileObservedLedger(observed, physicalOperations) {
@@ -188,9 +188,10 @@ async function runCli() {
     const preflight = await remotePost(endpoint, { key, runId, operationId: 'preflight.metrics', route: '/__dds/metrics', body: preflightBody, shard: 0 });
     assertEndpointBuild(preflight.operationResult, deployment.buildId);
     assertEndpointVersion(preflight.operationResult, deployment.workerVersionId);
+    const preflightEvidence = buildPreflightEvidence(preflight);
     state.recordAuxiliaryResponse({ operationId: 'preflight.metrics', route: '/__dds/metrics', replayed: preflight.replayed,
-      response: preflight.operationResult, remoteAccounting: preflight.accounting, shard: 0 });
-    evidence.preflight = buildPreflightEvidence(preflight);
+      response: preflight.operationResult, evidence: preflightEvidence, evidenceKind: 'preflight', remoteAccounting: preflight.accounting, shard: 0 });
+    evidence.preflight = preflightEvidence;
     writeReportCheckpoint(resolve(runDir, 'evidence.json'), evidence);
   }
   await runFixtureChecks({ endpoint, key, runId, fixtures, buildId: deployment.buildId, evidence, state });

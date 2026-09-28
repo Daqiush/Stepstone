@@ -30,11 +30,23 @@ function option(args, name, fallback = null) { const at = args.indexOf(name); re
 function finite(value) { return typeof value === 'number' && Number.isFinite(value); }
 function nearestRankP99(samples) { const sorted = [...samples].sort((a, b) => a - b); return sorted[Math.ceil(sorted.length * 0.99) - 1]; }
 function equal(left, right) { return canonical(left) === canonical(right); }
+function latestPhysical(journal, operationId) {
+  const records = journal.filter((entry) => entry.type === 'physical' && entry.operationId === operationId);
+  if (!(records.length === 1 || records.length === 2) || records[0].replayed !== false || (records[1] && records[1].replayed !== true)) return null;
+  return records.at(-1);
+}
+function bindsEvidence(record, evidence, route, shard) {
+  return !!record && record.route === route && record.shard === String(shard) && record.response !== undefined
+    && record.responseHash === sha256Utf8(canonicalJson(record.response)) && record.evidenceHash === sha256Utf8(canonicalJson(evidence))
+    && equal(record.response, evidence.remote);
+}
 function activationForShard(report, evidence, journal) {
   const values = Array.from({ length: SHARDS }, () => new Set());
   for (const entry of journal) if (entry.type === 'completion' && Number.isSafeInteger(entry.index) && entry.index >= 0 && entry.index < COUNT) values[Math.floor(entry.index / 2000)].add(entry.activationId);
-  return ACTIVATION.test(evidence?.preflight?.activationId ?? '')
-    && Array.isArray(evidence?.fixtures) && evidence.fixtures.every((fixture) => ACTIVATION.test(fixture?.remote?.activationId ?? ''))
+  const preflight = latestPhysical(journal, 'preflight.metrics');
+  return ACTIVATION.test(evidence?.preflight?.activationId ?? '') && evidence?.preflight?.activationId === evidence?.preflight?.remote?.activationId
+    && bindsEvidence(preflight, evidence.preflight, '/__dds/metrics', 0)
+    && Array.isArray(evidence?.fixtures) && evidence.fixtures.every((fixture, index) => ACTIVATION.test(fixture?.remote?.activationId ?? '') && fixture.remote.activationId === latestPhysical(journal, `fixture.${String(index).padStart(6, '0')}`)?.response?.activationId)
     && Array.isArray(evidence?.operations) && evidence.operations.length === COUNT
     && evidence.operations.every((operation) => ACTIVATION.test(operation?.activationId ?? '') && values[operation.shard]?.has(operation.activationId))
     && values.every((set, shard) => set.size === 1 && report.activationIds?.[shard] === [...set][0]);
@@ -73,6 +85,10 @@ function validateCorpus({ evidence, manifest, journal }) {
       || entries.some((entry) => !entry.response || entry.responseHash !== sha256Utf8(canonicalJson(entry.response)))
       || entries.at(-1)?.responseHash !== completion.responseHash) return false;
   }
+  for (let index = 0; index < COUNT; index++) {
+    const operation = operations[index], operationId = `op.${String(index).padStart(6, '0')}`;
+    if (operation.nativeBaseline === undefined || !bindsEvidence(physicalByOperation.get(operationId)?.at(-1), operation, operation.kind === 'table' ? '/__dds/table' : '/__dds/ordered-probe', operation.shard)) return false;
+  }
   return true;
 }
 function validateFixtures({ evidence, journal }) {
@@ -81,7 +97,9 @@ function validateFixtures({ evidence, journal }) {
   if (!expected.every((fixture, index) => {
     const item = evidence.fixtures[index];
     const metrics = item?.remoteMetrics ?? item?.remote?.metrics ?? item?.remote?.solveResponse?.metrics;
-    return item?.id === fixture.id && item?.kind === fixture.kind && item.input && item.nativeBaseline !== undefined && item.remote?.ok === true && metrics
+    const input = fixture.kind === 'table' ? { hands: fixture.hands } : { deal: fixture.deal ?? { trump: fixture.trump, trickLeader: fixture.trickLeader, trickPlayed: fixture.trickPlayed, hands: fixture.hands } };
+    const native = fixture.expected?.table ?? fixture.expected;
+    return item?.id === fixture.id && item?.kind === fixture.kind && equal(item.input, input) && equal(item.nativeBaseline, native) && item.remote?.ok === true && metrics
       && !item.parityMismatch && !item.networkError && !item.protocolError && !item.error && ACTIVATION.test(item.remote?.activationId ?? '');
   })) return false;
   const physical = journal.filter((entry) => entry.type === 'physical');
@@ -89,9 +107,10 @@ function validateFixtures({ evidence, journal }) {
   const fixtures = physical.filter((entry) => /^fixture\.\d{6}$/.test(entry.operationId));
   if (!(firstRandom > 0 && fixtures.length >= expected.length && physical.slice(0, firstRandom).filter((entry) => /^fixture\.\d{6}$/.test(entry.operationId)).length >= expected.length)) return false;
   for (let index = 0; index < expected.length; index++) {
-    const id = `fixture.${String(index).padStart(6, '0')}`, indexes = physical.map((entry, physicalIndex) => entry.operationId === id ? physicalIndex : -1).filter((physicalIndex) => physicalIndex >= 0), records = indexes.map((physicalIndex) => physical[physicalIndex]);
+    const id = `fixture.${String(index).padStart(6, '0')}`, indexes = physical.map((entry, physicalIndex) => entry.operationId === id ? physicalIndex : -1).filter((physicalIndex) => physicalIndex >= 0), records = indexes.map((physicalIndex) => physical[physicalIndex]), fixture = evidence.fixtures[index];
     if (!(records.length === 1 || records.length === 2) || records[0].replayed !== false || (records[1] && records[1].replayed !== true)) return false;
     if (records.length === 2 && indexes[1] !== indexes[0] + 1) return false;
+    if (!bindsEvidence(records.at(-1), fixture, fixture.kind === 'table' ? '/__dds/table' : '/__dds/ordered-probe', 0)) return false;
   }
   return true;
 }

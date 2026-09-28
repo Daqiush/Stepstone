@@ -177,6 +177,8 @@ function replayJournal(records, requestForIndex, runId) {
       auxiliaryIntents.set(record.operationId, record);
     } else if (record.type === 'physical') {
       if (typeof record.operationId !== 'string' || !record.operationId || typeof record.physicalId !== 'string' || !record.physicalId) throw new Error('Journal physical request is invalid');
+      if (record.response === undefined || record.responseHash !== sha256Utf8(canonicalJson(record.response))) throw new Error('Journal physical response is missing or hash-divergent');
+      if (record.evidence !== undefined && record.evidenceHash !== sha256Utf8(canonicalJson(record.evidence))) throw new Error('Journal physical evidence is hash-divergent');
       const delta = actualRequestAccounting(record);
       observed = addAccounting(observed, delta); assertAccountingWithinLimits(observed);
       const shard = String(record.shard ?? '0');
@@ -228,10 +230,10 @@ function buildStateApi({ dir, requestForIndex, manifest, state, projection }) {
     if (!state.pending) throw new Error('No pending intent');
     if (state.pending.operationId !== operationId) throw new Error('Operation ID does not match pending intent');
   };
-  const recordPhysical = ({ operationId, route, replayed, response, shard = 0, remoteAccounting, evidence, evidenceKind, recovered = false }) => {
+  const recordPhysical = ({ operationId, route, replayed, response, shard = 0, remoteAccounting, evidence, evidenceHash = evidence === undefined ? undefined : sha256Utf8(canonicalJson(evidence)), evidenceKind, recovered = false }) => {
     const delta = actualRequestAccounting({ route, replayed });
     const physical = { type: 'physical', physicalId: `request.${String(state.physicalOperations.length).padStart(8, '0')}`,
-      operationId, route, replayed, shard: String(shard), responseHash: sha256Utf8(canonicalJson(response)), remoteAccounting, evidence, evidenceKind, recovered };
+      operationId, route, replayed, shard: String(shard), response, responseHash: sha256Utf8(canonicalJson(response)), evidenceHash, remoteAccounting, evidence, evidenceKind, recovered };
     const nextObserved = addAccounting(state.observed, delta); assertAccountingWithinLimits(nextObserved);
     const shardOperations = state.physicalOperations.filter((item) => String(item.shard ?? '0') === physical.shard).concat(physical);
     if (remoteAccounting !== undefined && !sameAccounting(assertRemoteSnapshot(remoteAccounting), ledgerAccounting(shardOperations))) {
@@ -255,7 +257,7 @@ function buildStateApi({ dir, requestForIndex, manifest, state, projection }) {
     if (replayed && !previousPhysical) {
       recoverOriginalExecution({ operationId, route: state.pending.route, response, shard });
     }
-    recordPhysical({ operationId, route: state.pending.route, replayed, response, shard, remoteAccounting });
+    recordPhysical({ operationId, route: state.pending.route, replayed, response, shard, remoteAccounting, evidenceHash: evidence === undefined ? undefined : sha256Utf8(canonicalJson(evidence)) });
     appendDurable(file(dir, JOURNAL), { type: 'completion', index: state.pending.index, operationId, responseHash, activationId, evidence });
     state.cursor += 1; state.pending = null; state.activationIds[shard] = activationId;
     saveReport();

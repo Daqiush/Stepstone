@@ -28,7 +28,8 @@ async function validRun() {
     workersDevUrl: 'https://stepstone-dds-soak-00000000-0000-4000-8000-000000000001.example.workers.dev',
   } });
   const fixtures = JSON.parse(readFileSync(fixturePath, 'utf8'));
-  const physical = [{ type: 'physical', operationId: 'preflight.metrics', route: '/__dds/metrics', replayed: false, shard: '0' }];
+  const preflightRemote = { ok: true, activationId: activation(0), buildId: deployment.buildId, workerVersionId: deployment.workerVersionId };
+  const physical = [{ type: 'physical', operationId: 'preflight.metrics', route: '/__dds/metrics', replayed: false, shard: '0', response: preflightRemote, responseHash: sha256Utf8(canonicalJson(preflightRemote)) }];
   const journal = [{ type: 'auxiliary-intent', runId, operationId: 'preflight.metrics', route: '/__dds/metrics' }, physical[0]];
   for (const [index, fixture] of fixtures.entries()) {
     const operationId = `fixture.${String(index).padStart(6, '0')}`;
@@ -45,12 +46,12 @@ async function validRun() {
     const operationId = `op.${String(index).padStart(6, '0')}`;
     const route = kind === 'table' ? '/__dds/table' : '/__dds/ordered-probe';
     const body = JSON.stringify(kind === 'table' ? { hands: item.hands } : { deal: item.deal });
-    const evidenceItem = { id: item.id, index, kind, shard, depth: kind === 'solve' ? item.depth : undefined, input: JSON.parse(body), remote: { ok: true },
+    const remote = { ok: true, activationId: activation(shard) };
+    const evidenceItem = { id: item.id, index, kind, shard, depth: kind === 'solve' ? item.depth : undefined, input: JSON.parse(body), nativeBaseline: { score: 0 }, remote,
       heapBytes: 18_939_904, wasmElapsedMs: 3.25, activationId: activation(shard),
       ...(kind === 'solve' ? { orderedPingDelayMs: 2.5 } : {}) };
     operations.push(evidenceItem);
     const intent = { type: 'intent', runId, index, operationId, route, canonicalRequest: canonicalRequest(route, body), requestHash: requestHash(route, body) };
-    const remote = { ok: true, activationId: activation(shard) };
     const request = { type: 'physical', operationId, route, replayed: false, shard: String(shard), response: remote, responseHash: sha256Utf8(canonicalJson(remote)) };
     const completion = { type: 'completion', index, operationId, activationId: activation(shard), responseHash: request.responseHash };
     physical.push(request); journal.push(intent, request, completion);
@@ -62,13 +63,18 @@ async function validRun() {
     sqliteRows: { reads: physical.length, writes: physical.length } };
   const depths = Array(13).fill(0);
   for (const operation of operations) if (operation.kind === 'solve') depths[operation.depth]++;
+  const evidence = { version: 1, runId, buildId: deployment.buildId, workerVersionId: deployment.workerVersionId,
+    deploymentAssets: deployment.assets, fixtureHash: hashFile(fixturePath),
+    preflight: { remote: preflightRemote, activationId: activation(0), endpointBuildId: deployment.buildId, endpointWorkerVersionId: deployment.workerVersionId },
+    coverage: { shards: Array(11).fill(2000), depths },
+    fixtures: fixtures.map((fixture) => ({ id: fixture.id, kind: fixture.kind, input: fixture.kind === 'table' ? { hands: fixture.hands } : { deal: fixture.deal ?? { trump: fixture.trump, trickLeader: fixture.trickLeader, trickPlayed: fixture.trickPlayed, hands: fixture.hands } }, nativeBaseline: fixture.expected?.table ?? fixture.expected, remote: { ok: true, activationId: activation(0), metrics: { heapBytes: 18_939_904, solveMs: 3.25 } }, remoteMetrics: { heapBytes: 18_939_904, solveMs: 3.25 } })), operations, candidateDifferences: [] };
+  const physicalById = new Map(physical.map((entry) => [entry.operationId, entry]));
+  physicalById.get('preflight.metrics').evidenceHash = sha256Utf8(canonicalJson(evidence.preflight));
+  for (const [index, fixture] of evidence.fixtures.entries()) physicalById.get(`fixture.${String(index).padStart(6, '0')}`).evidenceHash = sha256Utf8(canonicalJson(fixture));
+  for (let index = 0; index < operations.length; index++) physicalById.get(`op.${String(index).padStart(6, '0')}`).evidenceHash = sha256Utf8(canonicalJson(operations[index]));
   return { manifest, deployment, report: { version: 1, completedCursor: 22000, observed,
     activationIds: Object.fromEntries(Array.from({ length: 11 }, (_, shard) => [shard, activation(shard)])), terminalFailure: null },
-  evidence: { version: 1, runId, buildId: deployment.buildId, workerVersionId: deployment.workerVersionId,
-    deploymentAssets: deployment.assets, fixtureHash: hashFile(fixturePath),
-    preflight: { endpointBuildId: deployment.buildId, endpointWorkerVersionId: deployment.workerVersionId },
-    coverage: { shards: Array(11).fill(2000), depths },
-    fixtures: fixtures.map((fixture) => ({ id: fixture.id, kind: fixture.kind, input: fixture.kind === 'table' ? { hands: fixture.hands } : { deal: fixture.deal }, nativeBaseline: fixture.expected ?? { ok: true }, remote: { ok: true, activationId: activation(0), metrics: { heapBytes: 18_939_904, solveMs: 3.25 } }, remoteMetrics: { heapBytes: 18_939_904, solveMs: 3.25 } })), operations, candidateDifferences: [] },
+  evidence,
     journal, simulator: { budget: { rooms: 50, writesPerDay: 70000, readsPerDay: 250000 } } };
 }
 
@@ -111,14 +117,17 @@ for (const [name, mutate] of [
   ['corpus', (r) => { r.evidence.operations.pop(); r.report.completedCursor--; }],
   ['corpus', (r) => { r.journal.find((x) => x.type === 'intent' && x.index === 1).requestHash = '0'.repeat(64); }],
   ['corpus', (r) => { r.journal.find((x) => x.type === 'physical' && x.operationId === 'op.000001').responseHash = '0'.repeat(64); }],
+  ['corpus', (r) => { r.evidence.operations[0].remote = { ...r.evidence.operations[0].remote, detached: true }; }],
   ['fixture-first', (r) => { const first = r.journal.findIndex((x) => x.type === 'physical' && x.operationId.startsWith('fixture.')); const random = r.journal.findIndex((x) => x.type === 'physical' && x.operationId === 'op.000000'); [r.journal[first], r.journal[random]] = [r.journal[random], r.journal[first]]; }],
   ['fixture-first', (r) => { delete r.evidence.fixtures[0].nativeBaseline; }],
+  ['fixture-first', (r) => { r.evidence.fixtures[0].input = { detached: true }; }],
   ['journal', (r) => { r.journal.push({ type: 'failed', operationId: 'op.021999' }); }],
   ['parity', (r) => { r.evidence.operations[0].parityMismatch = true; }],
   ['candidate-diagnostics', (r) => { r.evidence.candidateDifferences.push({ id: 'random-1', why: 'unreconciled' }); }],
   ['depths', (r) => { r.evidence.coverage.depths[0] = 0; }],
   ['activation', (r) => { r.journal.find((x) => x.type === 'completion' && x.index === 1).activationId = activation(2); }],
   ['activation', (r) => { r.evidence.operations[0].activationId = activation(2); }],
+  ['activation', (r) => { r.evidence.preflight.activationId = activation(1); }],
   ['deployment', (r) => { r.deployment.verifiedDeployment.apiVerified = false; }],
   ['wasm-bundle', (r) => { r.deployment.assets.wasm.bytes = 3 * 1024 * 1024; }],
   ['heap', (r) => { r.evidence.operations[0].heapBytes = 100663296; }],
