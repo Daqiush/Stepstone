@@ -21,11 +21,12 @@ async function runner() { return import('../scripts/remote-worker-dds-soak.mjs')
 test('deployment manifest binds the exact wasm and harness bytes to a deterministic build ID', async () => {
   const mod = await deployment(); const root = repo();
   try {
-    const manifest = mod.createDeploymentManifest({ root, verifiedDeployment: { versionId: 'v-123', apiVerified: true, wranglerVersion: '4.0.0', workersDevUrl: 'https://temporary.example.workers.dev' } });
+    const manifest = mod.createDeploymentManifest({ root, verifiedDeployment: { versionId: 'v-123', apiVerified: true, wranglerVersion: '4.0.0', workersDevUrl: 'https://temporary.example.workers.dev', temporaryWorkerName: 'stepstone-dds-soak-00000000-0000-4000-8000-000000000001' } });
     assert.equal(manifest.version, 1);
     assert.match(manifest.buildId, /^[a-f0-9]{64}$/);
     assert.match(manifest.assets.wasm.sha256, /^[a-f0-9]{64}$/);
     assert.equal(Object.keys(manifest.assets.harness).length, 2);
+    assert.equal(JSON.stringify(manifest).includes('temporary.example.workers.dev'), false);
     writeFileSync(join(root, 'workers/vendor/bridge-dds/dds-worker.wasm'), 'wasm-v2');
     assert.throws(() => mod.assertDeploymentManifest(manifest, { root }), /Wasm asset hash changed/i);
   } finally { rmSync(root, { recursive: true, force: true }); }
@@ -34,7 +35,7 @@ test('deployment manifest binds the exact wasm and harness bytes to a determinis
 test('deployment manifest rejects a missing version instead of assuming compatibility', async () => {
   const mod = await deployment(); const root = repo();
   try {
-    const manifest = mod.createDeploymentManifest({ root, verifiedDeployment: { versionId: 'v-123', apiVerified: true, wranglerVersion: '4.0.0', workersDevUrl: 'https://temporary.example.workers.dev' } }); delete manifest.version;
+    const manifest = mod.createDeploymentManifest({ root, verifiedDeployment: { versionId: 'v-123', apiVerified: true, wranglerVersion: '4.0.0', workersDevUrl: 'https://temporary.example.workers.dev', temporaryWorkerName: 'stepstone-dds-soak-00000000-0000-4000-8000-000000000001' } }); delete manifest.version;
     assert.throws(() => mod.assertDeploymentManifest(manifest, { root }), /version/i);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -43,7 +44,7 @@ test('deployment manifest records Wasm bytes and requires an explicit deployed W
   const mod = await deployment(); const root = repo();
   try {
     assert.throws(() => mod.createDeploymentManifest({ root, workerVersionId: 'v-123' }), /verified deployment/i);
-    const manifest = mod.createDeploymentManifest({ root, verifiedDeployment: { versionId: 'v-123', apiVerified: true, wranglerVersion: '4.0.0', workersDevUrl: 'https://temporary.example.workers.dev' } });
+    const manifest = mod.createDeploymentManifest({ root, verifiedDeployment: { versionId: 'v-123', apiVerified: true, wranglerVersion: '4.0.0', workersDevUrl: 'https://temporary.example.workers.dev', temporaryWorkerName: 'stepstone-dds-soak-00000000-0000-4000-8000-000000000001' } });
     assert.equal(manifest.assets.wasm.bytes, 7);
     assert.equal(manifest.workerVersionId, 'v-123');
   } finally { rmSync(root, { recursive: true, force: true }); }
@@ -72,7 +73,7 @@ test('deployment integration parses Wrangler JSON, verifies the returned version
   const mod = await deployment(); const root = repo();
   try {
     const calls = [];
-    const verified = await mod.deployAndVerifyWorkers({ root, accountId: 'acct', scriptName: 'temp-dds', apiToken: 'token', remoteTestKey: 'a'.repeat(43),
+    const verified = await mod.deployAndVerifyWorkers({ root, accountId: 'acct', apiToken: 'token', remoteTestKey: 'a'.repeat(43), randomUUID: () => '11111111-1111-4111-8111-111111111111',
       execFile: (command, args) => {
         calls.push({ command, args });
         if (args[0] === 'secret') return '';
@@ -81,13 +82,14 @@ test('deployment integration parses Wrangler JSON, verifies the returned version
         throw new Error('unexpected command');
       },
       fetchImpl: async (url) => {
-        assert.match(url, /workers\/scripts\/temp-dds\/versions\/deployed-v1$/);
+        assert.match(url, /workers\/scripts\/stepstone-dds-soak-11111111-1111-4111-8111-111111111111\/versions\/deployed-v1$/);
         return { ok: true, json: async () => ({ result: { id: 'deployed-v1' } }) };
       },
     });
     assert.equal(verified.versionId, 'deployed-v1');
+    assert.equal(verified.temporaryWorkerName, 'stepstone-dds-soak-11111111-1111-4111-8111-111111111111');
     assert.ok(calls[1].args.includes('--json'));
-    await assert.rejects(() => mod.deployAndVerifyWorkers({ root, accountId: 'acct', scriptName: 'temp-dds', apiToken: '' }), /requires account/i);
+    await assert.rejects(() => mod.deployAndVerifyWorkers({ root, accountId: 'acct', apiToken: '' }), /requires account/i);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -95,11 +97,14 @@ test('temporary remote deployment enables only workers.dev and keeps the test ke
   const mod = await deployment(); const root = repo();
   try {
     writeFileSync(join(root, 'workers/wrangler.jsonc'), JSON.stringify({ name: 'normal-worker', main: 'src/index.mjs', workers_dev: false, routes: [{ pattern: 'stepstone.hogetsu.uk/*' }] }));
-    const config = mod.createTemporaryWorkersConfig({ root, scriptName: 'dds-soak-temporary' });
-    assert.equal(config.name, 'dds-soak-temporary');
+    const name = 'stepstone-dds-soak-11111111-1111-4111-8111-111111111111';
+    const config = mod.createTemporaryWorkersConfig({ root, temporaryWorkerName: name });
+    assert.equal(config.name, name);
     assert.equal(config.workers_dev, true);
     assert.equal('routes' in config, false);
     assert.equal(JSON.stringify(config).includes('DDS_REMOTE_TEST_KEY'), false);
+    assert.throws(() => mod.createTemporaryWorkersConfig({ root, temporaryWorkerName: 'normal-worker' }), /temporary Worker/i);
+    assert.throws(() => mod.createTemporaryWorkersConfig({ root, scriptName: 'normal-worker' }), /temporary Worker/i);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -107,39 +112,49 @@ test('temporary remote deployment requires an in-memory test key and obtains a w
   const mod = await deployment(); const root = repo();
   try {
     const calls = [];
-    const deployed = await mod.deployAndVerifyWorkers({ root, accountId: 'acct', scriptName: 'dds-soak-temporary', apiToken: 'token', remoteTestKey: 'a'.repeat(43),
+    const deployed = await mod.deployAndVerifyWorkers({ root, accountId: 'acct', apiToken: 'token', remoteTestKey: 'a'.repeat(43), randomUUID: () => '22222222-2222-4222-8222-222222222222',
       execFile: (command, args, options = {}) => {
         calls.push({ command, args, options });
         if (args[0] === 'secret') { assert.equal(options.input, 'a'.repeat(43)); return ''; }
-        if (args[0] === 'deploy') return JSON.stringify({ version_id: 'deployed-v1', url: 'https://dds-soak-temporary.example.workers.dev' });
+        if (args[0] === 'deploy') return JSON.stringify({ version_id: 'deployed-v1', url: 'https://stepstone-dds-soak-22222222-2222-4222-8222-222222222222.example.workers.dev' });
         if (args[0] === '--version') return '4.33.0\n';
         throw new Error('unexpected command');
       },
       fetchImpl: async () => ({ ok: true, json: async () => ({ result: { id: 'deployed-v1' } }) }),
     });
-    assert.equal(deployed.workersDevUrl, 'https://dds-soak-temporary.example.workers.dev');
+    assert.equal(deployed.workersDevUrl, 'https://stepstone-dds-soak-22222222-2222-4222-8222-222222222222.example.workers.dev');
     assert.equal(calls[0].args.slice(0, 3).join(' '), 'secret put DDS_REMOTE_TEST_KEY');
-    await assert.rejects(() => mod.deployAndVerifyWorkers({ root, accountId: 'acct', scriptName: 'dds-soak-temporary', apiToken: 'token' }), /test key/i);
+    await assert.rejects(() => mod.deployAndVerifyWorkers({ root, accountId: 'acct', apiToken: 'token' }), /test key/i);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test('temporary Worker teardown disables remote testing before deleting and confirming API absence', async () => {
+test('temporary Worker teardown uses only a generated identity, closes the keyed route, then deletes and confirms absence', async () => {
   const mod = await deployment(); const root = repo();
   try {
     const calls = [];
-    await mod.teardownTemporaryWorkers({ root, accountId: 'acct', scriptName: 'dds-soak-temporary', apiToken: 'token',
+    const temporaryWorkerName = 'stepstone-dds-soak-33333333-3333-4333-8333-333333333333';
+    const workersDevUrl = 'https://stepstone-dds-soak-33333333-3333-4333-8333-333333333333.example.workers.dev';
+    await mod.teardownTemporaryWorkers({ root, accountId: 'acct', temporaryWorkerName, workersDevUrl, remoteTestKey: 'a'.repeat(43), apiToken: 'token', randomUUID: () => '44444444-4444-4444-8444-444444444444',
       execFile: (command, args) => { calls.push({ command, args }); return args[0] === 'deploy' ? JSON.stringify({ version_id: 'disabled-v1' }) : ''; },
       fetchImpl: async (url, options = {}) => {
         calls.push({ url, options });
+        if (url === `${workersDevUrl}/__dds/metrics`) return { ok: false, status: 404, json: async () => ({}) };
         if (options.method === 'DELETE') return { ok: true, json: async () => ({ success: true }) };
         return { ok: false, status: 404, json: async () => ({ success: false }) };
       },
     });
     assert.ok(calls.find((call) => call.args?.includes('DDS_REMOTE_TEST:false')));
-    assert.equal(calls.find((call) => call.options?.method === 'DELETE').url, 'https://api.cloudflare.com/client/v4/accounts/acct/workers/scripts/dds-soak-temporary');
-    await assert.rejects(() => mod.teardownTemporaryWorkers({ root, accountId: 'acct', scriptName: 'dds-soak-temporary', apiToken: 'token',
-      execFile: () => '', fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({}) }),
-    }), /still exists/i);
+    const closureProbe = calls.find((call) => call.url === `${workersDevUrl}/__dds/metrics`);
+    assert.equal(closureProbe.options.method, 'POST');
+    assert.equal(closureProbe.options.headers['x-dds-test-key'], 'a'.repeat(43));
+    assert.match(closureProbe.options.headers['x-dds-run-id'], /^[0-9a-f-]{36}$/i);
+    assert.equal(closureProbe.options.headers['x-dds-operation-id'], 'teardown.close.000001');
+    assert.equal(calls.find((call) => call.options?.method === 'DELETE').url, `https://api.cloudflare.com/client/v4/accounts/acct/workers/scripts/${temporaryWorkerName}`);
+    assert.equal(JSON.stringify(calls).includes('DDS_REMOTE_TEST_KEY'), false);
+    await assert.rejects(() => mod.teardownTemporaryWorkers({ root, accountId: 'acct', temporaryWorkerName, workersDevUrl, remoteTestKey: 'a'.repeat(43), apiToken: 'token',
+      execFile: () => '', fetchImpl: async (url) => url === `${workersDevUrl}/__dds/metrics` ? ({ ok: true, status: 200, json: async () => ({}) }) : ({ ok: false, status: 404, json: async () => ({}) }),
+    }), /opaque 404/i);
+    await assert.rejects(() => mod.teardownTemporaryWorkers({ root, accountId: 'acct', temporaryWorkerName: 'production-worker', workersDevUrl, remoteTestKey: 'a'.repeat(43), apiToken: 'token' }), /temporary Worker/i);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -203,4 +218,11 @@ test('completion projection requires one durable preflight, every fixture, and e
   assert.deepEqual(projection, { workerInbound: 5, doFetchArrivals: 5, queuedDoCommands: 6, sqliteRows: { reads: 5, writes: 5 } });
   assert.throws(() => mod.projectCompletionLedger({ operations, fixtures, physicalOperations: physical.filter((item) => item.operationId !== 'preflight.metrics') }), /preflight/i);
   assert.throws(() => mod.projectCompletionLedger({ operations, fixtures, physicalOperations: [...physical, { operationId: 'preflight.metrics', route: '/__dds/metrics', replayed: false }] }), /more than two|preflight/i);
+  const replayOnly = physical.map((item) => item.operationId === 'op.000000' ? { ...item, replayed: true } : item);
+  assert.throws(() => mod.projectCompletionLedger({ operations, fixtures, physicalOperations: replayOnly }), /invalid replay count/i);
+  const recovered = [...physical, { operationId: 'op.000000', route: '/__dds/table', replayed: true }];
+  assert.doesNotThrow(() => mod.projectCompletionLedger({ operations, fixtures, physicalOperations: recovered }));
+  const tamperedReplayOrder = [...recovered];
+  const replay = tamperedReplayOrder.pop(); tamperedReplayOrder.splice(3, 0, replay);
+  assert.throws(() => mod.projectCompletionLedger({ operations, fixtures, physicalOperations: tamperedReplayOrder }), /invalid replay count/i);
 });

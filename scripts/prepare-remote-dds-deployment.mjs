@@ -1,14 +1,15 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID as systemRandomUUID } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { relative, resolve, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
-import { canonicalJson } from './remote-dds-soak-state.mjs';
+import { canonicalJson, requestHash } from './remote-dds-soak-state.mjs';
 import { writeReportCheckpoint } from './worker-dds-checkpoint.mjs';
 
 export const DEPLOYMENT_MANIFEST_VERSION = 1;
 export const WASM_PATH = 'workers/vendor/bridge-dds/dds-worker.wasm';
+export const TEMPORARY_WORKER_PREFIX = 'stepstone-dds-soak-';
 export function harnessPaths(root) {
   const sourceRoot = resolve(root, 'workers/src');
   if (!existsSync(sourceRoot)) throw new Error('Missing harness source directory: workers/src');
@@ -27,10 +28,13 @@ function asset(root, path, label) {
   return { path, bytes: bytes.byteLength, sha256: sha256(bytes) };
 }
 
-export function assertVerifiedDeployment(record) {
+export function assertVerifiedDeployment(record, { requireWorkersDevUrl = true } = {}) {
   if (!record || record.apiVerified !== true || typeof record.versionId !== 'string' || !record.versionId.trim()
-      || typeof record.wranglerVersion !== 'string' || !record.wranglerVersion.trim() || typeof record.workersDevUrl !== 'string') throw new Error('A verified deployment record is required');
-  return { versionId: record.versionId.trim(), apiVerified: true, wranglerVersion: record.wranglerVersion.trim(), workersDevUrl: assertWorkersDevUrl(record.workersDevUrl) };
+      || typeof record.wranglerVersion !== 'string' || !record.wranglerVersion.trim()
+      || (requireWorkersDevUrl && typeof record.workersDevUrl !== 'string')) throw new Error('A verified deployment record is required');
+  const normalized = { versionId: record.versionId.trim(), apiVerified: true, wranglerVersion: record.wranglerVersion.trim(), temporaryWorkerName: assertTemporaryWorkerName(record.temporaryWorkerName) };
+  if (record.workersDevUrl !== undefined) normalized.workersDevUrl = assertWorkersDevUrl(record.workersDevUrl);
+  return normalized;
 }
 export function assertWorkersDevUrl(value) {
   let url; try { url = new URL(value); } catch { throw new Error('Wrangler deployment must return an HTTPS workers.dev root URL'); }
@@ -39,8 +43,17 @@ export function assertWorkersDevUrl(value) {
   }
   return url.toString().replace(/\/$/, '');
 }
-export function createTemporaryWorkersConfig({ root = resolve(import.meta.dirname, '..'), scriptName } = {}) {
-  if (typeof scriptName !== 'string' || !/^[a-z0-9][a-z0-9-]{0,62}$/.test(scriptName)) throw new Error('Temporary Worker script name is invalid');
+export function assertTemporaryWorkerName(value) {
+  if (typeof value !== 'string' || !new RegExp(`^${TEMPORARY_WORKER_PREFIX}[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`, 'i').test(value)) {
+    throw new Error('A generated temporary Worker identity is required');
+  }
+  return value.toLowerCase();
+}
+export function createTemporaryWorkerName(randomUUID = systemRandomUUID) {
+  return assertTemporaryWorkerName(`${TEMPORARY_WORKER_PREFIX}${randomUUID()}`);
+}
+export function createTemporaryWorkersConfig({ root = resolve(import.meta.dirname, '..'), temporaryWorkerName } = {}) {
+  const scriptName = assertTemporaryWorkerName(temporaryWorkerName);
   const source = JSON.parse(readFileSync(resolve(root, 'workers/wrangler.jsonc'), 'utf8'));
   // A temporary verification Worker may only be exposed through workers.dev.
   // Explicitly discard every route/zone field from the project configuration.
@@ -62,16 +75,17 @@ export async function verifyWorkersDeployment({ fetchImpl = fetch, accountId, sc
   if (!response.ok || payload?.result?.id !== expectedVersionId) throw new Error('Workers API did not verify the deployed version ID');
   return { versionId: String(expectedVersionId).trim(), apiVerified: true, wranglerVersion: String(wranglerVersion).trim() };
 }
-export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImpl = fetch, wrangler = 'wrangler', root = resolve(import.meta.dirname, '..'), accountId, scriptName, apiToken, remoteTestKey }) {
-  if (!accountId || !scriptName || !apiToken || !remoteTestKey) throw new Error('Temporary Workers deployment requires account, script, token, and remote test key');
+export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImpl = fetch, wrangler = 'wrangler', root = resolve(import.meta.dirname, '..'), accountId, apiToken, remoteTestKey, randomUUID = systemRandomUUID }) {
+  if (!accountId || !apiToken || !remoteTestKey) throw new Error('Temporary Workers deployment requires account, token, and remote test key');
   if (!/^[A-Za-z0-9_-]{43}$/.test(remoteTestKey)) throw new Error('Remote test key must be a 32-byte base64url value');
+  const temporaryWorkerName = createTemporaryWorkerName(randomUUID);
   const assets = { wasm: asset(root, WASM_PATH, 'Wasm'), harness: Object.fromEntries(harnessPaths(root).map((path) => [path, asset(root, path, 'harness')])) };
   const buildId = sha256(canonicalJson({ version: DEPLOYMENT_MANIFEST_VERSION, assets }));
   const configDir = mkdtempSync(join(tmpdir(), 'stepstone-dds-soak-'));
   const configPath = join(configDir, 'wrangler.json');
   try {
     // The key is intentionally supplied only to Wrangler stdin, never config or report.
-    writeFileSync(configPath, `${JSON.stringify(createTemporaryWorkersConfig({ root, scriptName }))}\n`, 'utf8');
+    writeFileSync(configPath, `${JSON.stringify(createTemporaryWorkersConfig({ root, temporaryWorkerName }))}\n`, 'utf8');
     execFile(wrangler, ['secret', 'put', 'DDS_REMOTE_TEST_KEY', '--config', configPath], { encoding: 'utf8', cwd: root, input: remoteTestKey });
     const deployed = JSON.parse(String(execFile(wrangler, ['deploy', '--json', '--config', configPath,
       '--var', 'DDS_REMOTE_TEST:true', '--var', `DDS_DEPLOYMENT_BUILD_ID:${buildId}`], { encoding: 'utf8', cwd: root })));
@@ -79,19 +93,30 @@ export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImp
     const workersDevUrl = findWorkersDevUrl(deployed);
     if (!versionId || !workersDevUrl) throw new Error('Wrangler deployment did not return a version ID and workers.dev URL');
     const wranglerVersion = String(execFile(wrangler, ['--version'], { encoding: 'utf8' })).trim();
-    const verified = await verifyWorkersDeployment({ fetchImpl, accountId, scriptName, apiToken, expectedVersionId: versionId, wranglerVersion });
-    return { ...verified, workersDevUrl };
+    const verified = await verifyWorkersDeployment({ fetchImpl, accountId, scriptName: temporaryWorkerName, apiToken, expectedVersionId: versionId, wranglerVersion });
+    return { ...verified, workersDevUrl, temporaryWorkerName };
   } finally { rmSync(configDir, { recursive: true, force: true }); }
 }
-export async function teardownTemporaryWorkers({ execFile = execFileSync, fetchImpl = fetch, wrangler = 'wrangler', root = resolve(import.meta.dirname, '..'), accountId, scriptName, apiToken }) {
-  if (!accountId || !scriptName || !apiToken) throw new Error('Temporary Worker teardown requires account, script, and token');
+export async function teardownTemporaryWorkers({ execFile = execFileSync, fetchImpl = fetch, wrangler = 'wrangler', root = resolve(import.meta.dirname, '..'), accountId, temporaryWorkerName, workersDevUrl, remoteTestKey, apiToken, randomUUID = systemRandomUUID }) {
+  if (!accountId || !temporaryWorkerName || !workersDevUrl || !apiToken || !remoteTestKey) throw new Error('Temporary Worker teardown requires account, generated identity, workers.dev URL, token, and remote test key');
+  const scriptName = assertTemporaryWorkerName(temporaryWorkerName);
+  const endpoint = assertWorkersDevUrl(workersDevUrl);
+  if (!/^[A-Za-z0-9_-]{43}$/.test(remoteTestKey)) throw new Error('Remote test key must be a 32-byte base64url value');
   const configDir = mkdtempSync(join(tmpdir(), 'stepstone-dds-soak-close-'));
   const configPath = join(configDir, 'wrangler.json');
   const scriptUrl = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(scriptName)}`;
   try {
-    writeFileSync(configPath, `${JSON.stringify(createTemporaryWorkersConfig({ root, scriptName }))}\n`, 'utf8');
+    writeFileSync(configPath, `${JSON.stringify(createTemporaryWorkersConfig({ root, temporaryWorkerName: scriptName }))}\n`, 'utf8');
     // Close the authenticated harness before deleting the temporary endpoint.
     execFile(wrangler, ['deploy', '--json', '--config', configPath, '--var', 'DDS_REMOTE_TEST:false'], { encoding: 'utf8', cwd: root });
+    const closeRoute = '/__dds/metrics';
+    const closeBody = '{}';
+    const closeProbe = await fetchImpl(`${endpoint}${closeRoute}`, { method: 'POST', body: closeBody, headers: {
+      'content-type': 'application/json', 'x-dds-test-key': remoteTestKey,
+      'x-dds-run-id': randomUUID(), 'x-dds-operation-id': 'teardown.close.000001',
+      'x-dds-request-hash': requestHash(closeRoute, closeBody), 'x-dds-shard': '0',
+    } });
+    if (closeProbe.status !== 404) throw new Error('Temporary Worker closure probe did not receive opaque 404');
     const deleted = await fetchImpl(scriptUrl, { method: 'DELETE', headers: { authorization: `Bearer ${apiToken}` } });
     if (!deleted.ok) throw new Error('Workers API did not delete the temporary Worker');
     const absent = await fetchImpl(scriptUrl, { headers: { authorization: `Bearer ${apiToken}` } });
@@ -106,14 +131,23 @@ export function createDeploymentManifest({ root = resolve(import.meta.dirname, '
     harness: Object.fromEntries(harnessPaths(root).map((path) => [path, asset(root, path, 'harness')])),
   };
   const fingerprint = { version: DEPLOYMENT_MANIFEST_VERSION, assets };
-  return { ...fingerprint, workerVersionId: deployment.versionId, verifiedDeployment: deployment, buildId: sha256(canonicalJson(fingerprint)) };
+  // The endpoint and key are ephemeral transport inputs.  The durable manifest
+  // retains only the generated identity required for safe teardown.
+  const persistedDeployment = { versionId: deployment.versionId, apiVerified: true, wranglerVersion: deployment.wranglerVersion, temporaryWorkerName: deployment.temporaryWorkerName };
+  return { ...fingerprint, workerVersionId: deployment.versionId, verifiedDeployment: persistedDeployment, buildId: sha256(canonicalJson(fingerprint)) };
 }
 
 export function assertDeploymentManifest(manifest, { root = resolve(import.meta.dirname, '..') } = {}) {
   if (!manifest || manifest.version !== DEPLOYMENT_MANIFEST_VERSION) throw new Error('Unsupported or missing deployment manifest version');
   if (typeof manifest.buildId !== 'string' || !/^[a-f0-9]{64}$/.test(manifest.buildId)) throw new Error('Deployment manifest build ID is invalid');
   if (typeof manifest.workerVersionId !== 'string' || !manifest.workerVersionId) throw new Error('Deployment manifest Worker version ID is invalid');
-  const current = createDeploymentManifest({ root, verifiedDeployment: manifest.verifiedDeployment });
+  const verifiedDeployment = assertVerifiedDeployment(manifest.verifiedDeployment, { requireWorkersDevUrl: false });
+  const assets = {
+    wasm: asset(root, WASM_PATH, 'Wasm'),
+    harness: Object.fromEntries(harnessPaths(root).map((path) => [path, asset(root, path, 'harness')])),
+  };
+  const fingerprint = { version: DEPLOYMENT_MANIFEST_VERSION, assets };
+  const current = { ...fingerprint, workerVersionId: verifiedDeployment.versionId, verifiedDeployment: { versionId: verifiedDeployment.versionId, apiVerified: true, wranglerVersion: verifiedDeployment.wranglerVersion, temporaryWorkerName: verifiedDeployment.temporaryWorkerName }, buildId: sha256(canonicalJson(fingerprint)) };
   if (manifest.assets?.wasm?.sha256 !== current.assets.wasm.sha256) throw new Error('Wasm asset hash changed since deployment manifest was generated');
   for (const path of harnessPaths(root)) {
     if (manifest.assets?.harness?.[path]?.sha256 !== current.assets.harness[path].sha256) throw new Error(`Harness asset hash changed since deployment manifest was generated: ${path}`);

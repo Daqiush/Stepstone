@@ -59,7 +59,8 @@ export function projectCompletionLedger({ operations, fixtures, physicalOperatio
   for (const [operationId] of expected) {
     const records = grouped.get(operationId) ?? [];
     if (!records.length) throw new Error(`Completion ledger is missing required operation: ${operationId}`);
-    if (records.length > 2 || (records.length === 2 && !(records[0].replayed === false && records[1].replayed === true))) {
+    if (!((records.length === 1 && records[0].replayed === false)
+        || (records.length === 2 && records[0].replayed === false && records[1].replayed === true))) {
       throw new Error(`Completion ledger has an invalid replay count: ${operationId}`);
     }
   }
