@@ -36,6 +36,7 @@ test('creates the pinned deterministic manifest', async () => {
   assert.equal(manifest.journalSchemaVersion, 6);
   assert.match(manifest.hashes.randomGenerator, /^[a-f0-9]{64}$/);
   assert.match(manifest.hashes.fixtureCorpus, /^[a-f0-9]{64}$/);
+  assert.match(manifest.hashes.simulator, /^[a-f0-9]{64}$/);
 });
 
 test('persists an fsynced intent and recovers it as a deterministic replay', async () => {

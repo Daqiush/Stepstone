@@ -2,8 +2,9 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ledgerAccounting } from './remote-dds-soak-state.mjs';
+import { ACCOUNTING_SCHEMA_VERSION, JOURNAL_SCHEMA_VERSION, SOAK_SEED, canonicalJson, canonicalRequest, ledgerAccounting, requestHash, sha256Utf8 } from './remote-dds-soak-state.mjs';
 import { assertDeploymentManifest } from './prepare-remote-dds-deployment.mjs';
+import { createRandomCaseGenerator } from './worker-dds-random-cases.mjs';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const COUNT = 22000;
@@ -12,6 +13,7 @@ const WASM_LIMIT = 3 * 1024 * 1024;
 const HEAP_LIMIT = 100663296;
 const ACCOUNTING_LIMITS = { workerInbound: 25000, queuedDoCommands: 50000, sqliteReads: 25000, sqliteWrites: 25000 };
 const ROOM_LIMITS = { writes: 70000, reads: 250000 };
+const ACTIVATION = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const hash = (path) => createHash('sha256').update(readFileSync(path)).digest('hex');
 const canonical = (value) => JSON.stringify(value);
 
@@ -28,10 +30,14 @@ function option(args, name, fallback = null) { const at = args.indexOf(name); re
 function finite(value) { return typeof value === 'number' && Number.isFinite(value); }
 function nearestRankP99(samples) { const sorted = [...samples].sort((a, b) => a - b); return sorted[Math.ceil(sorted.length * 0.99) - 1]; }
 function equal(left, right) { return canonical(left) === canonical(right); }
-function activationForShard(report, journal) {
+function activationForShard(report, evidence, journal) {
   const values = Array.from({ length: SHARDS }, () => new Set());
   for (const entry of journal) if (entry.type === 'completion' && Number.isSafeInteger(entry.index) && entry.index >= 0 && entry.index < COUNT) values[Math.floor(entry.index / 2000)].add(entry.activationId);
-  return values.every((set, shard) => set.size === 1 && report.activationIds?.[shard] === [...set][0]);
+  return ACTIVATION.test(evidence?.preflight?.activationId ?? '')
+    && Array.isArray(evidence?.fixtures) && evidence.fixtures.every((fixture) => ACTIVATION.test(fixture?.remote?.activationId ?? ''))
+    && Array.isArray(evidence?.operations) && evidence.operations.length === COUNT
+    && evidence.operations.every((operation) => ACTIVATION.test(operation?.activationId ?? '') && values[operation.shard]?.has(operation.activationId))
+    && values.every((set, shard) => set.size === 1 && report.activationIds?.[shard] === [...set][0]);
 }
 
 function validateCorpus({ evidence, manifest, journal }) {
@@ -40,28 +46,54 @@ function validateCorpus({ evidence, manifest, journal }) {
   const coverage = evidence.coverage;
   if (!Array.isArray(coverage?.shards) || coverage.shards.length !== SHARDS || coverage.shards.some((count) => count !== 2000)
       || !Array.isArray(coverage?.depths) || coverage.depths.length !== 13 || coverage.depths.some((count) => !Number.isSafeInteger(count) || count <= 0)) return false;
-  const seen = new Set(); const actualDepths = Array(13).fill(0);
+  const seen = new Set(); const actualDepths = Array(13).fill(0); const generate = createRandomCaseGenerator(SOAK_SEED);
+  const intents = journal.filter((entry) => entry.type === 'intent');
+  const completions = journal.filter((entry) => entry.type === 'completion');
+  if (intents.length !== COUNT || completions.length !== COUNT) return false;
   for (let index = 0; index < COUNT; index++) {
-    const op = operations[index], table = index % 100 === 0;
-    if (!op || op.id !== `random-${index}` || op.index !== index || op.shard !== Math.floor(index / 2000)
-        || op.kind !== (table ? 'table' : 'solve') || seen.has(op.id) || op.parityMismatch === true || op.networkError || op.protocolError || op.error || op.remote?.ok === false) return false;
+    const op = operations[index], generated = generate(index), table = generated.kind === 'table', route = table ? '/__dds/table' : '/__dds/ordered-probe';
+    const body = JSON.stringify(table ? { hands: generated.hands } : { deal: generated.deal });
+    const intent = intents[index], completion = completions[index];
+    if (!op || op.id !== generated.id || op.index !== index || op.shard !== Math.floor(index / 2000)
+        || op.kind !== generated.kind || !equal(op.input, JSON.parse(body)) || seen.has(op.id) || op.parityMismatch === true || op.networkError || op.protocolError || op.error || op.remote?.ok !== true
+        || !ACTIVATION.test(op.activationId ?? '') || !intent || intent.runId !== manifest.runId || intent.index !== index || intent.operationId !== `op.${String(index).padStart(6, '0')}` || intent.route !== route
+        || intent.canonicalRequest !== canonicalRequest(route, body) || intent.requestHash !== requestHash(route, body)
+        || !completion || completion.index !== index || completion.operationId !== intent.operationId || completion.activationId !== op.activationId || !/^[a-f0-9]{64}$/.test(completion.responseHash ?? '')) return false;
     seen.add(op.id);
     if (!table) { if (!Number.isSafeInteger(op.depth) || op.depth < 0 || op.depth > 12) return false; actualDepths[op.depth]++; }
   }
   if (actualDepths.some((count, index) => count !== coverage.depths[index])) return false;
-  const intents = journal.filter((entry) => entry.type === 'intent');
-  const completions = journal.filter((entry) => entry.type === 'completion');
-  return intents.length === COUNT && completions.length === COUNT && intents.every((entry, index) => entry.runId === manifest.runId && entry.index === index && entry.operationId === `op.${String(index).padStart(6, '0')}`)
-    && completions.every((entry, index) => entry.index === index && entry.operationId === `op.${String(index).padStart(6, '0')}` && typeof entry.responseHash === 'string' && /^[a-f0-9]{64}$/.test(entry.responseHash));
+  const physicalByOperation = new Map();
+  for (const entry of journal.filter((entry) => entry.type === 'physical' && /^op\.\d{6}$/.test(entry.operationId))) {
+    const entries = physicalByOperation.get(entry.operationId) ?? []; entries.push(entry); physicalByOperation.set(entry.operationId, entries);
+  }
+  for (const completion of completions) {
+    const entries = physicalByOperation.get(completion.operationId) ?? [];
+    if (!(entries.length === 1 || entries.length === 2) || entries[0].replayed !== false || (entries[1] && entries[1].replayed !== true)
+      || entries.some((entry) => !entry.response || entry.responseHash !== sha256Utf8(canonicalJson(entry.response)))
+      || entries.at(-1)?.responseHash !== completion.responseHash) return false;
+  }
+  return true;
 }
 function validateFixtures({ evidence, journal }) {
   const expected = readJson(resolve(ROOT, 'workers/test/fixtures/dds-parity.json'), 'fixture corpus');
   if (!Array.isArray(evidence?.fixtures) || evidence.fixtures.length !== expected.length || evidence.fixtureHash !== hash(resolve(ROOT, 'workers/test/fixtures/dds-parity.json'))) return false;
-  if (!expected.every((fixture, index) => evidence.fixtures[index]?.id === fixture.id && evidence.fixtures[index]?.kind === fixture.kind)) return false;
+  if (!expected.every((fixture, index) => {
+    const item = evidence.fixtures[index];
+    const metrics = item?.remoteMetrics ?? item?.remote?.metrics ?? item?.remote?.solveResponse?.metrics;
+    return item?.id === fixture.id && item?.kind === fixture.kind && item.input && item.nativeBaseline !== undefined && item.remote?.ok === true && metrics
+      && !item.parityMismatch && !item.networkError && !item.protocolError && !item.error && ACTIVATION.test(item.remote?.activationId ?? '');
+  })) return false;
   const physical = journal.filter((entry) => entry.type === 'physical');
   const firstRandom = physical.findIndex((entry) => /^op\.\d{6}$/.test(entry.operationId));
   const fixtures = physical.filter((entry) => /^fixture\.\d{6}$/.test(entry.operationId));
-  return firstRandom > 0 && fixtures.length === expected.length && physical.slice(0, firstRandom).filter((entry) => /^fixture\.\d{6}$/.test(entry.operationId)).length === expected.length;
+  if (!(firstRandom > 0 && fixtures.length >= expected.length && physical.slice(0, firstRandom).filter((entry) => /^fixture\.\d{6}$/.test(entry.operationId)).length >= expected.length)) return false;
+  for (let index = 0; index < expected.length; index++) {
+    const id = `fixture.${String(index).padStart(6, '0')}`, indexes = physical.map((entry, physicalIndex) => entry.operationId === id ? physicalIndex : -1).filter((physicalIndex) => physicalIndex >= 0), records = indexes.map((physicalIndex) => physical[physicalIndex]);
+    if (!(records.length === 1 || records.length === 2) || records[0].replayed !== false || (records[1] && records[1].replayed !== true)) return false;
+    if (records.length === 2 && indexes[1] !== indexes[0] + 1) return false;
+  }
+  return true;
 }
 function validateJournal(journal) {
   if (!Array.isArray(journal) || journal.some((entry) => entry.type === 'failed')) return false;
@@ -87,14 +119,16 @@ export function evaluateRemoteSoak({ manifest, report, evidence, journal, deploy
   const allQueues = queues.length === COUNT - 220 && queues.every(finite);
   const observed = report?.observed;
   const results = [
-    ['source-hashes', manifest?.hashes?.randomGenerator === hash(resolve(ROOT, 'scripts/worker-dds-random-cases.mjs')) && manifest?.hashes?.fixtureCorpus === hash(resolve(ROOT, 'workers/test/fixtures/dds-parity.json'))],
+    ['source-hashes', manifest?.seed === SOAK_SEED && manifest?.randomGenerator === 'xorshift32' && manifest?.accountingSchemaVersion === ACCOUNTING_SCHEMA_VERSION && manifest?.journalSchemaVersion === JOURNAL_SCHEMA_VERSION
+      && Array.isArray(manifest?.shards) && manifest.shards.length === SHARDS && manifest.shards.every((shard, index) => shard?.shard === index && shard.startIndex === index * 2000 && shard.endIndex === index * 2000 + 1999)
+      && manifest?.hashes?.randomGenerator === hash(resolve(ROOT, 'scripts/worker-dds-random-cases.mjs')) && manifest?.hashes?.fixtureCorpus === hash(resolve(ROOT, 'workers/test/fixtures/dds-parity.json')) && manifest?.hashes?.simulator === hash(resolve(ROOT, 'scripts/simulate-worker-room-budget.mjs'))],
     ['corpus', report?.completedCursor === COUNT && validateCorpus({ evidence, manifest, journal })],
     ['fixture-first', validateFixtures({ evidence, journal })],
     ['journal', validateJournal(journal) && report?.terminalFailure === null],
-    ['parity', Array.isArray(evidence?.operations) && evidence.operations.every((op) => op.parityMismatch !== true && !op.networkError && !op.protocolError && !op.error && op.remote?.ok !== false)],
+    ['parity', Array.isArray(evidence?.operations) && evidence.operations.every((op) => op.parityMismatch !== true && !op.networkError && !op.protocolError && !op.error && op.remote?.ok === true)],
     ['candidate-diagnostics', Array.isArray(evidence?.candidateDifferences) && evidence.candidateDifferences.every((diagnostic) => evidence.operations?.find((op) => op.id === diagnostic.id && equal(op.candidateDifference, diagnostic)))],
     ['depths', Array.isArray(evidence?.coverage?.depths) && evidence.coverage.depths.length === 13 && evidence.coverage.depths.every((count) => Number.isSafeInteger(count) && count > 0)],
-    ['activation', activationForShard(report, journal)],
+    ['activation', activationForShard(report, evidence, journal)],
     ['deployment', validateDeployment({ deployment, evidence })],
     ['wasm-bundle', Number.isSafeInteger(deployment?.assets?.wasm?.bytes) && deployment.assets.wasm.bytes < WASM_LIMIT],
     ['heap', allHeap && Math.max(...heap) < HEAP_LIMIT],

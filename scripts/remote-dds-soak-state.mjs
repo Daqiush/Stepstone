@@ -32,6 +32,7 @@ function defaultPaths(root) {
   return {
     randomGeneratorFile: resolve(root, 'scripts/worker-dds-random-cases.mjs'),
     fixtureCorpusFile: resolve(root, 'workers/test/fixtures/dds-parity.json'),
+    simulatorFile: resolve(root, 'scripts/simulate-worker-room-budget.mjs'),
   };
 }
 
@@ -46,7 +47,7 @@ export function createRunManifest({ root = resolve(import.meta.dirname, '..'), r
     version: JOURNAL_SCHEMA_VERSION, runId,
     seed: SOAK_SEED,
     randomGenerator: 'xorshift32',
-    hashes: { randomGenerator: hashFile(paths.randomGeneratorFile), fixtureCorpus: hashFile(paths.fixtureCorpusFile) },
+    hashes: { randomGenerator: hashFile(paths.randomGeneratorFile), fixtureCorpus: hashFile(paths.fixtureCorpusFile), simulator: hashFile(paths.simulatorFile ?? defaults.simulatorFile) },
     shards: Array.from({ length: 11 }, (_, shard) => ({ shard, startIndex: shard * 2000, endIndex: shard * 2000 + 1999 })),
     accountingSchemaVersion: ACCOUNTING_SCHEMA_VERSION,
     journalSchemaVersion: JOURNAL_SCHEMA_VERSION,
