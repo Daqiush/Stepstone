@@ -141,7 +141,7 @@ test('temporary Worker teardown uses only a generated identity, closes the keyed
     const temporaryWorkerName = 'ss-dds-soak-33333333-3333-4333-8333-333333333333';
     const workersDevUrl = 'https://ss-dds-soak-33333333-3333-4333-8333-333333333333.example.workers.dev';
     await mod.teardownTemporaryWorkers({ root, accountId: 'acct', temporaryWorkerName, workersDevUrl, remoteTestKey: 'a'.repeat(43), apiToken: 'token', randomUUID: () => '44444444-4444-4444-8444-444444444444',
-      execFile: (command, args) => { calls.push({ command, args }); return args[0] === 'deploy' ? JSON.stringify({ version_id: 'disabled-v1' }) : ''; },
+      execFile: (command, args, options) => { calls.push({ command, args, options }); return args[0] === 'deploy' ? 'deployed' : ''; },
       fetchImpl: async (url, options = {}) => {
         calls.push({ url, options });
         if (url === `${workersDevUrl}/__dds/metrics`) return { ok: false, status: 404, json: async () => ({}) };
@@ -150,6 +150,12 @@ test('temporary Worker teardown uses only a generated identity, closes the keyed
       },
     });
     assert.ok(calls.find((call) => call.args?.includes('DDS_REMOTE_TEST:false')));
+    const closeDeploy = calls.find((call) => call.args?.[0] === 'deploy');
+    assert.equal(closeDeploy.args.includes('--json'), false);
+    if (process.platform === 'win32') {
+      assert.equal(closeDeploy.command, 'wrangler.cmd');
+      assert.equal(closeDeploy.options.shell, true);
+    }
     const closureProbe = calls.find((call) => call.url === `${workersDevUrl}/__dds/metrics`);
     assert.equal(closureProbe.options.method, 'POST');
     assert.equal(closureProbe.options.headers['x-dds-test-key'], 'a'.repeat(43));

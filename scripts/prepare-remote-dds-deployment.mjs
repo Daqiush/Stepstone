@@ -104,7 +104,7 @@ export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImp
     return { ...verified, workersDevUrl, temporaryWorkerName };
   } finally { rmSync(configDir, { recursive: true, force: true }); }
 }
-export async function teardownTemporaryWorkers({ execFile = execFileSync, fetchImpl = fetch, wrangler = 'wrangler', root = resolve(import.meta.dirname, '..'), accountId, temporaryWorkerName, workersDevUrl, remoteTestKey, apiToken, randomUUID = systemRandomUUID }) {
+export async function teardownTemporaryWorkers({ execFile = execFileSync, fetchImpl = fetch, wrangler = process.platform === 'win32' ? 'wrangler.cmd' : 'wrangler', root = resolve(import.meta.dirname, '..'), accountId, temporaryWorkerName, workersDevUrl, remoteTestKey, apiToken, randomUUID = systemRandomUUID }) {
   if (!accountId || !temporaryWorkerName || !workersDevUrl || !apiToken || !remoteTestKey) throw new Error('Temporary Worker teardown requires account, generated identity, workers.dev URL, token, and remote test key');
   const scriptName = assertTemporaryWorkerName(temporaryWorkerName);
   const endpoint = assertWorkersDevUrl(workersDevUrl);
@@ -115,7 +115,8 @@ export async function teardownTemporaryWorkers({ execFile = execFileSync, fetchI
   try {
     writeFileSync(configPath, `${JSON.stringify(createTemporaryWorkersConfig({ root, temporaryWorkerName: scriptName }))}\n`, 'utf8');
     // Close the authenticated harness before deleting the temporary endpoint.
-    execFile(wrangler, ['deploy', '--json', '--config', configPath, '--var', 'DDS_REMOTE_TEST:false'], { encoding: 'utf8', cwd: root });
+    const childOptions = { encoding: 'utf8', cwd: root, ...(process.platform === 'win32' ? { shell: true } : {}) };
+    execFile(wrangler, ['deploy', '--config', configPath, '--var', 'DDS_REMOTE_TEST:false'], childOptions);
     const closeRoute = '/__dds/metrics';
     const closeBody = '{}';
     const closeProbe = await fetchImpl(`${endpoint}${closeRoute}`, { method: 'POST', body: closeBody, headers: {
