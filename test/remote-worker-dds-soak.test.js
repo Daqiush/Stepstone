@@ -38,3 +38,19 @@ test('candidate diagnostics are derived only from solve operations and omit stal
     { id: 'solve-2', kind: 'solve', candidateDifference: null },
   ]), [{ id: 'solve-1', baseline: ['H2'], worker: ['H3'] }]);
 });
+
+test('recovery restores journaled preflight evidence when the preflight checkpoint write was interrupted', async () => {
+  const state = await import('../scripts/remote-dds-soak-state.mjs');
+  const runner = await import('../scripts/remote-worker-dds-soak.mjs');
+  const dir = mkdtempSync(join(tmpdir(), 'remote-dds-soak-preflight-'));
+  try {
+    const run = state.createSoakState({ dir, root: ROOT, runId: 'soak-preflight', requestForIndex: request });
+    const preflight = { activationId: activation, endpointBuildId: 'build-A', endpointWorkerVersionId: 'version-A', remote: { ok: true } };
+    run.recordAuxiliaryIntent({ operationId: 'preflight.metrics', route: '/__dds/metrics', body: '{}' });
+    run.recordAuxiliaryResponse({ operationId: 'preflight.metrics', route: '/__dds/metrics', response: { ok: true }, evidence: preflight, evidenceKind: 'preflight' });
+    const recovered = state.recoverSoakState({ dir, root: ROOT, requestForIndex: request });
+    const evidence = runner.mergeRecoveredEvidence({ checkpoint: { operations: [], fixtures: [], candidateDifferences: [] },
+      durableOperations: recovered.evidence, durableFixtures: recovered.fixtureEvidence, durablePreflight: recovered.preflightEvidence });
+    assert.deepEqual(evidence.preflight, preflight);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

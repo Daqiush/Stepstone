@@ -59,8 +59,9 @@ export function deriveCandidateDifferences(operations) {
   }
   return diagnostics;
 }
-export function mergeRecoveredEvidence({ checkpoint, durableOperations, durableFixtures }) {
-  if (!checkpoint || typeof checkpoint !== 'object' || !Array.isArray(durableOperations) || !Array.isArray(durableFixtures)) {
+export function mergeRecoveredEvidence({ checkpoint, durableOperations, durableFixtures, durablePreflight = null }) {
+  if (!checkpoint || typeof checkpoint !== 'object' || !Array.isArray(durableOperations) || !Array.isArray(durableFixtures)
+      || (durablePreflight !== null && (typeof durablePreflight !== 'object' || Array.isArray(durablePreflight)))) {
     throw new Error('Recovery requires checkpoint and durable evidence arrays');
   }
   const unique = (items, label) => {
@@ -73,7 +74,8 @@ export function mergeRecoveredEvidence({ checkpoint, durableOperations, durableF
   };
   const operations = unique(durableOperations, 'operation').sort((left, right) => left.index - right.index);
   const fixtures = unique(durableFixtures, 'fixture');
-  return { ...checkpoint, operations, fixtures, candidateDifferences: deriveCandidateDifferences(operations) };
+  return { ...checkpoint, ...(durablePreflight === null ? {} : { preflight: durablePreflight }),
+    operations, fixtures, candidateDifferences: deriveCandidateDifferences(operations) };
 }
 // The completion projection is built from the immutable workload identity, not
 // a mutable counter. A recovered execution may have an original request and a
@@ -202,7 +204,7 @@ async function runCli() {
   if (resume) {
     evidence = mergeRecoveredEvidence({ checkpoint: evidence,
       durableOperations: state.evidence.filter((operation) => Number.isSafeInteger(operation?.index)),
-      durableFixtures: state.fixtureEvidence });
+      durableFixtures: state.fixtureEvidence, durablePreflight: state.preflightEvidence });
     writeReportCheckpoint(resolve(runDir, 'evidence.json'), evidence);
   }
   if (!resume) writeReportCheckpoint(resolve(runDir, 'evidence.json'), evidence);

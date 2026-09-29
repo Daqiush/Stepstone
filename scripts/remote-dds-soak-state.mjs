@@ -163,7 +163,7 @@ function validateIntent(record, cursor, requestForIndex, runId) {
 }
 
 function replayJournal(records, requestForIndex, runId) {
-  let cursor = 0, pending = null, terminalFailure = null, activationIds = {}, observed = zeroAccounting(); const evidence = [], fixtureEvidence = [], physicalOperations = [], perShard = new Map(), auxiliaryIntents = new Map();
+  let cursor = 0, pending = null, terminalFailure = null, activationIds = {}, observed = zeroAccounting(); const evidence = [], fixtureEvidence = [], physicalOperations = [], perShard = new Map(), auxiliaryIntents = new Map(); let preflightEvidence = null;
   const operationIds = new Set();
   for (const record of records) {
     if (record.type === 'intent') {
@@ -190,6 +190,10 @@ function replayJournal(records, requestForIndex, runId) {
       physicalOperations.push(record);
       if (record.evidence !== undefined) {
         if (record.evidenceKind === 'fixture') fixtureEvidence.push(record.evidence);
+        else if (record.evidenceKind === 'preflight') {
+          if (preflightEvidence !== null) throw new Error('Journal contains duplicate preflight evidence');
+          preflightEvidence = record.evidence;
+        }
         else evidence.push(record.evidence);
       }
     } else if (record.type === 'completion') {
@@ -204,7 +208,7 @@ function replayJournal(records, requestForIndex, runId) {
       terminalFailure = record; pending = null;
     } else throw new Error('Journal record type is invalid');
   }
-  return { cursor, pending, terminalFailure, activationIds, operationIds, observed, evidence, fixtureEvidence, physicalOperations, auxiliaryIntents };
+  return { cursor, pending, terminalFailure, activationIds, operationIds, observed, evidence, fixtureEvidence, preflightEvidence, physicalOperations, auxiliaryIntents };
 }
 
 function makeReport(snapshot) {
@@ -322,5 +326,6 @@ export function recoverSoakState({ dir, root, requestForIndex, projection = proj
     : state.pending ? { kind: 'replay-pending', intent: state.pending } : { kind: 'ready' };
   api.evidence = state.evidence;
   api.fixtureEvidence = state.fixtureEvidence;
+  api.preflightEvidence = state.preflightEvidence;
   return api;
 }
