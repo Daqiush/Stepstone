@@ -263,6 +263,8 @@ test('remote operation replays a persisted table result without new queued work'
     assert.deepEqual(second.body.operationResult, first.body.operationResult);
     assert.equal(first.body.replayed, false);
     assert.equal(second.body.replayed, true);
+    assert.match(first.body.accountingActivationId, /^[0-9a-f-]{36}$/i);
+    assert.equal(second.body.accountingActivationId, first.body.accountingActivationId);
     assert.match(first.body.operationResult.activationId, /^[0-9a-f-]{36}$/i);
     assert.equal(second.body.operationResult.activationId, first.body.operationResult.activationId);
     assert.deepEqual(first.body.accounting, {

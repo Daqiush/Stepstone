@@ -32,8 +32,8 @@ test('creates the pinned deterministic manifest', async () => {
   assert.equal(manifest.randomGenerator, 'xorshift32');
   assert.equal(manifest.shards.length, 11);
   assert.deepEqual(manifest.shards, Array.from({ length: 11 }, (_, shard) => ({ shard, startIndex: shard * 2000, endIndex: shard * 2000 + 1999 })));
-  assert.equal(manifest.accountingSchemaVersion, 6);
-  assert.equal(manifest.journalSchemaVersion, 6);
+  assert.equal(manifest.accountingSchemaVersion, 7);
+  assert.equal(manifest.journalSchemaVersion, 7);
   assert.match(manifest.hashes.randomGenerator, /^[a-f0-9]{64}$/);
   assert.match(manifest.hashes.fixtureCorpus, /^[a-f0-9]{64}$/);
   assert.match(manifest.hashes.simulator, /^[a-f0-9]{64}$/);
@@ -167,6 +167,41 @@ test('records a fresh activation segment when Cloudflare restarts one shard', as
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('validates remote accounting independently for each Durable Object activation', async () => {
+  state ??= await import('../scripts/remote-dds-soak-state.mjs');
+  const dir = tempRun();
+  const snapshot = { workerInbound: 1, doFetchArrivals: 1, queuedDoCommands: 1, sqliteRows: { reads: 1, writes: 1 } };
+  try {
+    const run = state.createSoakState({ dir, root: ROOT, requestForIndex: request });
+    run.recordIntent({ index: 0, operationId: 'op-0', ...request(0) });
+    run.recordCompletion({ operationId: 'op-0', response: { ok: true }, activationId: activation(1),
+      accountingActivationId: activation(1), remoteAccounting: snapshot });
+    run.recordIntent({ index: 1, operationId: 'op-1', ...request(1) });
+    run.recordCompletion({ operationId: 'op-1', response: { ok: true }, activationId: activation(2),
+      accountingActivationId: activation(2), remoteAccounting: snapshot });
+    assert.deepEqual(run.report.observed, { workerInbound: 2, doFetchArrivals: 2, queuedDoCommands: 2, sqliteRows: { reads: 2, writes: 2 } });
+    const physical = readFileSync(join(dir, 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).filter((entry) => entry.type === 'physical');
+    assert.deepEqual(physical.map((entry) => entry.accountingActivationId), [activation(1), activation(2)]);
+    assert.doesNotThrow(() => state.recoverSoakState({ dir, root: ROOT, requestForIndex: request }));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('validates a replay snapshot against its current activation without charging recovered execution to that activation', async () => {
+  state ??= await import('../scripts/remote-dds-soak-state.mjs');
+  const dir = tempRun();
+  const original = { workerInbound: 1, doFetchArrivals: 1, queuedDoCommands: 1, sqliteRows: { reads: 1, writes: 1 } };
+  try {
+    const run = state.createSoakState({ dir, root: ROOT, requestForIndex: request });
+    run.recordIntent({ index: 0, operationId: 'op-0', ...request(0) });
+    run.completeReplay({ operationId: 'op-0', response: { ok: true, activationId: activation(1), executionAccounting: original },
+      activationId: activation(1), accountingActivationId: activation(2), replayed: true,
+      remoteAccounting: { workerInbound: 1, doFetchArrivals: 1, queuedDoCommands: 0, sqliteRows: { reads: 1, writes: 0 } } });
+    assert.deepEqual(run.report.observed, { workerInbound: 2, doFetchArrivals: 2, queuedDoCommands: 1, sqliteRows: { reads: 2, writes: 1 } });
+    const physical = readFileSync(join(dir, 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse).filter((entry) => entry.type === 'physical');
+    assert.deepEqual(physical.map((entry) => entry.accountingActivationId), [activation(1), activation(2)]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('derives direct-solve accounting from durable physical responses rather than cumulative snapshots', async () => {
   state ??= await import('../scripts/remote-dds-soak-state.mjs');
   const dir = tempRun();
@@ -293,7 +328,9 @@ test('fails closed when independently observed remote accounting disagrees with 
     const run = state.createSoakState({ dir, root: ROOT, requestForIndex: request });
     run.recordAuxiliaryIntent({ operationId: 'preflight.metrics', route: '/__dds/metrics', body: '{}' });
     assert.throws(() => run.recordAuxiliaryResponse({ operationId: 'preflight.metrics', route: '/__dds/metrics', replayed: false,
-      response: { ok: true }, remoteAccounting: { workerInbound: 2, doFetchArrivals: 1, queuedDoCommands: 0, sqliteRows: { reads: 1, writes: 1 } } }), /remote accounting snapshot/i);
+      response: { ok: true, activationId: activation(1) }, accountingActivationId: activation(1),
+      remoteAccounting: { workerInbound: 2, doFetchArrivals: 1, queuedDoCommands: 0, sqliteRows: { reads: 1, writes: 1 } } }), /remote accounting snapshot/i);
+    assert.deepEqual(run.report.observed, { workerInbound: 0, doFetchArrivals: 0, queuedDoCommands: 0, sqliteRows: { reads: 0, writes: 0 } });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -304,13 +341,14 @@ test('recovery reconstructs an executed-but-locally-lost request from persisted 
     const run = state.createSoakState({ dir, root: ROOT, requestForIndex: request });
     const auxiliaryEvidence = { id: 'fixture-A', nativeBaseline: { score: 1 }, remote: { ok: true } };
     run.recordAuxiliaryIntent({ operationId: 'fixture.000000', route: '/__dds/table', body: '{}' });
-    run.recordAuxiliaryResponse({ operationId: 'fixture.000000', route: '/__dds/table', replayed: false, response: { ok: true }, evidence: auxiliaryEvidence, evidenceKind: 'fixture',
+    run.recordAuxiliaryResponse({ operationId: 'fixture.000000', route: '/__dds/table', replayed: false,
+      response: { ok: true, activationId: activation(1) }, accountingActivationId: activation(1), evidence: auxiliaryEvidence, evidenceKind: 'fixture',
       remoteAccounting: { workerInbound: 1, doFetchArrivals: 1, queuedDoCommands: 1, sqliteRows: { reads: 1, writes: 1 } } });
     run.recordIntent({ index: 0, operationId: 'op-0', ...request(0) });
     const resumed = state.recoverSoakState({ dir, root: ROOT, requestForIndex: request });
     const original = { workerInbound: 1, doFetchArrivals: 1, queuedDoCommands: 1, sqliteRows: { reads: 1, writes: 1 } };
     resumed.completeReplay({ operationId: 'op-0', activationId: activation(1), replayed: true,
-      response: { ok: true, executionAccounting: original },
+      response: { ok: true, activationId: activation(1), executionAccounting: original }, accountingActivationId: activation(1),
       remoteAccounting: { workerInbound: 3, doFetchArrivals: 3, queuedDoCommands: 2, sqliteRows: { reads: 3, writes: 2 } },
       evidence: { id: 'op-0', remote: { ok: true } } });
     const recovered = state.recoverSoakState({ dir, root: ROOT, requestForIndex: request });
@@ -334,10 +372,10 @@ test('recovery reconstructs remote-first preflight and fixture replays before at
     run.recordAuxiliaryIntent({ operationId: 'fixture.000000', route: '/__dds/table', body: '{}' });
     run = state.recoverSoakState({ dir, root: ROOT, requestForIndex: request });
     run.recordAuxiliaryResponse({ operationId: 'preflight.metrics', route: '/__dds/metrics', replayed: true,
-      response: { ok: true, executionAccounting: metricsExecution },
+      response: { ok: true, activationId: activation(1), executionAccounting: metricsExecution }, accountingActivationId: activation(1),
       remoteAccounting: { workerInbound: 2, doFetchArrivals: 2, queuedDoCommands: 0, sqliteRows: { reads: 2, writes: 1 } } });
     run.recordAuxiliaryResponse({ operationId: 'fixture.000000', route: '/__dds/table', replayed: true,
-      response: { ok: true, executionAccounting: tableExecution }, evidence: fixtureEvidence, evidenceKind: 'fixture',
+      response: { ok: true, activationId: activation(1), executionAccounting: tableExecution }, accountingActivationId: activation(1), evidence: fixtureEvidence, evidenceKind: 'fixture',
       remoteAccounting: { workerInbound: 4, doFetchArrivals: 4, queuedDoCommands: 1, sqliteRows: { reads: 4, writes: 2 } } });
     const resumed = state.recoverSoakState({ dir, root: ROOT, requestForIndex: request });
     assert.deepEqual(resumed.report.observed, { workerInbound: 4, doFetchArrivals: 4, queuedDoCommands: 1, sqliteRows: { reads: 4, writes: 2 } });

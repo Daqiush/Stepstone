@@ -37,7 +37,7 @@ export function assertEndpointVersion(payload, workerVersionId) {
   return payload;
 }
 export function buildPreflightEvidence(remote) {
-  return { accounting: remote.accounting, remote: remote.operationResult, activationId: remote.operationResult.activationId, replayed: remote.replayed,
+  return { accounting: remote.accounting, accountingActivationId: remote.accountingActivationId, remote: remote.operationResult, activationId: remote.operationResult.activationId, replayed: remote.replayed,
     endpointBuildId: remote.operationResult.buildId, endpointWorkerVersionId: remote.operationResult.workerVersionId };
 }
 export function reconcileObservedLedger(observed, physicalOperations) {
@@ -164,8 +164,10 @@ async function runFixtureChecks({ endpoint, key, runId, fixtures, buildId, evide
     if (JSON.stringify(normalizeDdsResult(kind, worker)) !== JSON.stringify(normalizeDdsResult(kind, native))) throw new Error(`Fixture native parity mismatch: ${item.id}`);
     if (JSON.stringify(normalizeDdsResult(kind, native)) !== JSON.stringify(normalizeDdsResult(kind, expected))) throw new Error(`Fixture corpus drift: ${item.id}`);
     if (index === 0 && remote.operationResult.buildId !== undefined) assertEndpointBuild(remote.operationResult, buildId);
-    const fixtureEvidence = { id: item.id, route, input: JSON.parse(body), nativeBaseline: native, remote: remote.operationResult, accounting: remote.accounting, replayed: remote.replayed };
+    const fixtureEvidence = { id: item.id, route, input: JSON.parse(body), nativeBaseline: native, remote: remote.operationResult,
+      accounting: remote.accounting, accountingActivationId: remote.accountingActivationId, replayed: remote.replayed };
     state.recordAuxiliaryResponse({ operationId, route, replayed: remote.replayed, response: remote.operationResult,
+      accountingActivationId: remote.accountingActivationId,
       evidence: fixtureEvidence, evidenceKind: 'fixture', remoteAccounting: remote.accounting, shard: 0 });
     evidence.fixtures.push(fixtureEvidence);
   }
@@ -218,7 +220,8 @@ async function runCli() {
     assertEndpointVersion(preflight.operationResult, deployment.workerVersionId);
     const preflightEvidence = buildPreflightEvidence(preflight);
     state.recordAuxiliaryResponse({ operationId: 'preflight.metrics', route: '/__dds/metrics', replayed: preflight.replayed,
-      response: preflight.operationResult, evidence: preflightEvidence, evidenceKind: 'preflight', remoteAccounting: preflight.accounting, shard: 0 });
+      response: preflight.operationResult, accountingActivationId: preflight.accountingActivationId,
+      evidence: preflightEvidence, evidenceKind: 'preflight', remoteAccounting: preflight.accounting, shard: 0 });
     evidence.preflight = preflightEvidence;
     writeReportCheckpoint(resolve(runDir, 'evidence.json'), evidence);
   }
@@ -232,8 +235,9 @@ async function runCli() {
       remoteMetrics: remote.operationResult.metrics ?? remote.operationResult.solveResponse?.metrics ?? null,
       heapBytes: remote.operationResult.metrics?.heapBytes ?? remote.operationResult.solveResponse?.metrics?.heapBytes ?? null,
       wasmElapsedMs: remote.operationResult.metrics?.solveMs ?? remote.operationResult.solveResponse?.metrics?.solveMs ?? null,
-      orderedPingDelayMs: remote.operationResult.queueDelayMs ?? null, ...checked };
+      orderedPingDelayMs: remote.operationResult.queueDelayMs ?? null, accountingActivationId: remote.accountingActivationId, ...checked };
     state.completeReplay({ operationId: pending.operationId, response: remote.operationResult, activationId: remote.operationResult.activationId,
+      accountingActivationId: remote.accountingActivationId,
       replayed: remote.replayed, evidence: replayEvidence, remoteAccounting: remote.accounting });
     evidence.operations.push(replayEvidence);
     evidence.candidateDifferences = deriveCandidateDifferences(evidence.operations);
@@ -250,8 +254,10 @@ async function runCli() {
         remote: remote.operationResult, remoteMetrics: remote.operationResult.metrics ?? remote.operationResult.solveResponse?.metrics ?? null,
         heapBytes: remote.operationResult.metrics?.heapBytes ?? remote.operationResult.solveResponse?.metrics?.heapBytes ?? null,
         wasmElapsedMs: remote.operationResult.metrics?.solveMs ?? remote.operationResult.solveResponse?.metrics?.solveMs ?? null,
-        orderedPingDelayMs: remote.operationResult.queueDelayMs ?? null, activationId: remote.operationResult.activationId, accounting: remote.accounting, ...checked };
+        orderedPingDelayMs: remote.operationResult.queueDelayMs ?? null, activationId: remote.operationResult.activationId,
+        accounting: remote.accounting, accountingActivationId: remote.accountingActivationId, ...checked };
       state.recordCompletion({ operationId, response: remote.operationResult, activationId: remote.operationResult.activationId,
+        accountingActivationId: remote.accountingActivationId,
         replayed: remote.replayed, evidence: operationEvidence, remoteAccounting: remote.accounting });
       evidence.operations.push(operationEvidence);
       evidence.candidateDifferences = deriveCandidateDifferences(evidence.operations);

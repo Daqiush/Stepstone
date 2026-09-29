@@ -218,9 +218,9 @@ test('runner fails closed when observed accounting differs from its durable phys
 
 test('runner persists the endpoint build and verified Worker version from its preflight response', async () => {
   const mod = await runner();
-  const evidence = mod.buildPreflightEvidence({ accounting: { workerInbound: 1 }, replayed: false,
+  const evidence = mod.buildPreflightEvidence({ accounting: { workerInbound: 1 }, accountingActivationId: 'accounting-activation', replayed: false,
     operationResult: { buildId: 'build-bound', workerVersionId: 'version-bound', activationId: 'activation' } });
-  assert.deepEqual(evidence, { accounting: { workerInbound: 1 }, remote: { buildId: 'build-bound', workerVersionId: 'version-bound', activationId: 'activation' }, activationId: 'activation', replayed: false,
+  assert.deepEqual(evidence, { accounting: { workerInbound: 1 }, accountingActivationId: 'accounting-activation', remote: { buildId: 'build-bound', workerVersionId: 'version-bound', activationId: 'activation' }, activationId: 'activation', replayed: false,
     endpointBuildId: 'build-bound', endpointWorkerVersionId: 'version-bound' });
 });
 

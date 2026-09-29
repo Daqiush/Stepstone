@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ACCOUNTING_SCHEMA_VERSION, JOURNAL_SCHEMA_VERSION, SOAK_SEED, canonicalJson, canonicalRequest, ledgerAccounting, requestHash, sha256Utf8 } from './remote-dds-soak-state.mjs';
+import { ACCOUNTING_SCHEMA_VERSION, JOURNAL_SCHEMA_VERSION, SOAK_SEED, canonicalJson, canonicalRequest, ledgerAccounting, requestHash, sha256Utf8, validateRemoteAccountingSnapshots } from './remote-dds-soak-state.mjs';
 import { assertDeploymentManifest } from './prepare-remote-dds-deployment.mjs';
 import { createRandomCaseGenerator } from './worker-dds-random-cases.mjs';
 import { compareDdsResults, validateWorkerSolveCandidates } from './worker-dds-benchmark-validation.mjs';
@@ -154,7 +154,7 @@ function validateFixtures({ evidence, journal }) {
 function validateJournal(journal) {
   if (!Array.isArray(journal) || journal.some((entry) => entry.type === 'failed')) return false;
   const physical = journal.filter((entry) => entry.type === 'physical');
-  try { ledgerAccounting(physical); return physical.length > COUNT; } catch { return false; }
+  try { ledgerAccounting(physical); validateRemoteAccountingSnapshots(physical, { requireSnapshots: true }); return physical.length > COUNT; } catch { return false; }
 }
 function validateDeployment({ deployment, evidence }) {
   if (!deployment || evidence?.buildId !== deployment.buildId || evidence?.workerVersionId !== deployment.workerVersionId

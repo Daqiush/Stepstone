@@ -14,6 +14,22 @@ const fixturePath = join(ROOT, 'workers/test/fixtures/dds-parity.json');
 const hashFile = (path) => createHash('sha256').update(readFileSync(path)).digest('hex');
 const activation = (shard) => `00000000-0000-4000-8000-${String(shard).padStart(12, '0')}`;
 
+function annotateRemoteAccounting(physical) {
+  const totals = new Map();
+  for (const entry of physical) {
+    entry.accountingActivationId ??= entry.response.activationId;
+    const key = `${entry.shard}:${entry.accountingActivationId}`;
+    const total = totals.get(key) ?? { workerInbound: 0, doFetchArrivals: 0, queuedDoCommands: 0, sqliteRows: { reads: 0, writes: 0 } };
+    total.workerInbound += 1;
+    total.doFetchArrivals += 1;
+    total.queuedDoCommands += entry.replayed ? 0 : entry.route === '/__dds/ordered-probe' ? 2 : entry.route === '/__dds/table' || entry.route === '/__dds/solve' ? 1 : 0;
+    total.sqliteRows.reads += 1;
+    total.sqliteRows.writes += entry.replayed ? 0 : 1;
+    entry.remoteAccounting = structuredClone(total);
+    totals.set(key, total);
+  }
+}
+
 async function validRun() {
   const [{ createRunManifest, canonicalJson, canonicalRequest, requestHash, sha256Utf8 }, { createDeploymentManifest }, { createRandomCaseGenerator }] = await Promise.all([
     import('../scripts/remote-dds-soak-state.mjs'),
@@ -65,6 +81,7 @@ async function validRun() {
     const completion = { type: 'completion', index, operationId, activationId: activation(shard), responseHash: request.responseHash };
     physical.push(request); journal.push(intent, request, completion);
   }
+  annotateRemoteAccounting(physical);
   const fixtureTables = fixtures.filter((item) => item.kind === 'table').length;
   const fixtureSolves = fixtures.length - fixtureTables;
   const observed = { workerInbound: physical.length, doFetchArrivals: physical.length,
@@ -131,6 +148,10 @@ test('activation gate accepts a documented Cloudflare restart inside a shard', a
     { activationId: activation(0), startIndex: 0, endIndex: 1125 },
     { activationId: replacement, startIndex: 1126, endIndex: 1999 },
   ];
+  for (const physical of run.journal.filter((entry) => entry.type === 'physical' && /^op\.\d{6}$/.test(entry.operationId))) {
+    physical.accountingActivationId = physical.response.activationId;
+  }
+  annotateRemoteAccounting(run.journal.filter((entry) => entry.type === 'physical'));
   const result = check(run);
   assert.match(result.stdout, /PASS activation/);
   assert.doesNotMatch(result.stdout, /FAIL activation/);
@@ -140,6 +161,7 @@ test('fixture validation permits one immediate, fully accounted replay', async (
   const run = await validRun();
   const at = run.journal.findIndex((entry) => entry.type === 'physical' && entry.operationId === 'fixture.000000');
   run.journal.splice(at + 1, 0, { ...run.journal[at], replayed: true });
+  annotateRemoteAccounting(run.journal.filter((entry) => entry.type === 'physical'));
   run.report.observed.workerInbound++; run.report.observed.doFetchArrivals++; run.report.observed.sqliteRows.reads++;
   const result = check(run);
   assert.match(result.stdout, /PASS fixture-first/);
@@ -160,6 +182,8 @@ for (const [name, mutate] of [
   ['fixture-first', (r) => { r.evidence.fixtures[0].input = { detached: true }; }],
   ['fixture-first', (r) => { r.evidence.fixtures[0].remote.result = [[0]]; }],
   ['journal', (r) => { r.journal.push({ type: 'failed', operationId: 'op.021999' }); }],
+  ['journal', (r) => { r.journal.find((x) => x.type === 'physical' && x.operationId === 'op.000001').remoteAccounting.workerInbound++; }],
+  ['journal', (r) => { r.journal.find((x) => x.type === 'physical' && x.operationId === 'op.000001').accountingActivationId = activation(99); }],
   ['parity', (r) => { r.evidence.operations[0].parityMismatch = true; }],
   ['candidate-diagnostics', (r) => { r.evidence.candidateDifferences.push({ id: 'random-1', why: 'unreconciled' }); }],
   ['candidate-diagnostics', (r) => {
