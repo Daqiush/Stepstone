@@ -162,8 +162,17 @@ function validateIntent(record, cursor, requestForIndex, runId) {
   }
 }
 
+function noteActivation(state, shard, activationId, index) {
+  if (typeof activationId !== 'string' || !ACTIVATION_ID.test(activationId)) throw new Error('Activation ID missing or invalid');
+  const segments = state.activationSegments[shard] ??= [];
+  const last = segments.at(-1);
+  if (last?.activationId === activationId) last.endIndex = index;
+  else segments.push({ activationId, startIndex: index, endIndex: index });
+  state.activationIds[shard] = activationId;
+}
+
 function replayJournal(records, requestForIndex, runId) {
-  let cursor = 0, pending = null, terminalFailure = null, activationIds = {}, observed = zeroAccounting(); const evidence = [], fixtureEvidence = [], physicalOperations = [], perShard = new Map(), auxiliaryIntents = new Map(); let preflightEvidence = null;
+  let cursor = 0, pending = null, terminalFailure = null, activationIds = {}, activationSegments = {}, observed = zeroAccounting(); const evidence = [], fixtureEvidence = [], physicalOperations = [], perShard = new Map(), auxiliaryIntents = new Map(); let preflightEvidence = null;
   const operationIds = new Set();
   for (const record of records) {
     if (record.type === 'intent') {
@@ -199,8 +208,7 @@ function replayJournal(records, requestForIndex, runId) {
     } else if (record.type === 'completion') {
       if (!pending || record.operationId !== pending.operationId || record.index !== pending.index || !/^[a-f0-9]{64}$/.test(record.responseHash ?? '')) throw new Error('Journal completion is invalid or duplicate');
       const shard = Math.floor(pending.index / 2000);
-      if (typeof record.activationId !== 'string' || !ACTIVATION_ID.test(record.activationId) || (activationIds[shard] && activationIds[shard] !== record.activationId)) throw new Error('Activation ID missing, invalid, or changed inside a shard');
-      activationIds[shard] = record.activationId;
+      noteActivation({ activationIds, activationSegments }, shard, record.activationId, record.index);
       if (record.evidence !== undefined) evidence.push(record.evidence);
       cursor += 1; pending = null;
     } else if (record.type === 'failed') {
@@ -208,11 +216,11 @@ function replayJournal(records, requestForIndex, runId) {
       terminalFailure = record; pending = null;
     } else throw new Error('Journal record type is invalid');
   }
-  return { cursor, pending, terminalFailure, activationIds, operationIds, observed, evidence, fixtureEvidence, preflightEvidence, physicalOperations, auxiliaryIntents };
+  return { cursor, pending, terminalFailure, activationIds, activationSegments, operationIds, observed, evidence, fixtureEvidence, preflightEvidence, physicalOperations, auxiliaryIntents };
 }
 
 function makeReport(snapshot) {
-  return { version: 1, completedCursor: snapshot.cursor, observed: snapshot.observed, activationIds: snapshot.activationIds, terminalFailure: snapshot.terminalFailure ?? null };
+  return { version: 1, completedCursor: snapshot.cursor, observed: snapshot.observed, activationIds: snapshot.activationIds, activationSegments: snapshot.activationSegments, terminalFailure: snapshot.terminalFailure ?? null };
 }
 
 export function createSoakState({ dir, root, requestForIndex, projection = projectAccounting(), runId = 'unbound-run' }) {
@@ -222,7 +230,7 @@ export function createSoakState({ dir, root, requestForIndex, projection = proje
   const manifest = createRunManifest({ root, runId });
   if (existsSync(file(dir, MANIFEST))) throw new Error('Soak state already exists; use recoverSoakState');
   writeReportCheckpoint(file(dir, MANIFEST), manifest);
-  const state = { cursor: 0, pending: null, terminalFailure: null, activationIds: {}, operationIds: new Set(), observed: zeroAccounting(), physicalOperations: [], auxiliaryIntents: new Map() };
+  const state = { cursor: 0, pending: null, terminalFailure: null, activationIds: {}, activationSegments: {}, operationIds: new Set(), observed: zeroAccounting(), physicalOperations: [], auxiliaryIntents: new Map() };
   const api = buildStateApi({ dir, requestForIndex, manifest, state, projection });
   writeReportCheckpoint(file(dir, REPORT), api.report);
   return api;
@@ -255,7 +263,7 @@ function buildStateApi({ dir, requestForIndex, manifest, state, projection }) {
   const finish = ({ operationId, response, activationId, replayed = false, evidence, remoteAccounting }) => {
     requirePending(operationId);
     const shard = Math.floor(state.pending.index / 2000);
-    if (typeof activationId !== 'string' || !ACTIVATION_ID.test(activationId) || (state.activationIds[shard] && state.activationIds[shard] !== activationId)) throw new Error('Activation ID missing, invalid, or changed after replay');
+    if (typeof activationId !== 'string' || !ACTIVATION_ID.test(activationId)) throw new Error('Activation ID missing or invalid after replay');
     const responseHash = sha256Utf8(canonicalJson(response));
     const previousPhysical = state.physicalOperations.some((record) => record.operationId === operationId);
     if (replayed && !previousPhysical) {
@@ -263,7 +271,8 @@ function buildStateApi({ dir, requestForIndex, manifest, state, projection }) {
     }
     recordPhysical({ operationId, route: state.pending.route, replayed, response, shard, remoteAccounting, evidenceHash: evidence === undefined ? undefined : sha256Utf8(canonicalJson(evidence)) });
     appendDurable(file(dir, JOURNAL), { type: 'completion', index: state.pending.index, operationId, responseHash, activationId, evidence });
-    state.cursor += 1; state.pending = null; state.activationIds[shard] = activationId;
+    noteActivation(state, shard, activationId, state.pending.index);
+    state.cursor += 1; state.pending = null;
     saveReport();
   };
   const api = {

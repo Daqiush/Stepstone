@@ -9,7 +9,7 @@ import { writeReportCheckpoint } from './worker-dds-checkpoint.mjs';
 
 export const DEPLOYMENT_MANIFEST_VERSION = 1;
 export const WASM_PATH = 'workers/vendor/bridge-dds/dds-worker.wasm';
-export const TEMPORARY_WORKER_PREFIX = 'stepstone-dds-soak-';
+export const TEMPORARY_WORKER_PREFIX = 'ss-dds-soak-';
 export function harnessPaths(root) {
   const sourceRoot = resolve(root, 'workers/src');
   if (!existsSync(sourceRoot)) throw new Error('Missing harness source directory: workers/src');
@@ -58,7 +58,7 @@ export function createTemporaryWorkersConfig({ root = resolve(import.meta.dirnam
   // A temporary verification Worker may only be exposed through workers.dev.
   // Explicitly discard every route/zone field from the project configuration.
   for (const key of ['route', 'routes', 'zone_id', 'zone_name']) delete source[key];
-  return { ...source, name: scriptName, workers_dev: true };
+  return { ...source, main: resolve(root, 'workers', source.main), name: scriptName, workers_dev: true };
 }
 function findWorkersDevUrl(value) {
   if (typeof value === 'string') {
@@ -75,7 +75,7 @@ export async function verifyWorkersDeployment({ fetchImpl = fetch, accountId, sc
   if (!response.ok || payload?.result?.id !== expectedVersionId) throw new Error('Workers API did not verify the deployed version ID');
   return { versionId: String(expectedVersionId).trim(), apiVerified: true, wranglerVersion: String(wranglerVersion).trim() };
 }
-export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImpl = fetch, wrangler = 'wrangler', root = resolve(import.meta.dirname, '..'), accountId, apiToken, remoteTestKey, randomUUID = systemRandomUUID }) {
+export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImpl = fetch, wrangler = process.platform === 'win32' ? 'wrangler.cmd' : 'wrangler', root = resolve(import.meta.dirname, '..'), accountId, apiToken, remoteTestKey, randomUUID = systemRandomUUID }) {
   if (!accountId || !apiToken || !remoteTestKey) throw new Error('Temporary Workers deployment requires account, token, and remote test key');
   if (!/^[A-Za-z0-9_-]{43}$/.test(remoteTestKey)) throw new Error('Remote test key must be a 32-byte base64url value');
   const temporaryWorkerName = createTemporaryWorkerName(randomUUID);
@@ -86,13 +86,20 @@ export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImp
   try {
     // The key is intentionally supplied only to Wrangler stdin, never config or report.
     writeFileSync(configPath, `${JSON.stringify(createTemporaryWorkersConfig({ root, temporaryWorkerName }))}\n`, 'utf8');
-    execFile(wrangler, ['secret', 'put', 'DDS_REMOTE_TEST_KEY', '--config', configPath], { encoding: 'utf8', cwd: root, input: remoteTestKey });
-    const deployed = JSON.parse(String(execFile(wrangler, ['deploy', '--json', '--config', configPath,
-      '--var', 'DDS_REMOTE_TEST:true', '--var', `DDS_DEPLOYMENT_BUILD_ID:${buildId}`], { encoding: 'utf8', cwd: root })));
-    const versionId = deployed?.version_id ?? deployed?.versionId;
-    const workersDevUrl = findWorkersDevUrl(deployed);
+    const childOptions = { encoding: 'utf8', cwd: root, ...(process.platform === 'win32' ? { shell: true } : {}) };
+    execFile(wrangler, ['secret', 'put', 'DDS_REMOTE_TEST_KEY', '--config', configPath], { ...childOptions, input: remoteTestKey });
+    execFile(wrangler, ['deploy', '--config', configPath,
+      '--var', 'DDS_REMOTE_TEST:true', '--var', `DDS_DEPLOYMENT_BUILD_ID:${buildId}`], childOptions);
+    const headers = { authorization: `Bearer ${apiToken}` };
+    const [versionsResponse, subdomainResponse] = await Promise.all([
+      fetchImpl(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(temporaryWorkerName)}/versions`, { headers }),
+      fetchImpl(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/workers/subdomain`, { headers }),
+    ]);
+    const versions = await versionsResponse.json(); const subdomain = await subdomainResponse.json();
+    const versionId = versions?.result?.items?.[0]?.id;
+    const workersDevUrl = subdomain?.result?.subdomain ? `https://${temporaryWorkerName}.${subdomain.result.subdomain}.workers.dev` : null;
     if (!versionId || !workersDevUrl) throw new Error('Wrangler deployment did not return a version ID and workers.dev URL');
-    const wranglerVersion = String(execFile(wrangler, ['--version'], { encoding: 'utf8' })).trim();
+    const wranglerVersion = String(execFile(wrangler, ['--version'], childOptions)).trim();
     const verified = await verifyWorkersDeployment({ fetchImpl, accountId, scriptName: temporaryWorkerName, apiToken, expectedVersionId: versionId, wranglerVersion });
     return { ...verified, workersDevUrl, temporaryWorkerName };
   } finally { rmSync(configDir, { recursive: true, force: true }); }

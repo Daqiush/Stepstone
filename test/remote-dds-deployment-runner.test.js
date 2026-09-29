@@ -21,7 +21,7 @@ async function runner() { return import('../scripts/remote-worker-dds-soak.mjs')
 test('deployment manifest binds the exact wasm and harness bytes to a deterministic build ID', async () => {
   const mod = await deployment(); const root = repo();
   try {
-    const manifest = mod.createDeploymentManifest({ root, verifiedDeployment: { versionId: 'v-123', apiVerified: true, wranglerVersion: '4.0.0', workersDevUrl: 'https://temporary.example.workers.dev', temporaryWorkerName: 'stepstone-dds-soak-00000000-0000-4000-8000-000000000001' } });
+    const manifest = mod.createDeploymentManifest({ root, verifiedDeployment: { versionId: 'v-123', apiVerified: true, wranglerVersion: '4.0.0', workersDevUrl: 'https://temporary.example.workers.dev', temporaryWorkerName: 'ss-dds-soak-00000000-0000-4000-8000-000000000001' } });
     assert.equal(manifest.version, 1);
     assert.match(manifest.buildId, /^[a-f0-9]{64}$/);
     assert.match(manifest.assets.wasm.sha256, /^[a-f0-9]{64}$/);
@@ -35,7 +35,7 @@ test('deployment manifest binds the exact wasm and harness bytes to a determinis
 test('deployment manifest rejects a missing version instead of assuming compatibility', async () => {
   const mod = await deployment(); const root = repo();
   try {
-    const manifest = mod.createDeploymentManifest({ root, verifiedDeployment: { versionId: 'v-123', apiVerified: true, wranglerVersion: '4.0.0', workersDevUrl: 'https://temporary.example.workers.dev', temporaryWorkerName: 'stepstone-dds-soak-00000000-0000-4000-8000-000000000001' } }); delete manifest.version;
+    const manifest = mod.createDeploymentManifest({ root, verifiedDeployment: { versionId: 'v-123', apiVerified: true, wranglerVersion: '4.0.0', workersDevUrl: 'https://temporary.example.workers.dev', temporaryWorkerName: 'ss-dds-soak-00000000-0000-4000-8000-000000000001' } }); delete manifest.version;
     assert.throws(() => mod.assertDeploymentManifest(manifest, { root }), /version/i);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -44,7 +44,7 @@ test('deployment manifest records Wasm bytes and requires an explicit deployed W
   const mod = await deployment(); const root = repo();
   try {
     assert.throws(() => mod.createDeploymentManifest({ root, workerVersionId: 'v-123' }), /verified deployment/i);
-    const manifest = mod.createDeploymentManifest({ root, verifiedDeployment: { versionId: 'v-123', apiVerified: true, wranglerVersion: '4.0.0', workersDevUrl: 'https://temporary.example.workers.dev', temporaryWorkerName: 'stepstone-dds-soak-00000000-0000-4000-8000-000000000001' } });
+    const manifest = mod.createDeploymentManifest({ root, verifiedDeployment: { versionId: 'v-123', apiVerified: true, wranglerVersion: '4.0.0', workersDevUrl: 'https://temporary.example.workers.dev', temporaryWorkerName: 'ss-dds-soak-00000000-0000-4000-8000-000000000001' } });
     assert.equal(manifest.assets.wasm.bytes, 7);
     assert.equal(manifest.workerVersionId, 'v-123');
   } finally { rmSync(root, { recursive: true, force: true }); }
@@ -69,7 +69,7 @@ test('deployment verification reads the exact deployed script-version resource a
   }), /did not verify/i);
 });
 
-test('deployment integration parses Wrangler JSON, verifies the returned version, and fails closed without secure inputs', async () => {
+test('deployment integration resolves version and workers.dev URL from Cloudflare APIs and fails closed without secure inputs', async () => {
   const mod = await deployment(); const root = repo();
   try {
     const calls = [];
@@ -77,18 +77,20 @@ test('deployment integration parses Wrangler JSON, verifies the returned version
       execFile: (command, args) => {
         calls.push({ command, args });
         if (args[0] === 'secret') return '';
-        if (args[0] === 'deploy') return JSON.stringify({ version_id: 'deployed-v1', url: 'https://temp-dds.example.workers.dev' });
+        if (args[0] === 'deploy') return 'deployed';
         if (args[0] === '--version') return '4.33.0\n';
         throw new Error('unexpected command');
       },
       fetchImpl: async (url) => {
-        assert.match(url, /workers\/scripts\/stepstone-dds-soak-11111111-1111-4111-8111-111111111111\/versions\/deployed-v1$/);
+        if (url.endsWith('/versions')) return { ok: true, json: async () => ({ result: { items: [{ id: 'deployed-v1' }] } }) };
+        if (url.endsWith('/workers/subdomain')) return { ok: true, json: async () => ({ result: { subdomain: 'example' } }) };
+        assert.match(url, /workers\/scripts\/ss-dds-soak-11111111-1111-4111-8111-111111111111\/versions\/deployed-v1$/);
         return { ok: true, json: async () => ({ result: { id: 'deployed-v1' } }) };
       },
     });
     assert.equal(verified.versionId, 'deployed-v1');
-    assert.equal(verified.temporaryWorkerName, 'stepstone-dds-soak-11111111-1111-4111-8111-111111111111');
-    assert.ok(calls[1].args.includes('--json'));
+    assert.equal(verified.temporaryWorkerName, 'ss-dds-soak-11111111-1111-4111-8111-111111111111');
+    assert.equal(calls[1].args.includes('--json'), false);
     await assert.rejects(() => mod.deployAndVerifyWorkers({ root, accountId: 'acct', apiToken: '' }), /requires account/i);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -97,7 +99,7 @@ test('temporary remote deployment enables only workers.dev and keeps the test ke
   const mod = await deployment(); const root = repo();
   try {
     writeFileSync(join(root, 'workers/wrangler.jsonc'), JSON.stringify({ name: 'normal-worker', main: 'src/index.mjs', workers_dev: false, routes: [{ pattern: 'stepstone.hogetsu.uk/*' }] }));
-    const name = 'stepstone-dds-soak-11111111-1111-4111-8111-111111111111';
+    const name = 'ss-dds-soak-11111111-1111-4111-8111-111111111111';
     const config = mod.createTemporaryWorkersConfig({ root, temporaryWorkerName: name });
     assert.equal(config.name, name);
     assert.equal(config.workers_dev, true);
@@ -108,7 +110,7 @@ test('temporary remote deployment enables only workers.dev and keeps the test ke
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test('temporary remote deployment requires an in-memory test key and obtains a workers.dev URL from Wrangler output', async () => {
+test('temporary remote deployment requires an in-memory test key and obtains a workers.dev URL from Cloudflare APIs', async () => {
   const mod = await deployment(); const root = repo();
   try {
     const calls = [];
@@ -116,13 +118,17 @@ test('temporary remote deployment requires an in-memory test key and obtains a w
       execFile: (command, args, options = {}) => {
         calls.push({ command, args, options });
         if (args[0] === 'secret') { assert.equal(options.input, 'a'.repeat(43)); return ''; }
-        if (args[0] === 'deploy') return JSON.stringify({ version_id: 'deployed-v1', url: 'https://stepstone-dds-soak-22222222-2222-4222-8222-222222222222.example.workers.dev' });
+        if (args[0] === 'deploy') return 'deployed';
         if (args[0] === '--version') return '4.33.0\n';
         throw new Error('unexpected command');
       },
-      fetchImpl: async () => ({ ok: true, json: async () => ({ result: { id: 'deployed-v1' } }) }),
+      fetchImpl: async (url) => url.endsWith('/versions')
+        ? ({ ok: true, json: async () => ({ result: { items: [{ id: 'deployed-v1' }] } }) })
+        : url.endsWith('/workers/subdomain')
+          ? ({ ok: true, json: async () => ({ result: { subdomain: 'example' } }) })
+          : ({ ok: true, json: async () => ({ result: { id: 'deployed-v1' } }) }),
     });
-    assert.equal(deployed.workersDevUrl, 'https://stepstone-dds-soak-22222222-2222-4222-8222-222222222222.example.workers.dev');
+    assert.equal(deployed.workersDevUrl, 'https://ss-dds-soak-22222222-2222-4222-8222-222222222222.example.workers.dev');
     assert.equal(calls[0].args.slice(0, 3).join(' '), 'secret put DDS_REMOTE_TEST_KEY');
     await assert.rejects(() => mod.deployAndVerifyWorkers({ root, accountId: 'acct', apiToken: 'token' }), /test key/i);
   } finally { rmSync(root, { recursive: true, force: true }); }
@@ -132,8 +138,8 @@ test('temporary Worker teardown uses only a generated identity, closes the keyed
   const mod = await deployment(); const root = repo();
   try {
     const calls = [];
-    const temporaryWorkerName = 'stepstone-dds-soak-33333333-3333-4333-8333-333333333333';
-    const workersDevUrl = 'https://stepstone-dds-soak-33333333-3333-4333-8333-333333333333.example.workers.dev';
+    const temporaryWorkerName = 'ss-dds-soak-33333333-3333-4333-8333-333333333333';
+    const workersDevUrl = 'https://ss-dds-soak-33333333-3333-4333-8333-333333333333.example.workers.dev';
     await mod.teardownTemporaryWorkers({ root, accountId: 'acct', temporaryWorkerName, workersDevUrl, remoteTestKey: 'a'.repeat(43), apiToken: 'token', randomUUID: () => '44444444-4444-4444-8444-444444444444',
       execFile: (command, args) => { calls.push({ command, args }); return args[0] === 'deploy' ? JSON.stringify({ version_id: 'disabled-v1' }) : ''; },
       fetchImpl: async (url, options = {}) => {

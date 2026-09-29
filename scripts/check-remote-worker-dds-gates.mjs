@@ -67,15 +67,22 @@ function validatesDdsPayload(kind, native, remote, deal) {
   } catch { return false; }
 }
 function activationForShard(report, evidence, journal) {
-  const values = Array.from({ length: SHARDS }, () => new Set());
-  for (const entry of journal) if (entry.type === 'completion' && Number.isSafeInteger(entry.index) && entry.index >= 0 && entry.index < COUNT) values[Math.floor(entry.index / 2000)].add(entry.activationId);
+  const segments = Array.from({ length: SHARDS }, () => []);
+  const completionByIndex = new Map(journal.filter((entry) => entry.type === 'completion').map((entry) => [entry.index, entry]));
+  for (const operation of evidence?.operations ?? []) {
+    if (!Number.isSafeInteger(operation?.shard) || operation.shard < 0 || operation.shard >= SHARDS || !ACTIVATION.test(operation?.activationId ?? '')
+      || completionByIndex.get(operation.index)?.activationId !== operation.activationId) return false;
+    const list = segments[operation.shard], last = list.at(-1);
+    if (last?.activationId === operation.activationId) last.endIndex = operation.index;
+    else list.push({ activationId: operation.activationId, startIndex: operation.index, endIndex: operation.index });
+  }
   const preflight = latestPhysical(journal, 'preflight.metrics');
   return ACTIVATION.test(evidence?.preflight?.activationId ?? '') && evidence?.preflight?.activationId === evidence?.preflight?.remote?.activationId
     && bindsEvidence(preflight, evidence.preflight, '/__dds/metrics', 0)
     && Array.isArray(evidence?.fixtures) && evidence.fixtures.every((fixture, index) => ACTIVATION.test(fixture?.remote?.activationId ?? '') && fixture.remote.activationId === latestPhysical(journal, `fixture.${String(index).padStart(6, '0')}`)?.response?.activationId)
     && Array.isArray(evidence?.operations) && evidence.operations.length === COUNT
-    && evidence.operations.every((operation) => ACTIVATION.test(operation?.activationId ?? '') && values[operation.shard]?.has(operation.activationId))
-    && values.every((set, shard) => set.size === 1 && report.activationIds?.[shard] === [...set][0]);
+    && segments.every((list, shard) => list.length > 0 && equal(report.activationSegments?.[shard], list)
+      && report.activationIds?.[shard] === list.at(-1).activationId);
 }
 
 function validateCorpus({ evidence, manifest, journal }) {
@@ -153,7 +160,7 @@ function validateDeployment({ deployment, evidence }) {
   if (!deployment || evidence?.buildId !== deployment.buildId || evidence?.workerVersionId !== deployment.workerVersionId
       || evidence?.preflight?.endpointBuildId !== deployment.buildId || evidence?.preflight?.endpointWorkerVersionId !== deployment.workerVersionId) return false;
   if (deployment?.verifiedDeployment?.apiVerified !== true || deployment?.verifiedDeployment?.versionId !== deployment.workerVersionId
-      || typeof deployment?.verifiedDeployment?.wranglerVersion !== 'string' || !deployment?.verifiedDeployment?.temporaryWorkerName?.startsWith('stepstone-dds-soak-')) return false;
+      || typeof deployment?.verifiedDeployment?.wranglerVersion !== 'string' || !deployment?.verifiedDeployment?.temporaryWorkerName?.startsWith('ss-dds-soak-')) return false;
   try { assertDeploymentManifest(deployment, { root: ROOT }); return true; } catch { return false; }
 }
 

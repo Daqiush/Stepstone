@@ -24,8 +24,8 @@ async function validRun() {
   const manifest = createRunManifest({ root: ROOT, runId });
   const deployment = createDeploymentManifest({ root: ROOT, verifiedDeployment: {
     versionId: 'version-verified', apiVerified: true, wranglerVersion: '4.137.0',
-    temporaryWorkerName: 'stepstone-dds-soak-00000000-0000-4000-8000-000000000001',
-    workersDevUrl: 'https://stepstone-dds-soak-00000000-0000-4000-8000-000000000001.example.workers.dev',
+    temporaryWorkerName: 'ss-dds-soak-00000000-0000-4000-8000-000000000001',
+    workersDevUrl: 'https://ss-dds-soak-00000000-0000-4000-8000-000000000001.example.workers.dev',
   } });
   const fixtures = JSON.parse(readFileSync(fixturePath, 'utf8'));
   const preflightRemote = { ok: true, activationId: activation(0), buildId: deployment.buildId, workerVersionId: deployment.workerVersionId };
@@ -85,7 +85,8 @@ async function validRun() {
   for (const [index, fixture] of evidence.fixtures.entries()) physicalById.get(`fixture.${String(index).padStart(6, '0')}`).evidenceHash = sha256Utf8(canonicalJson(fixture));
   for (let index = 0; index < operations.length; index++) physicalById.get(`op.${String(index).padStart(6, '0')}`).evidenceHash = sha256Utf8(canonicalJson(operations[index]));
   return { manifest, deployment, report: { version: 1, completedCursor: 22000, observed,
-    activationIds: Object.fromEntries(Array.from({ length: 11 }, (_, shard) => [shard, activation(shard)])), terminalFailure: null },
+    activationIds: Object.fromEntries(Array.from({ length: 11 }, (_, shard) => [shard, activation(shard)])),
+    activationSegments: Object.fromEntries(Array.from({ length: 11 }, (_, shard) => [shard, [{ activationId: activation(shard), startIndex: shard * 2000, endIndex: shard * 2000 + 1999 }]])), terminalFailure: null },
   evidence,
     journal, simulator: { budget: { rooms: 50, writesPerDay: 70000, readsPerDay: 250000 } } };
 }
@@ -109,6 +110,30 @@ test('a complete, version-bound remote soak report passes every gate', async () 
   const result = check(await validRun());
   assert.equal(result.status, 0, result.stderr + result.stdout);
   for (const name of ['corpus', 'journal', 'deployment', 'wasm-bundle', 'heap', 'p99-wasm-elapsed', 'max-wasm-elapsed', 'queue-delay', 'worker-inbound', 'queued-do-commands', 'sqlite', 'room-simulator']) assert.match(result.stdout, new RegExp(`PASS ${name}`));
+});
+
+test('activation gate accepts a documented Cloudflare restart inside a shard', async () => {
+  const run = await validRun();
+  const replacement = activation(99);
+  for (let index = 1126; index < 2000; index++) {
+    const operation = run.evidence.operations[index];
+    operation.activationId = replacement; operation.remote.activationId = replacement;
+    const operationId = `op.${String(index).padStart(6, '0')}`;
+    const physical = run.journal.find((entry) => entry.type === 'physical' && entry.operationId === operationId);
+    physical.response.activationId = replacement;
+    physical.responseHash = createHash('sha256').update(JSON.stringify(physical.response)).digest('hex');
+    physical.evidenceHash = createHash('sha256').update(JSON.stringify(operation)).digest('hex');
+    const completion = run.journal.find((entry) => entry.type === 'completion' && entry.operationId === operationId);
+    completion.activationId = replacement; completion.responseHash = physical.responseHash;
+  }
+  run.report.activationIds[0] = replacement;
+  run.report.activationSegments[0] = [
+    { activationId: activation(0), startIndex: 0, endIndex: 1125 },
+    { activationId: replacement, startIndex: 1126, endIndex: 1999 },
+  ];
+  const result = check(run);
+  assert.match(result.stdout, /PASS activation/);
+  assert.doesNotMatch(result.stdout, /FAIL activation/);
 });
 
 test('fixture validation permits one immediate, fully accounted replay', async () => {

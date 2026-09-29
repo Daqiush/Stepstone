@@ -103,7 +103,8 @@ test('a terminal failure holds cursor and a replay needs matching response and a
     assert.throws(() => run.completeReplay({ operationId: 'op-0', response: { ok: true }, observed: accounting() }), /activation/i);
     run.completeReplay({ operationId: 'op-0', response: { ok: true }, activationId: activation(1), observed: accounting() });
     run.recordIntent({ index: 1, operationId: 'op-1', ...request(1) });
-    assert.throws(() => run.completeReplay({ operationId: 'op-1', response: { ok: true }, activationId: activation(2), observed: accounting() }), /activation/i);
+    run.completeReplay({ operationId: 'op-1', response: { ok: true }, activationId: activation(2), observed: accounting() });
+    assert.equal(run.report.activationSegments[0].length, 2);
   } finally { rmSync(replayDir, { recursive: true, force: true }); }
 });
 
@@ -146,6 +147,23 @@ test('allows a documented fresh activation at the next shard boundary', async ()
     const recovered = state.recoverSoakState({ dir, root: ROOT, requestForIndex: boundaryRequest });
     assert.equal(recovered.recovery.kind, 'ready');
     assert.deepEqual(recovered.report.activationIds, { 0: activation(1), 1: activation(2) });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('records a fresh activation segment when Cloudflare restarts one shard', async () => {
+  state ??= await import('../scripts/remote-dds-soak-state.mjs');
+  const dir = tempRun();
+  try {
+    const run = state.createSoakState({ dir, root: ROOT, requestForIndex: request });
+    for (const [index, id] of [[0, activation(1)], [1, activation(1)], [2, activation(2)]]) {
+      run.recordIntent({ index, operationId: `op-${index}`, ...request(index) });
+      run.recordCompletion({ operationId: `op-${index}`, response: { ok: true }, activationId: id, observed: accounting() });
+    }
+    assert.deepEqual(run.report.activationSegments[0], [
+      { activationId: activation(1), startIndex: 0, endIndex: 1 },
+      { activationId: activation(2), startIndex: 2, endIndex: 2 },
+    ]);
+    assert.deepEqual(state.recoverSoakState({ dir, root: ROOT, requestForIndex: request }).report.activationSegments[0], run.report.activationSegments[0]);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
