@@ -208,6 +208,61 @@ test('runner options require a URL and key without exposing the key or accepting
   assert.equal(JSON.stringify(options).includes('secret-value'), false);
 });
 
+test('remote runner retries one ambiguous transport failure with the identical idempotency identity', async () => {
+  const mod = await runner();
+  const calls = [];
+  const args = {
+    key: 'test-key', runId: 'run-1', operationId: 'op.000001', route: '/__dds/ordered-probe',
+    body: '{"deal":"fixture"}', shard: 0,
+  };
+  const payload = {
+    operationResult: { ok: true }, accounting: { workerInbound: 1 }, accountingActivationId: 'activation-1', replayed: false,
+  };
+  const retryBudget = { remaining: 1, used: 0 };
+  const result = await mod.remotePost('https://bridge-dds.example.workers.dev', args, {
+    retryBudget,
+    sleepImpl: async () => {},
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      if (calls.length === 1) {
+        const error = new TypeError('fetch failed');
+        error.cause = { code: 'ECONNRESET' };
+        throw error;
+      }
+      return { ok: true, status: 200, json: async () => payload };
+    },
+  });
+  assert.equal(result, payload);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[1], calls[0]);
+  assert.deepEqual(retryBudget, { remaining: 0, used: 1 });
+});
+
+test('remote runner reports a safe transport code and attempt count when its one retry also fails', async () => {
+  const mod = await runner();
+  let attempts = 0;
+  const args = {
+    key: 'must-not-appear', runId: 'run-1', operationId: 'op.000001', route: '/__dds/ordered-probe',
+    body: '{"deal":"fixture"}', shard: 0,
+  };
+  await assert.rejects(() => mod.remotePost('https://bridge-dds.example.workers.dev', args, {
+    retryBudget: { remaining: 1, used: 0 },
+    sleepImpl: async () => {},
+    fetchImpl: async () => {
+      attempts += 1;
+      const error = new TypeError('fetch failed');
+      error.cause = { code: 'ECONNRESET' };
+      throw error;
+    },
+  }), (error) => {
+    assert.match(error.message, /ECONNRESET/);
+    assert.match(error.message, /2 attempts/);
+    assert.equal(error.message.includes(args.key), false);
+    return true;
+  });
+  assert.equal(attempts, 2);
+});
+
 test('runner fails closed when observed accounting differs from its durable physical-request ledger', async () => {
   const mod = await runner();
   const accounting = { workerInbound: 1, doFetchArrivals: 1, queuedDoCommands: 0, sqliteRows: { reads: 1, writes: 1 } };

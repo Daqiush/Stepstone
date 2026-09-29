@@ -15,6 +15,7 @@ const { calcDDTable, solveBoard } = require('../dds-wrapper.js');
 export const OPERATION_COUNT = 22000;
 export const SHARD_COUNT = 11;
 export const DEPTH_COUNT = 13;
+export const MAX_TRANSPORT_RETRIES = 64;
 const ROOT = resolve(import.meta.dirname, '..');
 
 export function assertRemoteEndpoint(value) {
@@ -130,11 +131,39 @@ function stableHeaders({ key, runId, operationId, route, body, shard }) {
   return { 'content-type': 'application/json', 'x-dds-test-key': key, 'x-dds-run-id': runId,
     'x-dds-operation-id': operationId, 'x-dds-request-hash': requestHash(route, body), 'x-dds-shard': String(shard) };
 }
-async function remotePost(endpoint, args) {
-  const response = await fetch(`${endpoint}${args.route}`, { method: 'POST', headers: stableHeaders(args), body: args.body, signal: AbortSignal.timeout(60000) });
-  let payload; try { payload = await response.json(); } catch { throw new Error(`Malformed remote JSON: ${args.route} status ${response.status}`); }
-  if (!response.ok || payload?.operationResult?.ok !== true || !payload.accounting) throw new Error(`Remote operation failed: ${args.route} status ${response.status}`);
-  return payload;
+function retryableTransportError(error) {
+  return error?.name === 'TimeoutError' || error?.name === 'AbortError'
+    || (error instanceof TypeError && error.message === 'fetch failed');
+}
+
+function safeTransportCode(error) {
+  const code = error?.cause?.code;
+  if (typeof code === 'string' && /^[a-z0-9_-]{1,64}$/i.test(code)) return code;
+  return typeof error?.name === 'string' && /^[a-z0-9_-]{1,64}$/i.test(error.name) ? error.name : 'TRANSPORT_ERROR';
+}
+
+export async function remotePost(endpoint, args, { fetchImpl = fetch, retryBudget = null,
+  sleepImpl = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)) } = {}) {
+  let retried = false, attempts = 0;
+  while (true) {
+    try {
+      attempts += 1;
+      const response = await fetchImpl(`${endpoint}${args.route}`, { method: 'POST', headers: stableHeaders(args), body: args.body, signal: AbortSignal.timeout(60000) });
+      let payload; try { payload = await response.json(); } catch { throw new Error(`Malformed remote JSON: ${args.route} status ${response.status}`); }
+      if (!response.ok || payload?.operationResult?.ok !== true || !payload.accounting) throw new Error(`Remote operation failed: ${args.route} status ${response.status}`);
+      return payload;
+    } catch (error) {
+      const remaining = retryBudget?.remaining;
+      if (!retryableTransportError(error)) throw error;
+      if (retried || !Number.isSafeInteger(remaining) || remaining <= 0) {
+        throw new Error(`Remote transport failed: ${args.route} (${safeTransportCode(error)}) after ${attempts} attempts`, { cause: error });
+      }
+      retryBudget.remaining -= 1;
+      retryBudget.used = (Number.isSafeInteger(retryBudget.used) ? retryBudget.used : 0) + 1;
+      retried = true;
+      await sleepImpl(500);
+    }
+  }
 }
 function unwrap(operation, remote) {
   const result = remote.operationResult;
@@ -150,14 +179,14 @@ function verify(operation, baseline, remote) {
   return { candidateDifference: comparison.candidateDifference, worker };
 }
 async function baseline(operation) { return operation.kind === 'table' ? calcDDTable(operation.item.hands) : solveBoard(operation.item.deal); }
-async function runFixtureChecks({ endpoint, key, runId, fixtures, buildId, evidence, state }) {
+async function runFixtureChecks({ endpoint, key, runId, fixtures, buildId, evidence, state, retryBudget }) {
   for (const [index, item] of fixtures.entries()) {
     const kind = item.kind, route = kind === 'table' ? '/__dds/table' : '/__dds/ordered-probe';
     const operationId = `fixture.${String(index).padStart(6, '0')}`;
     if (state.hasPhysicalOperation(operationId)) continue;
     const body = JSON.stringify(kind === 'table' ? { hands: item.hands } : { deal: item.deal ?? { trump: item.trump, trickLeader: item.trickLeader, trickPlayed: item.trickPlayed, hands: item.hands } });
     state.recordAuxiliaryIntent({ operationId, route, body, shard: 0 });
-    const remote = await remotePost(endpoint, { key, runId, operationId, route, body, shard: 0 });
+    const remote = await remotePost(endpoint, { key, runId, operationId, route, body, shard: 0 }, { retryBudget });
     const op = { kind, id: item.id, item: kind === 'table' ? { hands: item.hands } : { deal: JSON.parse(body).deal } };
     const worker = unwrap(op, remote); const expected = item.expected?.table ?? item.expected;
     const native = kind === 'table' ? await calcDDTable(item.hands) : await solveBoard(op.item.deal);
@@ -189,17 +218,19 @@ async function runCli() {
   if (typeof runId !== 'string' || !runId) throw new Error('Resumed run has no persisted run identity');
   const fixtureTables = fixtures.filter((item) => item.kind === 'table').length;
   const fixtureSolves = fixtures.filter((item) => item.kind === 'solve').length;
-  const projectionArgs = { fixtureTables, fixtureSolves, metricProbes: 1, pendingReplays: 0 };
+  const projectionArgs = { fixtureTables, fixtureSolves, metricProbes: 1, pendingReplays: MAX_TRANSPORT_RETRIES };
   let projection = projectAccounting(projectionArgs);
   const requestForIndex = (index) => operations[index];
-  const state = resume ? recoverSoakState({ dir: runDir, root: ROOT, requestForIndex, projection: projectAccounting({ ...projectionArgs, pendingReplays: 1 }) }) : createSoakState({ dir: runDir, root: ROOT, requestForIndex, projection, runId });
+  const state = resume ? recoverSoakState({ dir: runDir, root: ROOT, requestForIndex, projection }) : createSoakState({ dir: runDir, root: ROOT, requestForIndex, projection, runId });
+  const completedTransportRetries = state.physicalOperations.filter((record) => record.replayed === true).length;
+  const retryBudget = { remaining: Math.max(0, MAX_TRANSPORT_RETRIES - completedTransportRetries), used: completedTransportRetries };
   if (resume) {
     // Every resumed attempt issues another preflight. A run interrupted before
     // its first durable operation also executes its fixture corpus again.
     projection = projectAccounting({ ...projectionArgs, metricProbes: 2,
       fixtureTables: state.report.completedCursor === 0 ? fixtureTables * 2 : fixtureTables,
       fixtureSolves: state.report.completedCursor === 0 ? fixtureSolves * 2 : fixtureSolves,
-      pendingReplays: state.recovery?.kind === 'replay-pending' ? 1 : 0 });
+      pendingReplays: MAX_TRANSPORT_RETRIES });
   }
   let evidence = resume ? JSON.parse(readFileSync(resolve(runDir, 'evidence.json'), 'utf8')) : { version: 1, endpoint, runId, buildId: deployment.buildId, workerVersionId: deployment.workerVersionId,
     deploymentAssets: deployment.assets, fixtureHash: state.manifest.hashes.fixtureCorpus, projection, coverage, fixtures: [], operations: [], candidateDifferences: [] };
@@ -215,7 +246,7 @@ async function runCli() {
   const preflightBody = '{}';
   if (!state.hasPhysicalOperation('preflight.metrics')) {
     state.recordAuxiliaryIntent({ operationId: 'preflight.metrics', route: '/__dds/metrics', body: preflightBody, shard: 0 });
-    const preflight = await remotePost(endpoint, { key, runId, operationId: 'preflight.metrics', route: '/__dds/metrics', body: preflightBody, shard: 0 });
+    const preflight = await remotePost(endpoint, { key, runId, operationId: 'preflight.metrics', route: '/__dds/metrics', body: preflightBody, shard: 0 }, { retryBudget });
     assertEndpointBuild(preflight.operationResult, deployment.buildId);
     assertEndpointVersion(preflight.operationResult, deployment.workerVersionId);
     const preflightEvidence = buildPreflightEvidence(preflight);
@@ -225,8 +256,8 @@ async function runCli() {
     evidence.preflight = preflightEvidence;
     writeReportCheckpoint(resolve(runDir, 'evidence.json'), evidence);
   }
-  await runFixtureChecks({ endpoint, key, runId, fixtures, buildId: deployment.buildId, evidence, state });
-  const dispatch = async (operation, operationId) => remotePost(endpoint, { key, runId, operationId, route: operation.route, body: operation.body, shard: operation.shard });
+  await runFixtureChecks({ endpoint, key, runId, fixtures, buildId: deployment.buildId, evidence, state, retryBudget });
+  const dispatch = async (operation, operationId) => remotePost(endpoint, { key, runId, operationId, route: operation.route, body: operation.body, shard: operation.shard }, { retryBudget });
   if (state.recovery?.kind === 'replay-pending') {
     const pending = state.recovery.intent, operation = operations[pending.index];
     const remote = await dispatch(operation, pending.operationId); const native = await baseline(operation); const checked = verify(operation, native, remote);
