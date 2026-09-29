@@ -45,6 +45,36 @@ export function reconcileObservedLedger(observed, physicalOperations) {
   if (JSON.stringify(observed) !== JSON.stringify(actual)) throw new Error('Observed remote accounting does not reconcile to the durable physical-request ledger');
   return observed;
 }
+export function deriveCandidateDifferences(operations) {
+  if (!Array.isArray(operations)) throw new Error('Operation evidence is required to derive candidate diagnostics');
+  const seen = new Set();
+  const diagnostics = [];
+  for (const operation of operations) {
+    if (operation?.kind !== 'solve' || operation.candidateDifference == null) continue;
+    if (typeof operation.id !== 'string' || !operation.id || seen.has(operation.id)) {
+      throw new Error('Candidate diagnostic operation identity is invalid');
+    }
+    seen.add(operation.id);
+    diagnostics.push({ id: operation.id, ...operation.candidateDifference });
+  }
+  return diagnostics;
+}
+export function mergeRecoveredEvidence({ checkpoint, durableOperations, durableFixtures }) {
+  if (!checkpoint || typeof checkpoint !== 'object' || !Array.isArray(durableOperations) || !Array.isArray(durableFixtures)) {
+    throw new Error('Recovery requires checkpoint and durable evidence arrays');
+  }
+  const unique = (items, label) => {
+    const ids = new Set();
+    for (const item of items) {
+      if (typeof item?.id !== 'string' || !item.id || ids.has(item.id)) throw new Error(`Recovered ${label} evidence is invalid`);
+      ids.add(item.id);
+    }
+    return [...items];
+  };
+  const operations = unique(durableOperations, 'operation').sort((left, right) => left.index - right.index);
+  const fixtures = unique(durableFixtures, 'fixture');
+  return { ...checkpoint, operations, fixtures, candidateDifferences: deriveCandidateDifferences(operations) };
+}
 // The completion projection is built from the immutable workload identity, not
 // a mutable counter. A recovered execution may have an original request and a
 // single replay, but it may never silently add another preflight or fixture.
@@ -167,16 +197,12 @@ async function runCli() {
       fixtureSolves: state.report.completedCursor === 0 ? fixtureSolves * 2 : fixtureSolves,
       pendingReplays: state.recovery?.kind === 'replay-pending' ? 1 : 0 });
   }
-  const evidence = resume ? JSON.parse(readFileSync(resolve(runDir, 'evidence.json'), 'utf8')) : { version: 1, endpoint, runId, buildId: deployment.buildId, workerVersionId: deployment.workerVersionId,
+  let evidence = resume ? JSON.parse(readFileSync(resolve(runDir, 'evidence.json'), 'utf8')) : { version: 1, endpoint, runId, buildId: deployment.buildId, workerVersionId: deployment.workerVersionId,
     deploymentAssets: deployment.assets, fixtureHash: state.manifest.hashes.fixtureCorpus, projection, coverage, fixtures: [], operations: [], candidateDifferences: [] };
-  if (resume && Array.isArray(state.evidence)) {
-    const saved = new Set(evidence.operations.map((operation) => operation.id));
-    for (const operation of state.evidence) if (operation?.id && !saved.has(operation.id)) evidence.operations.push(operation);
-    writeReportCheckpoint(resolve(runDir, 'evidence.json'), evidence);
-  }
-  if (resume && Array.isArray(state.fixtureEvidence)) {
-    const saved = new Set(evidence.fixtures.map((fixture) => fixture.id));
-    for (const fixture of state.fixtureEvidence) if (fixture?.id && !saved.has(fixture.id)) evidence.fixtures.push(fixture);
+  if (resume) {
+    evidence = mergeRecoveredEvidence({ checkpoint: evidence,
+      durableOperations: state.evidence.filter((operation) => Number.isSafeInteger(operation?.index)),
+      durableFixtures: state.fixtureEvidence });
     writeReportCheckpoint(resolve(runDir, 'evidence.json'), evidence);
   }
   if (!resume) writeReportCheckpoint(resolve(runDir, 'evidence.json'), evidence);
@@ -199,7 +225,8 @@ async function runCli() {
   if (state.recovery?.kind === 'replay-pending') {
     const pending = state.recovery.intent, operation = operations[pending.index];
     const remote = await dispatch(operation, pending.operationId); const native = await baseline(operation); const checked = verify(operation, native, remote);
-    const replayEvidence = { id: operation.id, replay: true, input: JSON.parse(operation.body), nativeBaseline: native, remote: remote.operationResult,
+    const replayEvidence = { id: operation.id, index: pending.index, kind: operation.kind, shard: operation.shard,
+      ...(operation.kind === 'solve' ? { depth: operation.depth } : {}), replay: true, input: JSON.parse(operation.body), nativeBaseline: native, remote: remote.operationResult,
       remoteMetrics: remote.operationResult.metrics ?? remote.operationResult.solveResponse?.metrics ?? null,
       heapBytes: remote.operationResult.metrics?.heapBytes ?? remote.operationResult.solveResponse?.metrics?.heapBytes ?? null,
       wasmElapsedMs: remote.operationResult.metrics?.solveMs ?? remote.operationResult.solveResponse?.metrics?.solveMs ?? null,
@@ -207,6 +234,8 @@ async function runCli() {
     state.completeReplay({ operationId: pending.operationId, response: remote.operationResult, activationId: remote.operationResult.activationId,
       replayed: remote.replayed, evidence: replayEvidence, remoteAccounting: remote.accounting });
     evidence.operations.push(replayEvidence);
+    evidence.candidateDifferences = deriveCandidateDifferences(evidence.operations);
+    writeReportCheckpoint(resolve(runDir, 'evidence.json'), evidence);
   }
   for (let index = state.report.completedCursor; index < operations.length; index++) {
     const operation = operations[index], operationId = `op.${String(index).padStart(6, '0')}`;
@@ -214,7 +243,8 @@ async function runCli() {
     try {
       const remote = await dispatch(operation, operationId); const nativeStarted = performance.now(); const native = await baseline(operation); const nativeMs = performance.now() - nativeStarted;
       const checked = verify(operation, native, remote);
-      const operationEvidence = { id: operation.id, index, route: operation.route, input: JSON.parse(operation.body), nativeBaseline: native, nativeMs,
+      const operationEvidence = { id: operation.id, index, kind: operation.kind, shard: operation.shard,
+        ...(operation.kind === 'solve' ? { depth: operation.depth } : {}), route: operation.route, input: JSON.parse(operation.body), nativeBaseline: native, nativeMs,
         remote: remote.operationResult, remoteMetrics: remote.operationResult.metrics ?? remote.operationResult.solveResponse?.metrics ?? null,
         heapBytes: remote.operationResult.metrics?.heapBytes ?? remote.operationResult.solveResponse?.metrics?.heapBytes ?? null,
         wasmElapsedMs: remote.operationResult.metrics?.solveMs ?? remote.operationResult.solveResponse?.metrics?.solveMs ?? null,
@@ -222,7 +252,7 @@ async function runCli() {
       state.recordCompletion({ operationId, response: remote.operationResult, activationId: remote.operationResult.activationId,
         replayed: remote.replayed, evidence: operationEvidence, remoteAccounting: remote.accounting });
       evidence.operations.push(operationEvidence);
-      if (checked.candidateDifference) evidence.candidateDifferences.push({ id: operation.id, ...checked.candidateDifference });
+      evidence.candidateDifferences = deriveCandidateDifferences(evidence.operations);
       writeReportCheckpoint(resolve(runDir, 'evidence.json'), evidence);
     } catch (error) { state.recordFailure({ operationId, error: error.message }); throw error; }
   }

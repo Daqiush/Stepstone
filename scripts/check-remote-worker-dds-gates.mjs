@@ -31,6 +31,23 @@ function option(args, name, fallback = null) { const at = args.indexOf(name); re
 function finite(value) { return typeof value === 'number' && Number.isFinite(value); }
 function nearestRankP99(samples) { const sorted = [...samples].sort((a, b) => a - b); return sorted[Math.ceil(sorted.length * 0.99) - 1]; }
 function equal(left, right) { return canonical(left) === canonical(right); }
+function validElapsed(value) { return finite(value) && value >= 0; }
+function exactCandidateDiagnostics(evidence) {
+  if (!Array.isArray(evidence?.operations) || !Array.isArray(evidence?.candidateDifferences)) return false;
+  const expected = new Map();
+  for (const operation of evidence.operations) {
+    if (operation?.kind !== 'solve' || operation.candidateDifference == null) continue;
+    if (typeof operation.id !== 'string' || !operation.id || expected.has(operation.id)) return false;
+    expected.set(operation.id, { id: operation.id, ...operation.candidateDifference });
+  }
+  if (evidence.candidateDifferences.length !== expected.size) return false;
+  const seen = new Set();
+  return evidence.candidateDifferences.every((diagnostic) => {
+    if (!diagnostic || typeof diagnostic.id !== 'string' || seen.has(diagnostic.id)) return false;
+    seen.add(diagnostic.id);
+    return equal(diagnostic, expected.get(diagnostic.id));
+  });
+}
 function latestPhysical(journal, operationId) {
   const records = journal.filter((entry) => entry.type === 'physical' && entry.operationId === operationId);
   if (!(records.length === 1 || records.length === 2) || records[0].replayed !== false || (records[1] && records[1].replayed !== true)) return null;
@@ -146,9 +163,9 @@ export function evaluateRemoteSoak({ manifest, report, evidence, journal, deploy
   const elapsed = Array.isArray(evidence?.operations) ? evidence.operations.map((op) => op.wasmElapsedMs) : [];
   const heap = Array.isArray(evidence?.operations) ? evidence.operations.map((op) => op.heapBytes) : [];
   const queues = Array.isArray(evidence?.operations) ? evidence.operations.filter((op) => op.kind === 'solve').map((op) => op.orderedPingDelayMs) : [];
-  const allElapsed = elapsed.length === COUNT && elapsed.every(finite);
+  const allElapsed = elapsed.length === COUNT && elapsed.every(validElapsed);
   const allHeap = heap.length === COUNT && heap.every((value) => Number.isSafeInteger(value) && value > 0);
-  const allQueues = queues.length === COUNT - 220 && queues.every(finite);
+  const allQueues = queues.length === COUNT - 220 && queues.every(validElapsed);
   const observed = report?.observed;
   const results = [
     ['source-hashes', manifest?.seed === SOAK_SEED && manifest?.randomGenerator === 'xorshift32' && manifest?.accountingSchemaVersion === ACCOUNTING_SCHEMA_VERSION && manifest?.journalSchemaVersion === JOURNAL_SCHEMA_VERSION
@@ -158,7 +175,7 @@ export function evaluateRemoteSoak({ manifest, report, evidence, journal, deploy
     ['fixture-first', validateFixtures({ evidence, journal })],
     ['journal', validateJournal(journal) && report?.terminalFailure === null],
     ['parity', Array.isArray(evidence?.operations) && evidence.operations.every((op) => op.parityMismatch !== true && !op.networkError && !op.protocolError && !op.error && op.remote?.ok === true)],
-    ['candidate-diagnostics', Array.isArray(evidence?.candidateDifferences) && evidence.candidateDifferences.every((diagnostic) => evidence.operations?.find((op) => op.id === diagnostic.id && equal(op.candidateDifference, diagnostic)))],
+    ['candidate-diagnostics', exactCandidateDiagnostics(evidence)],
     ['depths', Array.isArray(evidence?.coverage?.depths) && evidence.coverage.depths.length === 13 && evidence.coverage.depths.every((count) => Number.isSafeInteger(count) && count > 0)],
     ['activation', activationForShard(report, evidence, journal)],
     ['deployment', validateDeployment({ deployment, evidence })],

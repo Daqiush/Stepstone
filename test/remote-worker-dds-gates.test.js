@@ -137,6 +137,16 @@ for (const [name, mutate] of [
   ['journal', (r) => { r.journal.push({ type: 'failed', operationId: 'op.021999' }); }],
   ['parity', (r) => { r.evidence.operations[0].parityMismatch = true; }],
   ['candidate-diagnostics', (r) => { r.evidence.candidateDifferences.push({ id: 'random-1', why: 'unreconciled' }); }],
+  ['candidate-diagnostics', (r) => {
+    const solve = r.evidence.operations.find((operation) => operation.kind === 'solve');
+    solve.candidateDifference = { baseline: ['S2'], worker: ['S3'] };
+  }],
+  ['candidate-diagnostics', (r) => {
+    const solve = r.evidence.operations.find((operation) => operation.kind === 'solve');
+    solve.candidateDifference = { baseline: ['S2'], worker: ['S3'] };
+    r.evidence.candidateDifferences.push({ id: solve.id, ...solve.candidateDifference });
+    r.evidence.candidateDifferences.push({ id: solve.id, ...solve.candidateDifference });
+  }],
   ['depths', (r) => { r.evidence.coverage.depths[0] = 0; }],
   ['activation', (r) => { r.journal.find((x) => x.type === 'completion' && x.index === 1).activationId = activation(2); }],
   ['activation', (r) => { r.evidence.operations[0].activationId = activation(2); }],
@@ -145,8 +155,10 @@ for (const [name, mutate] of [
   ['wasm-bundle', (r) => { r.deployment.assets.wasm.bytes = 3 * 1024 * 1024; }],
   ['heap', (r) => { r.evidence.operations[0].heapBytes = 100663296; }],
   ['p99-wasm-elapsed', (r) => { for (let i = 0; i < 221; i++) r.evidence.operations[i].wasmElapsedMs = 1000; }],
+  ['p99-wasm-elapsed', (r) => { r.evidence.operations[0].wasmElapsedMs = -1; }],
   ['max-wasm-elapsed', (r) => { r.evidence.operations[0].wasmElapsedMs = 10000; }],
   ['queue-delay', (r) => { r.evidence.operations[1].orderedPingDelayMs = 10000; }],
+  ['queue-delay', (r) => { r.evidence.operations.find((operation) => operation.kind === 'solve').orderedPingDelayMs = -1; }],
   ['worker-inbound', (r) => { r.report.observed.workerInbound = 25001; }],
   ['queued-do-commands', (r) => { r.report.observed.queuedDoCommands = 50001; }],
   ['sqlite', (r) => { r.report.observed.sqliteRows.reads = 25001; }],
