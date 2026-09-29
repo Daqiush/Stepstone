@@ -14,7 +14,7 @@ function opaqueNotFound() {
 function decode32ByteBase64url(value) {
   if (typeof value !== 'string' || !BASE64URL_32_BYTES.test(value)) return null;
   try {
-    const binary = atob(`${value}=`);
+    const binary = atob(`${value.replaceAll('-', '+').replaceAll('_', '/')}=`);
     if (binary.length !== 32) return null;
     const bytes = new Uint8Array(32);
     for (let index = 0; index < bytes.length; index += 1) bytes[index] = binary.charCodeAt(index);

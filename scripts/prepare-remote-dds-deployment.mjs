@@ -10,6 +10,7 @@ import { writeReportCheckpoint } from './worker-dds-checkpoint.mjs';
 export const DEPLOYMENT_MANIFEST_VERSION = 1;
 export const WASM_PATH = 'workers/vendor/bridge-dds/dds-worker.wasm';
 export const TEMPORARY_WORKER_PREFIX = 'ss-dds-soak-';
+const WRANGLER_CLI_PATH = resolve(import.meta.dirname, '../node_modules/wrangler/bin/wrangler.js');
 export function harnessPaths(root) {
   const sourceRoot = resolve(root, 'workers/src');
   if (!existsSync(sourceRoot)) throw new Error('Missing harness source directory: workers/src');
@@ -84,12 +85,16 @@ export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImp
   const configDir = mkdtempSync(join(tmpdir(), 'stepstone-dds-soak-'));
   const configPath = join(configDir, 'wrangler.json');
   try {
-    // The key is intentionally supplied only to Wrangler stdin, never config or report.
+    // Deploy first so Wrangler never has to create a placeholder Worker while
+    // consuming the secret from stdin.  Until the secret exists, the remote
+    // harness still fails closed with an opaque 404.
     writeFileSync(configPath, `${JSON.stringify(createTemporaryWorkersConfig({ root, temporaryWorkerName }))}\n`, 'utf8');
     const childOptions = { encoding: 'utf8', cwd: root, ...(process.platform === 'win32' ? { shell: true } : {}) };
-    execFile(wrangler, ['secret', 'put', 'DDS_REMOTE_TEST_KEY', '--config', configPath], { ...childOptions, input: remoteTestKey });
     execFile(wrangler, ['deploy', '--config', configPath,
       '--var', 'DDS_REMOTE_TEST:true', '--var', `DDS_DEPLOYMENT_BUILD_ID:${buildId}`], childOptions);
+    // The key is intentionally supplied only to Wrangler stdin, never config or report.
+    execFile(process.execPath, [WRANGLER_CLI_PATH, 'secret', 'put', 'DDS_REMOTE_TEST_KEY', '--config', configPath],
+      { encoding: 'utf8', cwd: root, input: `${remoteTestKey}\n` });
     const headers = { authorization: `Bearer ${apiToken}` };
     const [versionsResponse, subdomainResponse] = await Promise.all([
       fetchImpl(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(temporaryWorkerName)}/versions`, { headers }),

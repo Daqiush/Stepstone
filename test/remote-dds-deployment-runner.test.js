@@ -76,7 +76,7 @@ test('deployment integration resolves version and workers.dev URL from Cloudflar
     const verified = await mod.deployAndVerifyWorkers({ root, accountId: 'acct', apiToken: 'token', remoteTestKey: 'a'.repeat(43), randomUUID: () => '11111111-1111-4111-8111-111111111111',
       execFile: (command, args) => {
         calls.push({ command, args });
-        if (args[0] === 'secret') return '';
+        if (args[1] === 'secret') return '';
         if (args[0] === 'deploy') return 'deployed';
         if (args[0] === '--version') return '4.33.0\n';
         throw new Error('unexpected command');
@@ -117,7 +117,7 @@ test('temporary remote deployment requires an in-memory test key and obtains a w
     const deployed = await mod.deployAndVerifyWorkers({ root, accountId: 'acct', apiToken: 'token', remoteTestKey: 'a'.repeat(43), randomUUID: () => '22222222-2222-4222-8222-222222222222',
       execFile: (command, args, options = {}) => {
         calls.push({ command, args, options });
-        if (args[0] === 'secret') { assert.equal(options.input, 'a'.repeat(43)); return ''; }
+        if (args[1] === 'secret') { assert.equal(options.input, `${'a'.repeat(43)}\n`); return ''; }
         if (args[0] === 'deploy') return 'deployed';
         if (args[0] === '--version') return '4.33.0\n';
         throw new Error('unexpected command');
@@ -129,7 +129,11 @@ test('temporary remote deployment requires an in-memory test key and obtains a w
           : ({ ok: true, json: async () => ({ result: { id: 'deployed-v1' } }) }),
     });
     assert.equal(deployed.workersDevUrl, 'https://ss-dds-soak-22222222-2222-4222-8222-222222222222.example.workers.dev');
-    assert.equal(calls[0].args.slice(0, 3).join(' '), 'secret put DDS_REMOTE_TEST_KEY');
+    assert.equal(calls[0].args[0], 'deploy');
+    assert.equal(calls[1].command, process.execPath);
+    assert.equal(calls[1].args.slice(1, 4).join(' '), 'secret put DDS_REMOTE_TEST_KEY');
+    assert.equal(calls[1].options.shell, undefined);
+    assert.equal(calls[1].options.input, `${'a'.repeat(43)}\n`);
     await assert.rejects(() => mod.deployAndVerifyWorkers({ root, accountId: 'acct', apiToken: 'token' }), /test key/i);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

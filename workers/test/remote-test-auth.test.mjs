@@ -55,6 +55,17 @@ test('remote mode accepts an exact 32-byte base64url key and returns body bytes 
   });
 });
 
+test('remote mode decodes base64url keys containing dash and underscore characters', async () => {
+  const urlBytes = Uint8Array.from({ length: 32 }, (_, index) => (index % 2 ? 255 : 251));
+  const urlKey = Buffer.from(urlBytes).toString('base64url');
+  assert.match(urlKey, /-/);
+  assert.match(urlKey, /_/);
+  const result = await authorizeHarnessRequest(request('/__dds/metrics', {
+    headers: { ...metadataFor('/__dds/metrics', '{}'), 'x-dds-test-key': urlKey }, body: '{}',
+  }), remoteEnv({ DDS_REMOTE_TEST_KEY: urlKey }));
+  assert.equal(result.mode, 'remote');
+});
+
 test('disabled remote mode and absent, malformed, short, or wrong keys have identical opaque results', async () => {
   const cases = [
     [{}, {}],
