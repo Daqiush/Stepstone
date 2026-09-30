@@ -39,6 +39,17 @@ test('candidate diagnostics are derived only from solve operations and omit stal
   ]), [{ id: 'solve-1', baseline: ['H2'], worker: ['H3'] }]);
 });
 
+test('segment stop reason respects operation, deadline, and completion boundaries', async () => {
+  const { segmentStopReason } = await import('../scripts/remote-worker-dds-soak.mjs');
+  const base = { completedAtStart: 100, completedNow: 100, maxNewOperations: 6000,
+    startedAtMs: 1000, nowMs: 1000, deadlineMs: 17_100_000, totalOperations: 22000 };
+  assert.equal(segmentStopReason({ ...base, completedNow: 6100 }), 'MAX_NEW_OPERATIONS');
+  assert.equal(segmentStopReason({ ...base, completedNow: 6099 }), null);
+  assert.equal(segmentStopReason({ ...base, nowMs: 17_101_000 }), 'DEADLINE');
+  assert.equal(segmentStopReason({ ...base, completedAtStart: 22000, completedNow: 22000 }), 'COMPLETE');
+  assert.equal(segmentStopReason({ ...base, completedNow: 22000, nowMs: 17_101_000 }), 'COMPLETE');
+});
+
 test('recovery restores journaled preflight evidence when the preflight checkpoint write was interrupted', async () => {
   const state = await import('../scripts/remote-dds-soak-state.mjs');
   const runner = await import('../scripts/remote-worker-dds-soak.mjs');

@@ -279,6 +279,28 @@ test('runner options require a URL and key without exposing the key or accepting
   assert.equal(JSON.stringify(options).includes('secret-value'), false);
 });
 
+test('runner accepts bounded segment limits and validates their values', async () => {
+  const mod = await runner();
+  const env = { DDS_REMOTE_TEST_KEY: 'secret-value' };
+  const base = ['--url', 'https://a.workers.dev'];
+  const bounded = mod.parseOptions([...base, '--max-new-operations', '6000', '--deadline-ms', '17100000'], env);
+  assert.equal(bounded.maxNewOperations, 6000);
+  assert.equal(bounded.deadlineMs, 17_100_000);
+
+  const unbounded = mod.parseOptions(base, env);
+  assert.equal(unbounded.maxNewOperations, 22000);
+  assert.equal(unbounded.deadlineMs, null);
+
+  for (const option of ['--max-new-operations', '--deadline-ms']) {
+    for (const value of ['0', '-1', '1.5', '9007199254740992']) {
+      assert.throws(() => mod.parseOptions([...base, option, value], env), /positive safe integer/i, `${option} ${value}`);
+    }
+    assert.throws(() => mod.parseOptions([...base, option], env), /requires.*value|positive safe integer/i, `${option} missing value`);
+    assert.throws(() => mod.parseOptions([...base, option, '10', option, '20'], env), /duplicate|must not be repeated/i, `${option} duplicate`);
+  }
+  assert.throws(() => mod.parseOptions([...base, '--max-new-operations', '22001'], env), /22000/i);
+});
+
 test('remote runner retries one ambiguous transport failure with the identical idempotency identity', async () => {
   const mod = await runner();
   const calls = [];

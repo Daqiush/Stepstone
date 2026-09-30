@@ -105,10 +105,29 @@ export function projectCompletionLedger({ operations, fixtures, physicalOperatio
 }
 export function parseOptions(args = process.argv.slice(2), env = process.env) {
   const get = (name, fallback = null) => { const at = args.indexOf(name); return at < 0 ? fallback : args[at + 1]; };
+  const boundedInteger = (name, fallback, maximum = Number.MAX_SAFE_INTEGER) => {
+    const occurrences = args.reduce((count, arg) => count + (arg === name ? 1 : 0), 0);
+    if (occurrences > 1) throw new Error(`${name} must not be repeated`);
+    if (occurrences === 0) return fallback;
+    const value = args[args.indexOf(name) + 1];
+    if (value === undefined || value.startsWith('--')) throw new Error(`${name} requires a value`);
+    if (!/^\d+$/.test(value)) throw new Error(`${name} must be a positive safe integer`);
+    const parsed = Number(value);
+    if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(`${name} must be a positive safe integer`);
+    if (parsed > maximum) throw new Error(`${name} must not exceed ${maximum}`);
+    return parsed;
+  };
   if (args.includes('--count')) throw new Error('--count is not supported; the remote soak always runs exactly 22000 operations');
   const endpoint = assertRemoteEndpoint(get('--url', ''));
   if (!env.DDS_REMOTE_TEST_KEY) throw new Error('DDS_REMOTE_TEST_KEY is required');
-  return { endpoint, runDir: get('--run-dir', 'workers/test/results/remote-soak'), deploymentManifest: get('--deployment-manifest', 'workers/test/results/remote-dds-deployment.json'), resume: args.includes('--resume') };
+  return { endpoint, runDir: get('--run-dir', 'workers/test/results/remote-soak'), deploymentManifest: get('--deployment-manifest', 'workers/test/results/remote-dds-deployment.json'), resume: args.includes('--resume'),
+    maxNewOperations: boundedInteger('--max-new-operations', OPERATION_COUNT, OPERATION_COUNT), deadlineMs: boundedInteger('--deadline-ms', null) };
+}
+export function segmentStopReason({ completedAtStart, completedNow, maxNewOperations, startedAtMs, nowMs, deadlineMs, totalOperations }) {
+  if (completedAtStart >= totalOperations || completedNow >= totalOperations) return 'COMPLETE';
+  if (maxNewOperations !== null && completedNow - completedAtStart >= maxNewOperations) return 'MAX_NEW_OPERATIONS';
+  if (deadlineMs !== null && nowMs - startedAtMs >= deadlineMs) return 'DEADLINE';
+  return null;
 }
 export function createSeededOperations(seed = SOAK_SEED) {
   const random = createRandomCaseGenerator(seed);
