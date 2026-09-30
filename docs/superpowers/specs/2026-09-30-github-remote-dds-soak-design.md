@@ -6,7 +6,7 @@ Move the already implemented 22,000-operation remote DDS soak controller from a 
 
 ## Chosen approach
 
-Use one manually dispatched GitHub Actions workflow with sequential, resumable segment jobs. Each segment may complete at most 6,000 new seeded operations and has a five-hour soft deadline. At the observed remote-soak rate, the expected execution is four active segments of 6,000, 6,000, 6,000, and 4,000 operations. Six segment slots are available so slower hosted runners can stop safely at the soft deadline and continue in later slots. A slot that receives an already complete run exits successfully without making DDS requests.
+Use one manually dispatched GitHub Actions workflow with sequential, resumable segment jobs. Each segment may complete at most 6,000 new seeded operations and has a four-hour, forty-five-minute soft deadline. At the observed remote-soak rate, the expected execution is four active segments of 6,000, 6,000, 6,000, and 4,000 operations. Six segment slots are available so slower hosted runners can stop safely at the soft deadline and continue in later slots. A slot that receives an already complete run validates and republishes its predecessor state without making DDS requests, so the gate always consumes the deterministic sixth state artifact.
 
 The 6,000-operation limit aligns with three complete 2,000-operation Durable Object shards. The limit is a ceiling rather than a requirement: a segment may stop after its current completed operation when its deadline is reached. It must never abandon a request in flight merely to meet the soft deadline. Every durable completion remains the only authority for cursor advancement.
 
@@ -16,7 +16,11 @@ The workflow is `workflow_dispatch` only. Pushes, pull requests, schedules, and 
 
 ### Preparation
 
-The preparation job checks out the exact commit, installs the pinned project dependencies and native DDS baseline, runs the relevant local tests, derives an ephemeral remote test key, deploys a newly named `ss-dds-soak-*` Worker, and verifies the deployed version. It uploads a deployment artifact containing only the checked deployment manifest and non-secret endpoint metadata needed by later jobs.
+The preparation job checks out the exact commit, installs the pinned project dependencies and native DDS baseline, runs the relevant local tests, derives an ephemeral remote test key, deploys a newly named `ss-dds-soak-*` Worker, and verifies the deployed version.
+
+Before any deployment command can run, preparation creates and successfully uploads a pre-deployment identity artifact. Its versioned schema contains the repository full name, trusted workflow name, run ID, run attempt, commit SHA, and the deterministic Worker name `ss-dds-soak-gh-<run-id>-<run-attempt>`. The name is recomputed from GitHub event data and must satisfy the temporary-name validator; artifact content can never select an arbitrary deletion target. If cancellation occurs before this artifact finishes uploading, no deployment step has started. If it occurs afterwards, the cleanup backstop can derive and remove the one exact possible object even when the post-deployment artifact was never written.
+
+After verification, preparation uploads a versioned deployment record containing the complete pre-deployment identity plus the exact workers.dev endpoint, deployment-manifest schema version, build ID, deployed version ID, generated Worker name, Wrangler version, Wasm and harness content hashes, and temporary configuration hash. The segment verifier requires equality for repository, workflow, run ID, attempt, commit, generated name, endpoint host, build, version, and all hashes before remote execution.
 
 The deployment script remains responsible for deleting a partially created object when deployment or verification fails. The preparation job cannot publish a successful deployment artifact until deployment verification succeeds.
 
@@ -27,21 +31,27 @@ Segment jobs run sequentially. Each downloads the immutable deployment artifact 
 The runner accepts two additional bounded-execution options:
 
 - `--max-new-operations 6000` limits only newly completed seeded operations in the current process. Fixture and preflight recovery do not consume this count.
-- `--deadline-ms 18000000` requests a graceful pause once five hours have elapsed. The deadline is checked before beginning another seeded operation, never between the remote response and its durable local completion.
+- `--deadline-ms 17100000` requests a graceful pause after four hours and forty-five minutes. The deadline is checked before beginning another seeded operation, never between the remote response and its durable local completion.
+
+Every remote attempt retains the existing 60-second timeout and at most one same-identity retry, including its bounded retry delay. Native DDS subprocesses receive an explicit three-minute operation timeout. A segment job has a 355-minute GitHub timeout, leaving more than one hour after the soft deadline for the bounded in-flight operation, final checkpoint, compression, artifact upload, and failure cleanup.
 
 A bounded segment is successful when it either reaches 22,000 total operations or writes a valid resumable checkpoint and reports a paused disposition. A terminal transport, parity, protocol, accounting, activation, or artifact-integrity failure remains a failed job and is never converted into a pause.
 
-Each segment always uploads its resulting run directory as a uniquely named compressed artifact. The next slot downloads exactly the artifact named by its declared predecessor; it does not search for an arbitrary or newest artifact. The deployment manifest is carried separately and never changes between segments.
+After every normal, paused, complete, or caught terminal-runner exit, the segment attempts to upload its resulting run directory as a uniquely named compressed artifact. Forced runner termination or infrastructure loss may prevent that upload; in that case the last successfully published predecessor remains the only recoverable state. The next slot downloads exactly the artifact named by its declared predecessor; it does not search for an arbitrary or newest artifact. A missing successor artifact fails the chain rather than falling back silently. The deployment manifest is carried separately and never changes between segments.
+
+All six slots execute in order. A slot receiving `COMPLETE` state performs integrity validation and republishes an unchanged successor artifact. Therefore slot `n` always consumes `state-<n-1>`, always attempts to publish `state-<n>`, and the gate always consumes `state-6`. The segment state machine has exactly three dispositions: `PAUSED` exits zero with a valid checkpoint and incomplete cursor, `COMPLETE` exits zero only at cursor 22,000, and `FAILED` exits nonzero with a terminal failure record when one can be written. Infrastructure loss without a final record is distinguished by the absent successor artifact.
 
 ### Gate and evidence
 
-After the segment chain, the gate job verifies that the report has no terminal failure and that the completed cursor is exactly 22,000 before invoking the existing remote gate checker. An incomplete run is a workflow failure, not a partial pass. The final deployment manifest, run directory, gate output, and cleanup result are retained as evidence. Secrets are excluded from all artifacts.
+After the segment chain, the gate job verifies that the report has no terminal failure and that the completed cursor is exactly 22,000 before invoking the existing remote gate checker. An incomplete run is a workflow failure, not a partial pass.
+
+The final deployment manifest, run directory, gate output, and cleanup result are retained for 30 days as evidence. Intermediate state artifacts are retained for seven days. Secrets are excluded from all artifacts. Failure to upload the final evidence or cleanup result keeps the workflow failed even if the computational gates passed; failure to upload an intermediate state prevents successor execution.
 
 ## Secret handling
 
-GitHub repository secrets provide `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`. The workflow never prints them and does not write them to an artifact. The Cloudflare token is passed only to deployment and teardown processes.
+GitHub repository secrets provide `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`. The workflow never prints them and does not write them to an artifact. The Cloudflare token is exposed only as step-scoped input to deployment, teardown, and the small inline key-derivation step; soak runner, test, compression, and artifact-action steps do not receive it.
 
-Each job independently derives the same 32-byte base64url `DDS_REMOTE_TEST_KEY` from the Cloudflare token and the domain-separated workflow identity: repository full name, primary workflow run ID, and run attempt. The derivation uses HMAC-SHA-256, and the workflow masks the derived value before exporting it to later steps. The derived key is never a job output, workflow output, file, report, cache, or artifact. A re-run attempt derives a distinct key and therefore performs a new deployment rather than attaching to an older attempt.
+Each job independently derives the same 32-byte base64url `DDS_REMOTE_TEST_KEY` from the Cloudflare token and the domain-separated workflow identity: repository full name, primary workflow run ID, and run attempt. The derivation uses HMAC-SHA-256 in an inline trusted workflow step, masks the derived value before exporting it to later steps, and removes the Cloudflare token from subsequent step environments. The derived key is never a job output, workflow output, file, report, cache, or artifact. A re-run attempt derives a distinct key and therefore performs a new deployment rather than attaching to an older attempt.
 
 The temporary endpoint retains the existing two-factor gate: `DDS_REMOTE_TEST=true` and the derived request key. No Zone, DNS, custom-domain, KV, R2, or production route configuration is part of the workflow.
 
@@ -49,23 +59,25 @@ The temporary endpoint retains the existing two-factor gate: `DDS_REMOTE_TEST=tr
 
 The existing journal remains the source of truth for pending intents, completed operations, physical requests, remote accounting, and evidence. Resume revalidates its contiguous cursor, source hashes, deployment build ID, Worker version ID, request hashes, replay state, and accounting projections before issuing another request.
 
-Artifacts are never merged. Every segment consumes one predecessor artifact and emits one successor artifact. Artifact names include the primary workflow run ID, run attempt, and segment number. A segment refuses an artifact whose embedded workflow identity does not match its current run. This prevents a manual upload or an artifact from another run from being resumed accidentally.
+Artifacts are never merged. Every segment consumes one predecessor artifact and emits one successor artifact. Artifact names include the primary workflow run ID, run attempt, and segment number. The state manifest repeats the orchestration identity schema and binds the journal hash. A segment refuses an artifact whose repository, workflow, run ID, run attempt, commit SHA, Worker name, endpoint, deployment version, build ID, configuration hash, or journal hash does not match the verified deployment record and current GitHub context. This prevents a manual upload or an artifact from another run from being resumed accidentally.
 
 The workflow does not use caches for mutable soak state. GitHub artifacts are used because each handoff is immutable and auditable. Compression reduces transfer size but does not alter the checked journal contents.
 
 ## Cleanup
 
-Cleanup is identity-scoped and idempotent. It accepts only a verified deployment manifest whose Worker name begins with `ss-dds-soak-` and whose build and version bindings match the checked source. It performs these steps:
+Cleanup is identity-scoped and idempotent. It accepts only a versioned orchestration identity whose recomputed Worker name begins with `ss-dds-soak-`. It performs these steps:
 
-1. Disable the exact Worker's `workers.dev` public subdomain or deploy the existing closed test configuration.
-2. Verify that an authenticated test-route probe returns the opaque 404 response when an endpoint still resolves.
-3. Resolve the exact current Workers object by the manifest's generated name and version identity.
+1. Delete the exact Worker's `workers.dev` subdomain mapping through the Cloudflare API. Cleanup never deploys another version and therefore never changes the version identity it is checking.
+2. Verify that the former endpoint returns 404 when it still resolves; DNS-level absence is also accepted after the mapping deletion.
+3. Resolve the exact current Workers object by the recomputed generated name and, when available, the verified deployment version identity.
 4. Delete only that immutable Worker object.
 5. Confirm the exact identity is absent from both the current Workers object API and the legacy scripts listing.
 
-An already absent exact object is cleanup success. A name collision, mismatched version, missing identity binding, or any additional candidate is a hard refusal rather than permission to delete broadly. Cleanup never deletes by prefix alone.
+An already absent exact object is cleanup success. With a verified post-deployment record, cleanup requires its exact version and content bindings before deletion. When cancellation happened before that record could be uploaded, cleanup instead accepts only the previously published pre-deployment identity, recomputes the deterministic name from the trusted triggering event, and deletes at most the single exact-name object; it does not accept any target field from artifact data without recomputation. A name mismatch, malformed identity, or more than one exact candidate is a hard refusal rather than permission to delete broadly. Cleanup never deletes by prefix alone.
 
-The primary workflow has an `always()` cleanup job that runs after gate success, segment failure, or ordinary job failure. A separate `workflow_run` completion workflow is the backstop for cancellation or runner loss. It downloads the primary run's verified deployment artifact by exact run ID and performs the same idempotent cleanup. If no successful deployment artifact exists, it performs no deletion because the deployment helper is already required to clean partial creation.
+The primary workflow has an `always()` cleanup job that runs after gate success, segment failure, or ordinary job failure. A separate `workflow_run` completion workflow is the backstop for cancellation or runner loss. It triggers only for the exact primary workflow name and the `completed` event, uses `actions: read` and `contents: read` with no write permission, and downloads artifacts only from the triggering run ID and run attempt. Third-party actions are pinned by full commit SHA.
+
+The backstop checks out cleanup code only from the repository default branch, never the triggering commit. It treats downloaded JSON and archives as untrusted data, never executes artifact content, recomputes the expected Worker name from trusted event fields, and permits deletion only after the pre-deployment identity matches those fields. It prefers the fully verified deployment record when present, but the pre-deployment record is sufficient for cancellation-safe exact-name cleanup. If neither identity artifact exists, no deployment step could have begun and cleanup performs no deletion.
 
 The cleanup workflow records whether the exact object was already absent or was disabled and deleted. It does not enumerate or modify unrelated Workers beyond the read-only lists required to prove exact absence.
 
@@ -73,17 +85,18 @@ The cleanup workflow records whether the exact object was already absent or was 
 
 - Missing secrets, dependency installation failure, local test failure, or failed deployment stops before soak execution.
 - Missing, ambiguous, corrupt, or cross-run artifacts stop the segment without issuing remote DDS calls.
-- A soft deadline or 6,000-operation ceiling creates a resumable pause, not a failure.
+- A soft deadline or 6,000-operation ceiling creates `PAUSED`, not a failure.
 - A terminal soak error preserves and uploads the evidence, prevents later segments and gate execution, and proceeds to cleanup.
 - If six segment slots do not reach 22,000 operations, the gate fails as incomplete and cleanup still runs.
+- Forced termination may prevent a segment's `always()` upload; recovery then stops at the last successfully published predecessor instead of claiming a newer cursor.
 - Cleanup failure is reported prominently and keeps the workflow red. The operator must retain the Cloudflare token until either primary or backstop cleanup confirms exact absence.
 - Token revocation is a human step after cleanup confirmation; the workflow cannot revoke the credential that authorizes itself.
 
 ## Testing
 
-Unit tests cover option validation, the 6,000-operation ceiling, deadline pauses, no-op completion, and the rule that terminal failures cannot be converted to pauses. Tests also cover deterministic domain-separated key derivation without exposing the input secret, artifact-identity validation, idempotent exact cleanup, refusal on identity mismatch, and absence confirmation through both Cloudflare listings.
+Unit tests cover option validation, the 6,000-operation ceiling, deadline pauses, bounded native operations, no-op completion, and the rule that terminal failures cannot be converted to pauses. Tests also cover deterministic domain-separated key derivation without exposing the input secret, the pre-deployment and deployment artifact schemas, artifact-identity validation, cancellation between identity publication and deployment-record publication, idempotent exact cleanup, refusal on identity mismatch, and absence confirmation through both Cloudflare listings.
 
-Workflow contract tests parse the checked-in YAML and require manual dispatch only, non-cancelling concurrency, six ordered segment slots, explicit job timeouts greater than the five-hour soft deadline but no greater than GitHub's six-hour limit, immutable predecessor artifact names, gate-before-cleanup ordering, an `always()` primary cleanup, and a `workflow_run` cleanup backstop.
+Workflow contract tests parse the checked-in YAML and require manual dispatch only, non-cancelling concurrency, six ordered segment slots, explicit 355-minute job timeouts with a 285-minute soft deadline, immutable predecessor artifact names, deterministic sixth-artifact gate input, fixed retention periods, gate-before-cleanup ordering, an `always()` primary cleanup, a restricted `workflow_run` cleanup backstop, default-branch trusted cleanup code, and full-SHA third-party action pins.
 
 The complete local Node test suite must pass before the workflow files are committed. The remote workflow itself is accepted only after a manually dispatched run reaches exactly 22,000 operations, passes every existing remote gate, uploads complete evidence, exits all runner jobs, and confirms the temporary Worker is absent from both Cloudflare APIs.
 
