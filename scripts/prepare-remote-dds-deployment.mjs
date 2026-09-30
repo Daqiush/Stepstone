@@ -61,6 +61,35 @@ export function createTemporaryWorkersConfig({ root = resolve(import.meta.dirnam
   for (const key of ['route', 'routes', 'zone_id', 'zone_name']) delete source[key];
   return { ...source, main: resolve(root, 'workers', source.main), name: scriptName, workers_dev: true };
 }
+
+function workersObjectsUrl(accountId) {
+  return `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/workers/workers`;
+}
+
+async function findTemporaryWorkerObject({ fetchImpl, accountId, apiToken, temporaryWorkerName }) {
+  const scriptName = assertTemporaryWorkerName(temporaryWorkerName);
+  const response = await fetchImpl(workersObjectsUrl(accountId), { headers: { authorization: `Bearer ${apiToken}` } });
+  const payload = await response.json();
+  if (!response.ok || payload?.success !== true || !Array.isArray(payload.result)) throw new Error('Workers API did not list Worker objects');
+  const matches = payload.result.filter((item) => item?.name === scriptName);
+  if (matches.length > 1) throw new Error('Workers API returned duplicate temporary Worker identities');
+  if (!matches.length) return null;
+  const worker = matches[0];
+  if (typeof worker.id !== 'string' || !/^[a-f0-9]{32}$/i.test(worker.id)) throw new Error('Workers API returned an invalid temporary Worker ID');
+  return { id: worker.id, name: scriptName };
+}
+
+async function deleteTemporaryWorkerObject({ fetchImpl, accountId, apiToken, worker }) {
+  const scriptName = assertTemporaryWorkerName(worker?.name);
+  if (typeof worker?.id !== 'string' || !/^[a-f0-9]{32}$/i.test(worker.id)) throw new Error('A verified temporary Worker object is required');
+  const base = workersObjectsUrl(accountId);
+  const deleted = await fetchImpl(`${base}/${encodeURIComponent(worker.id)}`, { method: 'DELETE', headers: { authorization: `Bearer ${apiToken}` } });
+  const deletedPayload = await deleted.json();
+  if (!deleted.ok || deletedPayload?.success !== true) throw new Error('Workers API did not delete the temporary Worker object');
+  const absent = await findTemporaryWorkerObject({ fetchImpl, accountId, apiToken, temporaryWorkerName: scriptName });
+  if (absent !== null) throw new Error('Temporary Worker object still exists after deletion');
+  return { deleted: true };
+}
 function findWorkersDevUrl(value) {
   if (typeof value === 'string') {
     try { return assertWorkersDevUrl(value); } catch { return null; }
@@ -76,7 +105,8 @@ export async function verifyWorkersDeployment({ fetchImpl = fetch, accountId, sc
   if (!response.ok || payload?.result?.id !== expectedVersionId) throw new Error('Workers API did not verify the deployed version ID');
   return { versionId: String(expectedVersionId).trim(), apiVerified: true, wranglerVersion: String(wranglerVersion).trim() };
 }
-export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImpl = fetch, wrangler = process.platform === 'win32' ? 'wrangler.cmd' : 'wrangler', root = resolve(import.meta.dirname, '..'), accountId, apiToken, remoteTestKey, randomUUID = systemRandomUUID }) {
+export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImpl = fetch, wrangler = process.platform === 'win32' ? 'wrangler.cmd' : 'wrangler', root = resolve(import.meta.dirname, '..'), accountId, apiToken, remoteTestKey, randomUUID = systemRandomUUID,
+  sleepImpl = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)) }) {
   if (!accountId || !apiToken || !remoteTestKey) throw new Error('Temporary Workers deployment requires account, token, and remote test key');
   if (!/^[A-Za-z0-9_-]{43}$/.test(remoteTestKey)) throw new Error('Remote test key must be a 32-byte base64url value');
   const temporaryWorkerName = createTemporaryWorkerName(randomUUID);
@@ -84,14 +114,23 @@ export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImp
   const buildId = sha256(canonicalJson({ version: DEPLOYMENT_MANIFEST_VERSION, assets }));
   const configDir = mkdtempSync(join(tmpdir(), 'stepstone-dds-soak-'));
   const configPath = join(configDir, 'wrangler.json');
+  let knownWorker = null;
   try {
     // Deploy first so Wrangler never has to create a placeholder Worker while
     // consuming the secret from stdin.  Until the secret exists, the remote
     // harness still fails closed with an opaque 404.
     writeFileSync(configPath, `${JSON.stringify(createTemporaryWorkersConfig({ root, temporaryWorkerName }))}\n`, 'utf8');
     const childOptions = { encoding: 'utf8', cwd: root, ...(process.platform === 'win32' ? { shell: true } : {}) };
-    execFile(wrangler, ['deploy', '--config', configPath,
-      '--var', 'DDS_REMOTE_TEST:true', '--var', `DDS_DEPLOYMENT_BUILD_ID:${buildId}`], childOptions);
+    const deployArgs = ['deploy', '--config', configPath,
+      '--var', 'DDS_REMOTE_TEST:true', '--var', `DDS_DEPLOYMENT_BUILD_ID:${buildId}`];
+    try {
+      execFile(wrangler, deployArgs, childOptions);
+    } catch (firstError) {
+      knownWorker = await findTemporaryWorkerObject({ fetchImpl, accountId, apiToken, temporaryWorkerName });
+      if (knownWorker === null) throw firstError;
+      await sleepImpl(2000);
+      execFile(wrangler, deployArgs, childOptions);
+    }
     // The key is intentionally supplied only to Wrangler stdin, never config or report.
     execFile(process.execPath, [WRANGLER_CLI_PATH, 'secret', 'put', 'DDS_REMOTE_TEST_KEY', '--config', configPath],
       { encoding: 'utf8', cwd: root, input: `${remoteTestKey}\n` });
@@ -107,6 +146,10 @@ export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImp
     const wranglerVersion = String(execFile(wrangler, ['--version'], childOptions)).trim();
     const verified = await verifyWorkersDeployment({ fetchImpl, accountId, scriptName: temporaryWorkerName, apiToken, expectedVersionId: versionId, wranglerVersion });
     return { ...verified, workersDevUrl, temporaryWorkerName };
+  } catch (error) {
+    const worker = knownWorker ?? await findTemporaryWorkerObject({ fetchImpl, accountId, apiToken, temporaryWorkerName });
+    if (worker !== null) await deleteTemporaryWorkerObject({ fetchImpl, accountId, apiToken, worker });
+    throw error;
   } finally { rmSync(configDir, { recursive: true, force: true }); }
 }
 export async function teardownTemporaryWorkers({ execFile = execFileSync, fetchImpl = fetch, wrangler = process.platform === 'win32' ? 'wrangler.cmd' : 'wrangler', root = resolve(import.meta.dirname, '..'), accountId, temporaryWorkerName, workersDevUrl, remoteTestKey, apiToken, randomUUID = systemRandomUUID }) {
@@ -116,7 +159,6 @@ export async function teardownTemporaryWorkers({ execFile = execFileSync, fetchI
   if (!/^[A-Za-z0-9_-]{43}$/.test(remoteTestKey)) throw new Error('Remote test key must be a 32-byte base64url value');
   const configDir = mkdtempSync(join(tmpdir(), 'stepstone-dds-soak-close-'));
   const configPath = join(configDir, 'wrangler.json');
-  const scriptUrl = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(scriptName)}`;
   try {
     writeFileSync(configPath, `${JSON.stringify(createTemporaryWorkersConfig({ root, temporaryWorkerName: scriptName }))}\n`, 'utf8');
     // Close the authenticated harness before deleting the temporary endpoint.
@@ -130,11 +172,9 @@ export async function teardownTemporaryWorkers({ execFile = execFileSync, fetchI
       'x-dds-request-hash': requestHash(closeRoute, closeBody), 'x-dds-shard': '0',
     } });
     if (closeProbe.status !== 404) throw new Error('Temporary Worker closure probe did not receive opaque 404');
-    const deleted = await fetchImpl(scriptUrl, { method: 'DELETE', headers: { authorization: `Bearer ${apiToken}` } });
-    if (!deleted.ok) throw new Error('Workers API did not delete the temporary Worker');
-    const absent = await fetchImpl(scriptUrl, { headers: { authorization: `Bearer ${apiToken}` } });
-    if (absent.ok) throw new Error('Temporary Worker still exists after deletion');
-    return { deleted: true };
+    const worker = await findTemporaryWorkerObject({ fetchImpl, accountId, apiToken, temporaryWorkerName: scriptName });
+    if (worker === null) throw new Error('Temporary Worker object is missing before deletion');
+    return await deleteTemporaryWorkerObject({ fetchImpl, accountId, apiToken, worker });
   } finally { rmSync(configDir, { recursive: true, force: true }); }
 }
 export function createDeploymentManifest({ root = resolve(import.meta.dirname, '..'), verifiedDeployment } = {}) {

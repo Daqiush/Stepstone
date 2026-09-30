@@ -95,6 +95,70 @@ test('deployment integration resolves version and workers.dev URL from Cloudflar
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test('temporary deployment retries the same generated Worker after the beta object becomes visible', async () => {
+  const mod = await deployment(); const root = repo();
+  try {
+    const temporaryWorkerName = 'ss-dds-soak-11111111-1111-4111-8111-111111111111';
+    let deployAttempts = 0;
+    const calls = [];
+    const verified = await mod.deployAndVerifyWorkers({ root, accountId: 'acct', apiToken: 'token', remoteTestKey: 'a'.repeat(43),
+      randomUUID: () => '11111111-1111-4111-8111-111111111111', sleepImpl: async () => {},
+      execFile: (command, args) => {
+        calls.push({ command, args });
+        if (args[0] === 'deploy') {
+          deployAttempts += 1;
+          if (deployAttempts === 1) throw new Error('Worker does not exist [code: 10007]');
+          return 'deployed';
+        }
+        if (args[1] === 'secret') return '';
+        if (args[0] === '--version') return '4.33.0\n';
+        throw new Error('unexpected command');
+      },
+      fetchImpl: async (url) => {
+        calls.push({ url });
+        if (url.endsWith('/workers/workers')) return { ok: true, json: async () => ({ success: true, result: [{ id: 'a'.repeat(32), name: temporaryWorkerName }] }) };
+        if (url.endsWith('/versions')) return { ok: true, json: async () => ({ result: { items: [{ id: 'deployed-v1' }] } }) };
+        if (url.endsWith('/workers/subdomain')) return { ok: true, json: async () => ({ result: { subdomain: 'example' } }) };
+        return { ok: true, json: async () => ({ result: { id: 'deployed-v1' } }) };
+      },
+    });
+    assert.equal(deployAttempts, 2);
+    assert.equal(verified.temporaryWorkerName, temporaryWorkerName);
+    assert.equal(calls.filter((call) => call.args?.[0] === 'deploy').length, 2);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('temporary deployment deletes its exact partial beta Worker when the retry also fails', async () => {
+  const mod = await deployment(); const root = repo();
+  try {
+    const temporaryWorkerName = 'ss-dds-soak-22222222-2222-4222-8222-222222222222';
+    const workerId = 'b'.repeat(32);
+    let deployAttempts = 0, deleted = false, listReads = 0;
+    await assert.rejects(() => mod.deployAndVerifyWorkers({ root, accountId: 'acct', apiToken: 'token', remoteTestKey: 'a'.repeat(43),
+      randomUUID: () => '22222222-2222-4222-8222-222222222222', sleepImpl: async () => {},
+      execFile: (command, args) => {
+        if (args[0] !== 'deploy') throw new Error('unexpected command');
+        deployAttempts += 1;
+        throw new Error('Worker does not exist [code: 10007]');
+      },
+      fetchImpl: async (url, options = {}) => {
+        if (url.endsWith(`/workers/workers/${workerId}`) && options.method === 'DELETE') {
+          deleted = true;
+          return { ok: true, json: async () => ({ success: true }) };
+        }
+        if (url.endsWith('/workers/workers')) {
+          listReads += 1;
+          return { ok: true, json: async () => ({ success: true, result: deleted ? [] : [{ id: workerId, name: temporaryWorkerName }] }) };
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      },
+    }), /10007/);
+    assert.equal(deployAttempts, 2);
+    assert.equal(deleted, true);
+    assert.equal(listReads, 2);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('temporary remote deployment enables only workers.dev and keeps the test key out of generated configuration', async () => {
   const mod = await deployment(); const root = repo();
   try {
@@ -144,13 +208,19 @@ test('temporary Worker teardown uses only a generated identity, closes the keyed
     const calls = [];
     const temporaryWorkerName = 'ss-dds-soak-33333333-3333-4333-8333-333333333333';
     const workersDevUrl = 'https://ss-dds-soak-33333333-3333-4333-8333-333333333333.example.workers.dev';
+    const workerId = 'c'.repeat(32);
+    let listed = true;
     await mod.teardownTemporaryWorkers({ root, accountId: 'acct', temporaryWorkerName, workersDevUrl, remoteTestKey: 'a'.repeat(43), apiToken: 'token', randomUUID: () => '44444444-4444-4444-8444-444444444444',
       execFile: (command, args, options) => { calls.push({ command, args, options }); return args[0] === 'deploy' ? 'deployed' : ''; },
       fetchImpl: async (url, options = {}) => {
         calls.push({ url, options });
         if (url === `${workersDevUrl}/__dds/metrics`) return { ok: false, status: 404, json: async () => ({}) };
-        if (options.method === 'DELETE') return { ok: true, json: async () => ({ success: true }) };
-        return { ok: false, status: 404, json: async () => ({ success: false }) };
+        if (url.endsWith(`/workers/workers/${workerId}`) && options.method === 'DELETE') {
+          listed = false;
+          return { ok: true, json: async () => ({ success: true }) };
+        }
+        if (url.endsWith('/workers/workers')) return { ok: true, json: async () => ({ success: true, result: listed ? [{ id: workerId, name: temporaryWorkerName }] : [] }) };
+        throw new Error(`unexpected fetch: ${url}`);
       },
     });
     assert.ok(calls.find((call) => call.args?.includes('DDS_REMOTE_TEST:false')));
@@ -165,7 +235,8 @@ test('temporary Worker teardown uses only a generated identity, closes the keyed
     assert.equal(closureProbe.options.headers['x-dds-test-key'], 'a'.repeat(43));
     assert.match(closureProbe.options.headers['x-dds-run-id'], /^[0-9a-f-]{36}$/i);
     assert.equal(closureProbe.options.headers['x-dds-operation-id'], 'teardown.close.000001');
-    assert.equal(calls.find((call) => call.options?.method === 'DELETE').url, `https://api.cloudflare.com/client/v4/accounts/acct/workers/scripts/${temporaryWorkerName}`);
+    assert.equal(calls.find((call) => call.options?.method === 'DELETE').url, `https://api.cloudflare.com/client/v4/accounts/acct/workers/workers/${workerId}`);
+    assert.equal(calls.filter((call) => call.url?.endsWith('/workers/workers')).length, 2);
     assert.equal(JSON.stringify(calls).includes('DDS_REMOTE_TEST_KEY'), false);
     await assert.rejects(() => mod.teardownTemporaryWorkers({ root, accountId: 'acct', temporaryWorkerName, workersDevUrl, remoteTestKey: 'a'.repeat(43), apiToken: 'token',
       execFile: () => '', fetchImpl: async (url) => url === `${workersDevUrl}/__dds/metrics` ? ({ ok: true, status: 200, json: async () => ({}) }) : ({ ok: false, status: 404, json: async () => ({}) }),
