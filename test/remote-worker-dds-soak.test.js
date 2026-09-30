@@ -50,6 +50,25 @@ test('segment stop reason respects operation, deadline, and completion boundarie
   assert.equal(segmentStopReason({ ...base, completedNow: 22000, nowMs: 17_101_000 }), 'COMPLETE');
 });
 
+test('native baseline bounds both table and solve subprocesses with the configured timeout', async () => {
+  const { createNativeBaseline } = await import('../scripts/remote-worker-dds-soak.mjs');
+  const calls = [];
+  const native = createNativeBaseline({
+    runProcess: async (programPath, input, options) => {
+      calls.push({ programPath, input, options });
+      return programPath.endsWith('calc') ? '0 1 2 3 4 5 6 7 8 9 10 11 12 13 0 1 2 3 4 0' : '1 1 0 2';
+    },
+    paths: { calc: 'fake-calc', solve: 'fake-solve' },
+    existsSync: () => true,
+  });
+
+  const hands = { N: [{ suit: 'S', rank: 2 }], E: [], S: [], W: [] };
+  const deal = { trump: 'NT', trickLeader: 'N', trickPlayed: [], hands };
+  assert.deepEqual(await native.calcDDTable(hands), [[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10, 11], [12, 13, 0, 1], [2, 3, 4, 0]]);
+  assert.deepEqual(await native.solveBoard(deal), { score: 1, cards: [{ suit: 'S', rank: 2 }] });
+  assert.deepEqual(calls.map(({ options }) => options), [{ timeoutMs: 180000 }, { timeoutMs: 180000 }]);
+});
+
 test('recovery restores journaled preflight evidence when the preflight checkpoint write was interrupted', async () => {
   const state = await import('../scripts/remote-dds-soak-state.mjs');
   const runner = await import('../scripts/remote-worker-dds-soak.mjs');

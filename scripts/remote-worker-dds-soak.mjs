@@ -11,12 +11,21 @@ import { assertDeploymentManifest } from './prepare-remote-dds-deployment.mjs';
 import { writeReportCheckpoint } from './worker-dds-checkpoint.mjs';
 
 const require = createRequire(import.meta.url);
-const { calcDDTable, solveBoard } = require('../dds-wrapper.js');
+const { createDdsClient } = require('../dds-wrapper.js');
+const { resolveDdsPaths } = require('../dds-paths.js');
+const { runDdsProcess } = require('../dds-process.js');
 export const OPERATION_COUNT = 22000;
 export const SHARD_COUNT = 11;
 export const DEPTH_COUNT = 13;
 export const MAX_TRANSPORT_RETRIES = 64;
 const ROOT = resolve(import.meta.dirname, '..');
+
+export function createNativeBaseline({ timeoutMs = 180000, runProcess = (programPath, input, options) =>
+  runDdsProcess(programPath, input, undefined, options), paths = resolveDdsPaths({ rootDir: ROOT }), existsSync: fileExistsSync = existsSync } = {}) {
+  return createDdsClient({ paths, existsSync: fileExistsSync,
+    runProcess: (programPath, input) => runProcess(programPath, input, { timeoutMs }) });
+}
+const nativeBaseline = createNativeBaseline();
 
 export function assertRemoteEndpoint(value) {
   let url; try { url = new URL(value); } catch { throw new Error('Remote Worker URL must be an HTTPS workers.dev root URL'); }
@@ -197,7 +206,7 @@ function verify(operation, baseline, remote) {
   if (comparison.parityMismatch) throw new Error(`DDS parity mismatch at ${operation.id}`);
   return { candidateDifference: comparison.candidateDifference, worker };
 }
-async function baseline(operation) { return operation.kind === 'table' ? calcDDTable(operation.item.hands) : solveBoard(operation.item.deal); }
+async function baseline(operation) { return operation.kind === 'table' ? nativeBaseline.calcDDTable(operation.item.hands) : nativeBaseline.solveBoard(operation.item.deal); }
 async function runFixtureChecks({ endpoint, key, runId, fixtures, buildId, evidence, state, retryBudget }) {
   for (const [index, item] of fixtures.entries()) {
     const kind = item.kind, route = kind === 'table' ? '/__dds/table' : '/__dds/ordered-probe';
@@ -208,7 +217,7 @@ async function runFixtureChecks({ endpoint, key, runId, fixtures, buildId, evide
     const remote = await remotePost(endpoint, { key, runId, operationId, route, body, shard: 0 }, { retryBudget });
     const op = { kind, id: item.id, item: kind === 'table' ? { hands: item.hands } : { deal: JSON.parse(body).deal } };
     const worker = unwrap(op, remote); const expected = item.expected?.table ?? item.expected;
-    const native = kind === 'table' ? await calcDDTable(item.hands) : await solveBoard(op.item.deal);
+    const native = kind === 'table' ? await nativeBaseline.calcDDTable(item.hands) : await nativeBaseline.solveBoard(op.item.deal);
     if (JSON.stringify(normalizeDdsResult(kind, worker)) !== JSON.stringify(normalizeDdsResult(kind, native))) throw new Error(`Fixture native parity mismatch: ${item.id}`);
     if (JSON.stringify(normalizeDdsResult(kind, native)) !== JSON.stringify(normalizeDdsResult(kind, expected))) throw new Error(`Fixture corpus drift: ${item.id}`);
     if (index === 0 && remote.operationResult.buildId !== undefined) assertEndpointBuild(remote.operationResult, buildId);
