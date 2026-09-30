@@ -1,0 +1,161 @@
+const assert = require('node:assert/strict');
+const { mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync } = require('node:fs');
+const { tmpdir } = require('node:os');
+const { join, resolve } = require('node:path');
+const { spawnSync } = require('node:child_process');
+const test = require('node:test');
+
+const INPUT = { repository: 'Daqiush/Stepstone', workflow: 'Remote DDS Soak', runId: '123456789', runAttempt: '2', commitSha: 'a'.repeat(40), secret: 'not-persisted' };
+const cli = resolve(__dirname, '../scripts/remote-dds-ci-identity.mjs');
+const mod = () => import('../scripts/remote-dds-ci-identity.mjs');
+const contextArgs = ['--repository', INPUT.repository, '--workflow', INPUT.workflow, '--run-id', INPUT.runId, '--run-attempt', INPUT.runAttempt, '--commit-sha', INPUT.commitSha];
+
+test('test key uses the pinned UTF-8 JSON HMAC vector and binds only repository/run/attempt', async () => {
+  const { deriveRemoteTestKey } = await mod();
+  const key = deriveRemoteTestKey(INPUT);
+  assert.equal(key, 'EpcIq_vg1echjFz_T43uSTY6xxYXivOmobzaTD8CVVk');
+  for (const [field, value] of [['repository', 'Other/Stepstone'], ['runId', '123456790'], ['runAttempt', '3']]) {
+    assert.notEqual(deriveRemoteTestKey({ ...INPUT, [field]: value }), key);
+  }
+  for (const [field, value] of [['workflow', 'Other Workflow'], ['commitSha', 'b'.repeat(40)]]) {
+    assert.equal(deriveRemoteTestKey({ ...INPUT, [field]: value }), key);
+  }
+});
+
+test('ownership attestation uses the pinned JSON HMAC vector and binds every ownership field', async () => {
+  const { deriveOwnershipAttestation } = await mod();
+  const tag = deriveOwnershipAttestation(INPUT);
+  assert.equal(tag, 'buVvZra9TTq74waSHSSg5gmurFfEANzVDcSnZvPZeMU');
+  assert.match(tag, /^[A-Za-z0-9_-]{43}$/);
+  for (const [field, value] of [['repository', 'Other/Stepstone'], ['workflow', 'Other Workflow'], ['runId', '123456790'], ['runAttempt', '3'], ['commitSha', 'b'.repeat(40)]]) {
+    assert.notEqual(deriveOwnershipAttestation({ ...INPUT, [field]: value }), tag);
+  }
+});
+
+test('deterministic CI identity contains only non-secret ownership metadata', async () => {
+  const { deriveCiIdentity, deriveRemoteTestKey } = await mod();
+  const identity = deriveCiIdentity(INPUT);
+  assert.deepEqual(deriveCiIdentity(INPUT), identity);
+  assert.match(identity.workerName, /^ss-dds-soak-gh-123456789-2-[a-z0-9_-]{12}$/);
+  assert.equal(identity.workerName, 'ss-dds-soak-gh-123456789-2-6ee56f66b6bd');
+  assert.equal(identity.ownershipTag, 'buVvZra9TTq74waSHSSg5gmurFfEANzVDcSnZvPZeMU');
+  const persisted = JSON.stringify(identity);
+  assert.equal(persisted.includes(INPUT.secret), false);
+  assert.equal(persisted.includes(deriveRemoteTestKey(INPUT)), false);
+  assert.equal('secret' in identity, false);
+  assert.equal('remoteTestKey' in identity, false);
+  assert.throws(() => deriveCiIdentity({ ...INPUT, workerName: `${identity.workerName.slice(0, -1)}z` }), /worker.*name/i);
+});
+
+function manifest(identity) {
+  return { version: 1, buildId: '1'.repeat(64), workerVersionId: 'worker-v1',
+    verifiedDeployment: { versionId: 'worker-v1', apiVerified: true, wranglerVersion: '4.33.0', temporaryWorkerName: identity.workerName },
+    assets: { wasm: { path: 'workers/vendor/bridge-dds/dds-worker.wasm', bytes: 4, sha256: '2'.repeat(64) }, harness: {
+      'workers/src/index.mjs': { path: 'workers/src/index.mjs', bytes: 8, sha256: '3'.repeat(64) },
+      'workers/src/harness-router.mjs': { path: 'workers/src/harness-router.mjs', bytes: 9, sha256: '4'.repeat(64) },
+    } } };
+}
+
+test('versioned predeployment schema requires a canonical no-collision ISO timestamp and exact identity', async () => {
+  const m = await mod(); const trustedIdentity = m.deriveCiIdentity(INPUT);
+  const identity = m.createPreDeploymentIdentity({ identity: trustedIdentity, noCollisionVerifiedAt: '2026-09-30T12:00:00.000Z' });
+  assert.equal(identity.schemaVersion, 1);
+  assert.equal(identity.kind, 'remote-dds-predeployment-identity');
+  assert.deepEqual(m.assertPreDeploymentIdentity(identity, { trustedIdentity }), identity);
+  for (const timestamp of ['', '2026-09-30', '2026-02-30T12:00:00.000Z', '2026-09-30T12:00:00Z']) {
+    assert.throws(() => m.createPreDeploymentIdentity({ identity: trustedIdentity, noCollisionVerifiedAt: timestamp }), /timestamp|noCollisionVerifiedAt/i);
+  }
+  for (const [field, value] of [['schemaVersion', 2], ['kind', 'other'], ['workerName', 'ss-dds-soak-gh-123456789-2-000000000000'], ['ownershipTag', 'a'.repeat(43)], ['secret', 'cannot-persist']]) {
+    assert.throws(() => m.assertPreDeploymentIdentity({ ...identity, [field]: value }, { trustedIdentity }), /identity|schema|kind|field|worker|ownership/i);
+  }
+  assert.throws(() => m.assertCiIdentity({ ...trustedIdentity, remoteTestKey: 'must-not-persist' }), /field/i);
+});
+
+test('deployment record binds the complete deployment manifest and Cloudflare observations', async () => {
+  const m = await mod(); const trustedIdentity = m.deriveCiIdentity(INPUT);
+  const identity = m.createPreDeploymentIdentity({ identity: trustedIdentity, noCollisionVerifiedAt: '2026-09-30T12:00:00.000Z' });
+  const deploymentManifest = manifest(identity);
+  const record = m.createDeploymentRecord({ identity, endpoint: `https://${identity.workerName}.example.workers.dev`, deploymentManifest,
+    localConfigurationSha256: '5'.repeat(64), scriptETag: '"etag-observed"', versionConfigurationSha256: '6'.repeat(64) });
+  assert.deepEqual(record, { schemaVersion: 1, kind: 'remote-dds-deployment-record', identity, endpoint: `https://${identity.workerName}.example.workers.dev`,
+    deploymentManifestVersion: 1, buildId: '1'.repeat(64), workerVersionId: 'worker-v1', wranglerVersion: '4.33.0',
+    assets: { wasmSha256: '2'.repeat(64), harnessSha256: { 'workers/src/index.mjs': '3'.repeat(64), 'workers/src/harness-router.mjs': '4'.repeat(64) } },
+    localConfigurationSha256: '5'.repeat(64), scriptETag: '"etag-observed"', versionConfigurationSha256: '6'.repeat(64) });
+  assert.deepEqual(m.assertDeploymentRecord(record, { identity, deploymentManifest }), record);
+  for (const endpoint of ['http://worker.example.workers.dev', 'https://worker.example.workers.dev/path', 'https://worker.example.workers.dev?x=1', 'https://worker.example.workers.dev/', 'https://worker.example.com', `https://${identity.workerName}.example.workers.dev/#x`, `https://other.example.workers.dev`, `https://${identity.workerName}.workers.dev`]) {
+    assert.throws(() => m.assertDeploymentRecord({ ...record, endpoint }), /endpoint|workers.dev/i);
+  }
+  for (const mutate of [
+    (r) => { r.assets.harnessSha256['workers/src/extra.mjs'] = '7'.repeat(64); },
+    (r) => { delete r.assets.harnessSha256['workers/src/index.mjs']; },
+    (r) => { r.assets.harnessSha256['workers/src/index.mjs'] = '7'.repeat(64); },
+    (r) => { r.assets.wasmSha256 = '7'.repeat(64); },
+    (r) => { r.workerVersionId = 'other'; },
+    (r) => { r.wranglerVersion = 'other'; },
+    (r) => { r.buildId = '7'.repeat(64); },
+    (r) => { r.schemaVersion = 2; },
+    (r) => { r.secret = 'must-not-persist'; },
+  ]) {
+    const changed = structuredClone(record); mutate(changed);
+    assert.throws(() => m.assertDeploymentRecord(changed, { identity, deploymentManifest }), /deployment|manifest|asset|harness|version|field|build|wrangler/i);
+  }
+  for (const field of ['localConfigurationSha256', 'scriptETag', 'versionConfigurationSha256']) {
+    assert.throws(() => m.assertDeploymentRecord({ ...record, [field]: '' }), /hash|ETag|Sha256/i);
+  }
+});
+
+test('identity derivation strictly rejects invalid context and absent source secret', async () => {
+  const { deriveCiIdentity } = await mod();
+  const bad = [
+    ['repository', 'Stepstone'], ['repository', 'owner/repo/extra'], ['repository', ' owner/repo'], ['repository', 'owner/../repo'],
+    ['workflow', ''], ['workflow', ' Remote DDS Soak'], ['workflow', 'Remote\nDDS'],
+    ['runId', '0'], ['runId', '01'], ['runId', 123], ['runId', '1e8'],
+    ['runAttempt', '0'], ['runAttempt', '-1'], ['runAttempt', '01'], ['runAttempt', 2],
+    ['commitSha', 'a'.repeat(39)], ['commitSha', 'G'.repeat(40)], ['commitSha', 'A'.repeat(40)],
+    ['secret', ''], ['secret', undefined],
+  ];
+  for (const [field, value] of bad) assert.throws(() => deriveCiIdentity({ ...INPUT, [field]: value }), new RegExp(field === 'secret' ? 'secret' : field, 'i'), `${field}: ${value}`);
+});
+
+test('derive CLI masks the key before appending it and atomically writes a secret-free identity', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dds-ci-identity-'));
+  try {
+    const githubEnv = join(dir, 'github.env'); const out = join(dir, 'current-job.json');
+    writeFileSync(githubEnv, 'EXISTING=value\n');
+    const result = spawnSync(process.execPath, [cli, '--derive', ...contextArgs, '--github-env', githubEnv, '--identity-out', out], { env: { ...process.env, CLOUDFLARE_API_TOKEN: INPUT.secret }, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, '::add-mask::EpcIq_vg1echjFz_T43uSTY6xxYXivOmobzaTD8CVVk\n');
+    assert.equal(readFileSync(githubEnv, 'utf8'), 'EXISTING=value\nDDS_REMOTE_TEST_KEY=EpcIq_vg1echjFz_T43uSTY6xxYXivOmobzaTD8CVVk\n');
+    assert.deepEqual(JSON.parse(readFileSync(out, 'utf8')), (await mod()).deriveCiIdentity(INPUT));
+    assert.equal(readFileSync(out, 'utf8').includes(INPUT.secret), false);
+    assert.equal(`${result.stdout}${result.stderr}`.includes(INPUT.secret), false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('derive CLI rejects unknown, duplicate, mixed, and missing arguments without writing', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dds-ci-identity-invalid-'));
+  try {
+    const githubEnv = join(dir, 'github.env'); const base = [cli, '--derive', ...contextArgs, '--github-env', githubEnv];
+    for (const args of [base.concat('--unknown', 'x'), base.concat('--derive'), base.concat('--repository', INPUT.repository), base.concat('--create-ready'), base.slice(0, -1), [cli, ...contextArgs, '--github-env', githubEnv]]) {
+      const result = spawnSync(process.execPath, args, { env: { ...process.env, CLOUDFLARE_API_TOKEN: INPUT.secret }, encoding: 'utf8' });
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /identity CLI argument/i);
+      assert.equal(existsSync(githubEnv), false);
+      assert.equal(`${result.stdout}${result.stderr}`.includes(INPUT.secret), false);
+      assert.equal(result.stdout.includes('::add-mask::'), false);
+    }
+    const result = spawnSync(process.execPath, base, { env: { ...process.env, CLOUDFLARE_API_TOKEN: '', DDS_REMOTE_TEST_KEY: 'untrusted-key' }, encoding: 'utf8' });
+    assert.notEqual(result.status, 0);
+    assert.equal(existsSync(githubEnv), false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('derive CLI appends a separate GitHub environment assignment when its last line lacks a newline', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dds-ci-env-newline-'));
+  try {
+    const githubEnv = join(dir, 'github.env'); writeFileSync(githubEnv, 'EXISTING=value');
+    const result = spawnSync(process.execPath, [cli, '--derive', ...contextArgs, '--github-env', githubEnv], { env: { ...process.env, CLOUDFLARE_API_TOKEN: INPUT.secret }, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(githubEnv, 'utf8'), 'EXISTING=value\nDDS_REMOTE_TEST_KEY=EpcIq_vg1echjFz_T43uSTY6xxYXivOmobzaTD8CVVk\n');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
