@@ -193,6 +193,40 @@ test('a failed disposition checkpoint cannot mask the operation rejection', asyn
   assert.equal(h.state.report.terminalFailure.error, 'SEEDED_OPERATION_FAILED');
 });
 
+for (const disposition of ['PAUSED', 'COMPLETE']) {
+  test(`a ${disposition} result checkpoint rejection is not reclassified or retried`, async (t) => {
+    const h = await segmentHarness(t, { count: disposition === 'COMPLETE' ? 1 : 3 });
+    h.options.maxNewOperations = 1;
+    const durable = await useDurableState(h);
+    const stateFactory = h.dependencies.stateFactory;
+    let failureCalls = 0;
+    h.dependencies.stateFactory = (args) => {
+      const state = stateFactory(args);
+      const recordFailure = state.recordFailure;
+      state.recordFailure = (failure) => { failureCalls++; return recordFailure(failure); };
+      return state;
+    };
+    const checkpoint = h.dependencies.writeCheckpoint;
+    const original = new Error('segment result storage failed');
+    const attemptedResults = [];
+    h.dependencies.writeCheckpoint = (file, report) => {
+      if (file.endsWith('segment-result.json')) {
+        attemptedResults.push(report);
+        throw original;
+      }
+      return checkpoint(file, report);
+    };
+    await assert.rejects(h.runner.runRemoteSoak(h.options, h.dependencies), (error) => error === original);
+    assert.deepEqual(attemptedResults.map((result) => result.disposition), [disposition]);
+    assert.equal(attemptedResults[0].reason, disposition === 'PAUSED' ? 'MAX_NEW_OPERATIONS' : null);
+    assert.equal(failureCalls, 0);
+    const recovered = durable.recover();
+    assert.equal(recovered.recovery.kind, 'ready');
+    assert.equal(recovered.report.completedCursor, 1);
+    assert.equal(recovered.report.terminalFailure, null);
+  });
+}
+
 async function useDurableState(h, { pending = false } = {}) {
   const storage = await import('../scripts/remote-dds-soak-state.mjs');
   h.dependencies.writeCheckpoint = (await import('../scripts/worker-dds-checkpoint.mjs')).writeReportCheckpoint;

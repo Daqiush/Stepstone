@@ -240,12 +240,14 @@ export async function runRemoteSoak(options, dependencies = {}) {
   let completedThisSegment = 0;
   let state;
   let activeIntent = null;
+  let segmentResultWriteFailed = false;
   let failureReason = 'INITIALIZATION_FAILED';
   const runDir = resolve(ROOT, options.runDir);
   const finishSegment = (disposition, reason) => {
     const result = { version: 1, disposition, reason, completedCursor: state?.report.completedCursor ?? 0,
       completedThisSegment, startedAt, finishedAt: wallNow().toISOString() };
-    checkpoint(resolve(runDir, 'segment-result.json'), result);
+    try { checkpoint(resolve(runDir, 'segment-result.json'), result); }
+    catch (error) { segmentResultWriteFailed = true; throw error; }
     return result;
   };
   try {
@@ -360,6 +362,7 @@ export async function runRemoteSoak(options, dependencies = {}) {
     if (JSON.stringify(completionProjection) !== JSON.stringify(observed)) throw new Error('Completion projection does not reconcile to the durable physical-request ledger');
     return finishSegment('COMPLETE', null);
   } catch (error) {
+    if (segmentResultWriteFailed) throw error;
     if (activeIntent) {
       // Keep the journal failure and public disposition safe even when the
       // originating exception contains request credentials or response data.
