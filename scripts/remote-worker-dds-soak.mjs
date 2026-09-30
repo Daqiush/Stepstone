@@ -207,17 +207,17 @@ function verify(operation, baseline, remote) {
   return { candidateDifference: comparison.candidateDifference, worker };
 }
 async function baseline(operation) { return operation.kind === 'table' ? nativeBaseline.calcDDTable(operation.item.hands) : nativeBaseline.solveBoard(operation.item.deal); }
-async function runFixtureChecks({ endpoint, key, runId, fixtures, buildId, evidence, state, retryBudget }) {
+async function runFixtureChecks({ endpoint, key, runId, fixtures, buildId, evidence, state, retryBudget, post, getBaseline }) {
   for (const [index, item] of fixtures.entries()) {
     const kind = item.kind, route = kind === 'table' ? '/__dds/table' : '/__dds/ordered-probe';
     const operationId = `fixture.${String(index).padStart(6, '0')}`;
     if (state.hasPhysicalOperation(operationId)) continue;
     const body = JSON.stringify(kind === 'table' ? { hands: item.hands } : { deal: item.deal ?? { trump: item.trump, trickLeader: item.trickLeader, trickPlayed: item.trickPlayed, hands: item.hands } });
     state.recordAuxiliaryIntent({ operationId, route, body, shard: 0 });
-    const remote = await remotePost(endpoint, { key, runId, operationId, route, body, shard: 0 }, { retryBudget });
+    const remote = await post(endpoint, { key, runId, operationId, route, body, shard: 0 }, { retryBudget });
     const op = { kind, id: item.id, item: kind === 'table' ? { hands: item.hands } : { deal: JSON.parse(body).deal } };
     const worker = unwrap(op, remote); const expected = item.expected?.table ?? item.expected;
-    const native = kind === 'table' ? await nativeBaseline.calcDDTable(item.hands) : await nativeBaseline.solveBoard(op.item.deal);
+    const native = await getBaseline(op);
     if (JSON.stringify(normalizeDdsResult(kind, worker)) !== JSON.stringify(normalizeDdsResult(kind, native))) throw new Error(`Fixture native parity mismatch: ${item.id}`);
     if (JSON.stringify(normalizeDdsResult(kind, native)) !== JSON.stringify(normalizeDdsResult(kind, expected))) throw new Error(`Fixture corpus drift: ${item.id}`);
     if (index === 0 && remote.operationResult.buildId !== undefined) assertEndpointBuild(remote.operationResult, buildId);
@@ -229,104 +229,167 @@ async function runFixtureChecks({ endpoint, key, runId, fixtures, buildId, evide
     evidence.fixtures.push(fixtureEvidence);
   }
 }
-function option(name, fallback) { const at = process.argv.indexOf(name); return at < 0 ? fallback : process.argv[at + 1]; }
+export async function runRemoteSoak(options, dependencies = {}) {
+  const post = dependencies.remotePost ?? remotePost;
+  const getBaseline = dependencies.baseline ?? baseline;
+  const checkpoint = dependencies.writeCheckpoint ?? writeReportCheckpoint;
+  const monotonicNow = dependencies.monotonicNow ?? (() => performance.now());
+  const wallNow = dependencies.wallNow ?? (() => new Date());
+  const startedAt = wallNow().toISOString();
+  const startedAtMs = monotonicNow();
+  let completedThisSegment = 0;
+  let state;
+  let activeIntent = null;
+  let failureReason = 'INITIALIZATION_FAILED';
+  const runDir = resolve(ROOT, options.runDir);
+  const finishSegment = (disposition, reason) => {
+    const result = { version: 1, disposition, reason, completedCursor: state?.report.completedCursor ?? 0,
+      completedThisSegment, startedAt, finishedAt: wallNow().toISOString() };
+    checkpoint(resolve(runDir, 'segment-result.json'), result);
+    return result;
+  };
+  try {
+    const endpoint = options.endpoint;
+    const key = dependencies.key ?? process.env.DDS_REMOTE_TEST_KEY;
+    assertRunDirectory(runDir, options.resume);
+    const deployment = dependencies.deployment ?? assertDeploymentManifest(JSON.parse(readFileSync(resolve(ROOT, options.deploymentManifest), 'utf8')), { root: ROOT });
+    const operations = dependencies.operations ?? createSeededOperations(); const coverage = dependencies.operations ? null : validateCoverage(operations);
+    const fixtures = dependencies.fixtures ?? JSON.parse(readFileSync(resolve(ROOT, 'workers/test/fixtures/dds-parity.json'), 'utf8'));
+    const resume = options.resume;
+    const runId = dependencies.runId ?? (resume
+      ? JSON.parse(readFileSync(resolve(runDir, 'manifest.json'), 'utf8')).runId
+      : `soak-${randomUUID()}`);
+    if (typeof runId !== 'string' || !runId) throw new Error('Resumed run has no persisted run identity');
+    const fixtureTables = fixtures.filter((item) => item.kind === 'table').length;
+    const fixtureSolves = fixtures.filter((item) => item.kind === 'solve').length;
+    const projectionArgs = { fixtureTables, fixtureSolves, metricProbes: 1, pendingReplays: MAX_TRANSPORT_RETRIES };
+    let projection = projectAccounting(projectionArgs);
+    const requestForIndex = (index) => operations[index];
+    state = (dependencies.stateFactory ?? (resume ? recoverSoakState : createSoakState))({ dir: runDir, root: ROOT, requestForIndex, projection, runId });
+    if (state.report.terminalFailure || state.recovery?.kind === 'failed') throw new Error('Run has a journal-backed terminal failure');
+    const completedTransportRetries = state.physicalOperations.filter((record) => record.replayed === true).length;
+    const retryBudget = { remaining: Math.max(0, MAX_TRANSPORT_RETRIES - completedTransportRetries), used: completedTransportRetries };
+    if (resume) {
+      // Retain the conservative recovery projection. Durable preflight/fixture
+      // entries below suppress requests which have already been accounted for.
+      projection = projectAccounting({ ...projectionArgs, metricProbes: 2,
+        fixtureTables: state.report.completedCursor === 0 ? fixtureTables * 2 : fixtureTables,
+        fixtureSolves: state.report.completedCursor === 0 ? fixtureSolves * 2 : fixtureSolves,
+        pendingReplays: MAX_TRANSPORT_RETRIES });
+    }
+    let evidence = resume ? (dependencies.readEvidence ? dependencies.readEvidence(runDir) : JSON.parse(readFileSync(resolve(runDir, 'evidence.json'), 'utf8'))) : { version: 1, endpoint, runId, buildId: deployment.buildId, workerVersionId: deployment.workerVersionId,
+      deploymentAssets: deployment.assets, fixtureHash: state.manifest.hashes.fixtureCorpus, projection, coverage, fixtures: [], operations: [], candidateDifferences: [] };
+    if (resume) {
+      evidence = mergeRecoveredEvidence({ checkpoint: evidence,
+        durableOperations: state.evidence.filter((operation) => Number.isSafeInteger(operation?.index)),
+        durableFixtures: state.fixtureEvidence, durablePreflight: state.preflightEvidence });
+      checkpoint(resolve(runDir, 'evidence.json'), evidence);
+    }
+    if (!resume) checkpoint(resolve(runDir, 'evidence.json'), evidence);
+    if (state.report.completedCursor < operations.length) {
+      // The deployed Worker must explicitly identify the exact manifest being run.
+      // This request is budgeted before any fixture or generated DDS dispatch.
+      const preflightBody = '{}';
+      failureReason = 'PREFLIGHT_FAILED';
+      if (!state.hasPhysicalOperation('preflight.metrics')) {
+        state.recordAuxiliaryIntent({ operationId: 'preflight.metrics', route: '/__dds/metrics', body: preflightBody, shard: 0 });
+        const preflight = await post(endpoint, { key, runId, operationId: 'preflight.metrics', route: '/__dds/metrics', body: preflightBody, shard: 0 }, { retryBudget });
+        assertEndpointBuild(preflight.operationResult, deployment.buildId);
+        assertEndpointVersion(preflight.operationResult, deployment.workerVersionId);
+        const preflightEvidence = buildPreflightEvidence(preflight);
+        state.recordAuxiliaryResponse({ operationId: 'preflight.metrics', route: '/__dds/metrics', replayed: preflight.replayed,
+          response: preflight.operationResult, accountingActivationId: preflight.accountingActivationId,
+          evidence: preflightEvidence, evidenceKind: 'preflight', remoteAccounting: preflight.accounting, shard: 0 });
+        evidence.preflight = preflightEvidence;
+        checkpoint(resolve(runDir, 'evidence.json'), evidence);
+      }
+      failureReason = 'FIXTURE_FAILED';
+      await runFixtureChecks({ endpoint, key, runId, fixtures, buildId: deployment.buildId, evidence, state, retryBudget, post, getBaseline });
+      const dispatch = async (operation, operationId) => post(endpoint, { key, runId, operationId, route: operation.route, body: operation.body, shard: operation.shard }, { retryBudget });
+      if (state.recovery?.kind === 'replay-pending') {
+        const pending = state.recovery.intent, operation = operations[pending.index];
+        failureReason = 'PENDING_REPLAY_FAILED';
+        activeIntent = pending;
+        const remote = await dispatch(operation, pending.operationId); const native = await getBaseline(operation); const checked = verify(operation, native, remote);
+        const replayEvidence = { id: operation.id, index: pending.index, kind: operation.kind, shard: operation.shard,
+          ...(operation.kind === 'solve' ? { depth: operation.depth } : {}), replay: true, input: JSON.parse(operation.body), nativeBaseline: native, remote: remote.operationResult,
+          remoteMetrics: remote.operationResult.metrics ?? remote.operationResult.solveResponse?.metrics ?? null,
+          heapBytes: remote.operationResult.metrics?.heapBytes ?? remote.operationResult.solveResponse?.metrics?.heapBytes ?? null,
+          wasmElapsedMs: remote.operationResult.metrics?.solveMs ?? remote.operationResult.solveResponse?.metrics?.solveMs ?? null,
+          orderedPingDelayMs: remote.operationResult.queueDelayMs ?? null, accountingActivationId: remote.accountingActivationId, ...checked };
+        state.completeReplay({ operationId: pending.operationId, response: remote.operationResult, activationId: remote.operationResult.activationId,
+          accountingActivationId: remote.accountingActivationId,
+          replayed: remote.replayed, evidence: replayEvidence, remoteAccounting: remote.accounting });
+        activeIntent = null;
+        evidence.operations.push(replayEvidence);
+        evidence.candidateDifferences = deriveCandidateDifferences(evidence.operations);
+        checkpoint(resolve(runDir, 'evidence.json'), evidence);
+      }
+      for (let index = state.report.completedCursor; index < operations.length; index++) {
+        failureReason = 'SEEDED_OPERATION_FAILED';
+        const reason = segmentStopReason({ completedAtStart: state.report.completedCursor - completedThisSegment,
+          completedNow: state.report.completedCursor, maxNewOperations: options.maxNewOperations ?? OPERATION_COUNT,
+          startedAtMs, nowMs: monotonicNow(), deadlineMs: options.deadlineMs ?? null, totalOperations: operations.length });
+        if (reason) return finishSegment('PAUSED', reason);
+        const operation = operations[index], operationId = `op.${String(index).padStart(6, '0')}`;
+        state.recordIntent({ index, operationId, route: operation.route, body: operation.body });
+        activeIntent = { operationId };
+        const remote = await dispatch(operation, operationId); const nativeStarted = monotonicNow(); const native = await getBaseline(operation); const nativeMs = monotonicNow() - nativeStarted;
+        const checked = verify(operation, native, remote);
+        const operationEvidence = { id: operation.id, index, kind: operation.kind, shard: operation.shard,
+          ...(operation.kind === 'solve' ? { depth: operation.depth } : {}), route: operation.route, input: JSON.parse(operation.body), nativeBaseline: native, nativeMs,
+          remote: remote.operationResult, remoteMetrics: remote.operationResult.metrics ?? remote.operationResult.solveResponse?.metrics ?? null,
+          heapBytes: remote.operationResult.metrics?.heapBytes ?? remote.operationResult.solveResponse?.metrics?.heapBytes ?? null,
+          wasmElapsedMs: remote.operationResult.metrics?.solveMs ?? remote.operationResult.solveResponse?.metrics?.solveMs ?? null,
+          orderedPingDelayMs: remote.operationResult.queueDelayMs ?? null, activationId: remote.operationResult.activationId,
+          accounting: remote.accounting, accountingActivationId: remote.accountingActivationId, ...checked };
+        state.recordCompletion({ operationId, response: remote.operationResult, activationId: remote.operationResult.activationId,
+          accountingActivationId: remote.accountingActivationId,
+          replayed: remote.replayed, evidence: operationEvidence, remoteAccounting: remote.accounting });
+        activeIntent = null;
+        completedThisSegment++;
+        evidence.operations.push(operationEvidence);
+        evidence.candidateDifferences = deriveCandidateDifferences(evidence.operations);
+        checkpoint(resolve(runDir, 'evidence.json'), evidence);
+      }
+    }
+    failureReason = 'FINAL_ACCOUNTING_FAILED';
+    checkpoint(resolve(runDir, 'evidence.json'), evidence);
+    const completionProjection = projectCompletionLedger({ operations, fixtures, physicalOperations: state.physicalOperations });
+    const observed = reconcileObservedLedger(state.report.observed, state.physicalOperations);
+    if (JSON.stringify(completionProjection) !== JSON.stringify(observed)) throw new Error('Completion projection does not reconcile to the durable physical-request ledger');
+    return finishSegment('COMPLETE', null);
+  } catch (error) {
+    if (activeIntent) {
+      // Keep the journal failure and public disposition safe even when the
+      // originating exception contains request credentials or response data.
+      try { state.recordFailure({ operationId: activeIntent.operationId, error: failureReason }); }
+      catch { /* Preserve the original operation rejection if storage fails. */ }
+    }
+    try { finishSegment('FAILED', failureReason); }
+    catch { /* A best-effort public report must not hide the original failure. */ }
+    throw error;
+  }
+}
 async function runCli() {
-  const options = parseOptions();
-  const endpoint = options.endpoint;
-  const key = process.env.DDS_REMOTE_TEST_KEY;
-  const runDir = assertRunDirectory(resolve(ROOT, options.runDir), options.resume);
-  const manifestPath = resolve(ROOT, options.deploymentManifest);
-  const deployment = assertDeploymentManifest(JSON.parse(readFileSync(manifestPath, 'utf8')), { root: ROOT });
-  const operations = createSeededOperations(); const coverage = validateCoverage(operations);
-  const fixtures = JSON.parse(readFileSync(resolve(ROOT, 'workers/test/fixtures/dds-parity.json'), 'utf8'));
-  const resume = options.resume;
-  const runId = resume
-    ? JSON.parse(readFileSync(resolve(runDir, 'manifest.json'), 'utf8')).runId
-    : `soak-${randomUUID()}`;
-  if (typeof runId !== 'string' || !runId) throw new Error('Resumed run has no persisted run identity');
-  const fixtureTables = fixtures.filter((item) => item.kind === 'table').length;
-  const fixtureSolves = fixtures.filter((item) => item.kind === 'solve').length;
-  const projectionArgs = { fixtureTables, fixtureSolves, metricProbes: 1, pendingReplays: MAX_TRANSPORT_RETRIES };
-  let projection = projectAccounting(projectionArgs);
-  const requestForIndex = (index) => operations[index];
-  const state = resume ? recoverSoakState({ dir: runDir, root: ROOT, requestForIndex, projection }) : createSoakState({ dir: runDir, root: ROOT, requestForIndex, projection, runId });
-  const completedTransportRetries = state.physicalOperations.filter((record) => record.replayed === true).length;
-  const retryBudget = { remaining: Math.max(0, MAX_TRANSPORT_RETRIES - completedTransportRetries), used: completedTransportRetries };
-  if (resume) {
-    // Every resumed attempt issues another preflight. A run interrupted before
-    // its first durable operation also executes its fixture corpus again.
-    projection = projectAccounting({ ...projectionArgs, metricProbes: 2,
-      fixtureTables: state.report.completedCursor === 0 ? fixtureTables * 2 : fixtureTables,
-      fixtureSolves: state.report.completedCursor === 0 ? fixtureSolves * 2 : fixtureSolves,
-      pendingReplays: MAX_TRANSPORT_RETRIES });
+  const startedAt = new Date().toISOString();
+  let options;
+  try { options = parseOptions(); }
+  catch (error) {
+    // A rejected CLI may lack a usable run directory. Never infer a target for
+    // this best-effort report from a default or ambiguous argument list.
+    const args = process.argv.slice(2);
+    const directories = args.flatMap((arg, index) => arg === '--run-dir' ? [args[index + 1]] : []);
+    const directory = directories[0];
+    if (directories.length === 1 && typeof directory === 'string' && directory.trim() && !directory.startsWith('--') && !directory.includes('\0')) {
+      try {
+        writeReportCheckpoint(resolve(ROOT, directory, 'segment-result.json'), { version: 1, disposition: 'FAILED',
+          reason: 'INITIALIZATION_FAILED', completedCursor: 0, completedThisSegment: 0, startedAt, finishedAt: new Date().toISOString() });
+      } catch { /* Retain the original parse rejection if reporting fails. */ }
+    }
+    throw error;
   }
-  let evidence = resume ? JSON.parse(readFileSync(resolve(runDir, 'evidence.json'), 'utf8')) : { version: 1, endpoint, runId, buildId: deployment.buildId, workerVersionId: deployment.workerVersionId,
-    deploymentAssets: deployment.assets, fixtureHash: state.manifest.hashes.fixtureCorpus, projection, coverage, fixtures: [], operations: [], candidateDifferences: [] };
-  if (resume) {
-    evidence = mergeRecoveredEvidence({ checkpoint: evidence,
-      durableOperations: state.evidence.filter((operation) => Number.isSafeInteger(operation?.index)),
-      durableFixtures: state.fixtureEvidence, durablePreflight: state.preflightEvidence });
-    writeReportCheckpoint(resolve(runDir, 'evidence.json'), evidence);
-  }
-  if (!resume) writeReportCheckpoint(resolve(runDir, 'evidence.json'), evidence);
-  // The deployed Worker must explicitly identify the exact manifest being run.
-  // This request is budgeted before any fixture or generated DDS dispatch.
-  const preflightBody = '{}';
-  if (!state.hasPhysicalOperation('preflight.metrics')) {
-    state.recordAuxiliaryIntent({ operationId: 'preflight.metrics', route: '/__dds/metrics', body: preflightBody, shard: 0 });
-    const preflight = await remotePost(endpoint, { key, runId, operationId: 'preflight.metrics', route: '/__dds/metrics', body: preflightBody, shard: 0 }, { retryBudget });
-    assertEndpointBuild(preflight.operationResult, deployment.buildId);
-    assertEndpointVersion(preflight.operationResult, deployment.workerVersionId);
-    const preflightEvidence = buildPreflightEvidence(preflight);
-    state.recordAuxiliaryResponse({ operationId: 'preflight.metrics', route: '/__dds/metrics', replayed: preflight.replayed,
-      response: preflight.operationResult, accountingActivationId: preflight.accountingActivationId,
-      evidence: preflightEvidence, evidenceKind: 'preflight', remoteAccounting: preflight.accounting, shard: 0 });
-    evidence.preflight = preflightEvidence;
-    writeReportCheckpoint(resolve(runDir, 'evidence.json'), evidence);
-  }
-  await runFixtureChecks({ endpoint, key, runId, fixtures, buildId: deployment.buildId, evidence, state, retryBudget });
-  const dispatch = async (operation, operationId) => remotePost(endpoint, { key, runId, operationId, route: operation.route, body: operation.body, shard: operation.shard }, { retryBudget });
-  if (state.recovery?.kind === 'replay-pending') {
-    const pending = state.recovery.intent, operation = operations[pending.index];
-    const remote = await dispatch(operation, pending.operationId); const native = await baseline(operation); const checked = verify(operation, native, remote);
-    const replayEvidence = { id: operation.id, index: pending.index, kind: operation.kind, shard: operation.shard,
-      ...(operation.kind === 'solve' ? { depth: operation.depth } : {}), replay: true, input: JSON.parse(operation.body), nativeBaseline: native, remote: remote.operationResult,
-      remoteMetrics: remote.operationResult.metrics ?? remote.operationResult.solveResponse?.metrics ?? null,
-      heapBytes: remote.operationResult.metrics?.heapBytes ?? remote.operationResult.solveResponse?.metrics?.heapBytes ?? null,
-      wasmElapsedMs: remote.operationResult.metrics?.solveMs ?? remote.operationResult.solveResponse?.metrics?.solveMs ?? null,
-      orderedPingDelayMs: remote.operationResult.queueDelayMs ?? null, accountingActivationId: remote.accountingActivationId, ...checked };
-    state.completeReplay({ operationId: pending.operationId, response: remote.operationResult, activationId: remote.operationResult.activationId,
-      accountingActivationId: remote.accountingActivationId,
-      replayed: remote.replayed, evidence: replayEvidence, remoteAccounting: remote.accounting });
-    evidence.operations.push(replayEvidence);
-    evidence.candidateDifferences = deriveCandidateDifferences(evidence.operations);
-    writeReportCheckpoint(resolve(runDir, 'evidence.json'), evidence);
-  }
-  for (let index = state.report.completedCursor; index < operations.length; index++) {
-    const operation = operations[index], operationId = `op.${String(index).padStart(6, '0')}`;
-    state.recordIntent({ index, operationId, route: operation.route, body: operation.body });
-    try {
-      const remote = await dispatch(operation, operationId); const nativeStarted = performance.now(); const native = await baseline(operation); const nativeMs = performance.now() - nativeStarted;
-      const checked = verify(operation, native, remote);
-      const operationEvidence = { id: operation.id, index, kind: operation.kind, shard: operation.shard,
-        ...(operation.kind === 'solve' ? { depth: operation.depth } : {}), route: operation.route, input: JSON.parse(operation.body), nativeBaseline: native, nativeMs,
-        remote: remote.operationResult, remoteMetrics: remote.operationResult.metrics ?? remote.operationResult.solveResponse?.metrics ?? null,
-        heapBytes: remote.operationResult.metrics?.heapBytes ?? remote.operationResult.solveResponse?.metrics?.heapBytes ?? null,
-        wasmElapsedMs: remote.operationResult.metrics?.solveMs ?? remote.operationResult.solveResponse?.metrics?.solveMs ?? null,
-        orderedPingDelayMs: remote.operationResult.queueDelayMs ?? null, activationId: remote.operationResult.activationId,
-        accounting: remote.accounting, accountingActivationId: remote.accountingActivationId, ...checked };
-      state.recordCompletion({ operationId, response: remote.operationResult, activationId: remote.operationResult.activationId,
-        accountingActivationId: remote.accountingActivationId,
-        replayed: remote.replayed, evidence: operationEvidence, remoteAccounting: remote.accounting });
-      evidence.operations.push(operationEvidence);
-      evidence.candidateDifferences = deriveCandidateDifferences(evidence.operations);
-      writeReportCheckpoint(resolve(runDir, 'evidence.json'), evidence);
-    } catch (error) { state.recordFailure({ operationId, error: error.message }); throw error; }
-  }
-  writeReportCheckpoint(resolve(runDir, 'evidence.json'), evidence);
-  const completionProjection = projectCompletionLedger({ operations, fixtures, physicalOperations: state.physicalOperations });
-  const observed = reconcileObservedLedger(state.report.observed, state.physicalOperations);
-  if (JSON.stringify(completionProjection) !== JSON.stringify(observed)) throw new Error('Completion projection does not reconcile to the durable physical-request ledger');
+  return runRemoteSoak(options);
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   runCli().catch((error) => { console.error(error.message); process.exitCode = 1; });
