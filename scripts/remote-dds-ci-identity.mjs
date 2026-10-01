@@ -9,7 +9,7 @@ export const CI_SCHEMA_VERSION = 1;
 const CONTEXT_FIELDS = ['repository', 'workflow', 'runId', 'runAttempt', 'commitSha'];
 const CORE_FIELDS = ['schemaVersion', 'kind', ...CONTEXT_FIELDS, 'workerName', 'ownershipTag'];
 const PRE_FIELDS = [...CORE_FIELDS, 'noCollisionVerifiedAt'];
-const DEPLOYMENT_FIELDS = ['schemaVersion', 'kind', 'identity', 'endpoint', 'deploymentManifestVersion', 'buildId', 'workerVersionId', 'wranglerVersion', 'assets', 'localConfigurationSha256', 'scriptETag', 'versionConfigurationSha256'];
+const DEPLOYMENT_FIELDS = ['schemaVersion', 'kind', 'identity', 'endpoint', 'version', 'deploymentManifestVersion', 'buildId', 'workerVersionId', 'wranglerVersion', 'assets', 'verifiedDeployment', 'ownershipTag', 'localConfigurationSha256', 'scriptETag', 'versionConfigurationSha256'];
 
 function object(value, label) {
   if (!value || typeof value !== 'object' || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw new Error(`${label} must be a plain object`);
@@ -109,40 +109,41 @@ function asset(value, path) {
 }
 function manifestSnapshot(value, identity) {
   object(value, 'Deployment manifest');
-  if (value.version !== 1) throw new Error('Unsupported deployment manifest version');
+  if (value.version !== 2) throw new Error('Unsupported deployment manifest version');
   const verified = object(value.verifiedDeployment, 'Verified deployment');
-  if (verified.apiVerified !== true || verified.temporaryWorkerName !== identity.workerName || verified.versionId !== value.workerVersionId) throw new Error('Deployment manifest does not bind the identity and Worker version');
+  exactFields(verified, ['versionId', 'apiVerified', 'wranglerVersion', 'temporaryWorkerName', 'ownershipTag'], 'Verified deployment');
+  if (verified.apiVerified !== true || verified.temporaryWorkerName !== identity.workerName || verified.versionId !== value.workerVersionId
+      || verified.ownershipTag !== identity.ownershipTag) throw new Error('Deployment manifest does not bind the ownership identity and Worker version');
   const assets = object(value.assets, 'Deployment manifest assets');
-  const wasmSha256 = asset(assets.wasm, 'workers/vendor/bridge-dds/dds-worker.wasm');
+  exactFields(assets, ['wasm', 'harness'], 'Deployment manifest assets');
+  asset(assets.wasm, 'workers/vendor/bridge-dds/dds-worker.wasm');
   const harness = object(assets.harness, 'Deployment manifest harness');
   const keys = Object.keys(harness);
   if (!keys.length || keys.some((path) => !/^workers\/src\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_.-]+\.mjs$/.test(path))) throw new Error('Deployment manifest harness paths are invalid');
-  return { deploymentManifestVersion: value.version, buildId: hash(value.buildId, 'Deployment manifest build ID'), workerVersionId: nonempty(value.workerVersionId, 'Deployment Worker version'), wranglerVersion: nonempty(verified.wranglerVersion, 'Deployment Wrangler version'),
-    assets: { wasmSha256, harnessSha256: Object.fromEntries(keys.map((path) => [path, asset(harness[path], path)])) } };
+  for (const path of keys) asset(harness[path], path);
+  return { version: value.version, deploymentManifestVersion: value.version, buildId: hash(value.buildId, 'Deployment manifest build ID'),
+    workerVersionId: nonempty(value.workerVersionId, 'Deployment Worker version'), wranglerVersion: nonempty(verified.wranglerVersion, 'Deployment Wrangler version'),
+    assets: structuredClone(assets), verifiedDeployment: structuredClone(verified) };
 }
 export function createDeploymentRecord({ identity, endpoint, deploymentManifest, localConfigurationSha256, scriptETag, versionConfigurationSha256 }) {
   const predeployment = assertPreDeploymentIdentity(identity);
-  return assertDeploymentRecord({ schemaVersion: CI_SCHEMA_VERSION, kind: 'remote-dds-deployment-record', identity: predeployment, endpoint, ...manifestSnapshot(deploymentManifest, predeployment), localConfigurationSha256, scriptETag, versionConfigurationSha256 }, { identity: predeployment, deploymentManifest });
+  return assertDeploymentRecord({ schemaVersion: CI_SCHEMA_VERSION, kind: 'remote-dds-deployment-record', identity: predeployment, endpoint,
+    ...manifestSnapshot(deploymentManifest, predeployment), ownershipTag: predeployment.ownershipTag, localConfigurationSha256, scriptETag, versionConfigurationSha256 },
+  { identity: predeployment, deploymentManifest });
 }
 export function assertDeploymentRecord(value, { identity, trustedIdentity, context, deploymentManifest } = {}) {
   exactFields(value, DEPLOYMENT_FIELDS, 'Deployment record');
-  if (value.schemaVersion !== CI_SCHEMA_VERSION || value.kind !== 'remote-dds-deployment-record' || value.deploymentManifestVersion !== 1) throw new Error('Unsupported deployment record schema version or kind');
+  if (value.schemaVersion !== CI_SCHEMA_VERSION || value.kind !== 'remote-dds-deployment-record' || value.version !== 2 || value.deploymentManifestVersion !== 2) throw new Error('Unsupported deployment record schema version or kind');
   const predeployment = assertPreDeploymentIdentity(value.identity, { trustedIdentity, context });
   if (identity) equal(predeployment, assertPreDeploymentIdentity(identity, { trustedIdentity, context }), 'Deployment record identity');
   assertEndpoint(value.endpoint, predeployment.workerName);
-  hash(value.buildId, 'Deployment build ID'); nonempty(value.workerVersionId, 'Deployment Worker version'); nonempty(value.wranglerVersion, 'Deployment Wrangler version');
-  exactFields(value.assets, ['wasmSha256', 'harnessSha256'], 'Deployment assets');
-  hash(value.assets.wasmSha256, 'Deployment Wasm hash');
-  const harness = object(value.assets.harnessSha256, 'Deployment harness hashes');
-  if (!Object.keys(harness).length) throw new Error('Deployment harness hashes must be complete');
-  for (const [path, digest] of Object.entries(harness)) {
-    if (!/^workers\/src\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_.-]+\.mjs$/.test(path)) throw new Error('Deployment harness path is invalid');
-    hash(digest, 'Deployment harness hash');
-  }
+  if (value.ownershipTag !== predeployment.ownershipTag) throw new Error('Deployment ownership tag does not match identity');
+  const snapshot = manifestSnapshot(value, predeployment);
+  equal(value.wranglerVersion, snapshot.wranglerVersion, 'Deployment Wrangler version');
   hash(value.localConfigurationSha256, 'localConfigurationSha256'); nonempty(value.scriptETag, 'scriptETag'); hash(value.versionConfigurationSha256, 'versionConfigurationSha256');
   if (deploymentManifest) {
     const expected = manifestSnapshot(deploymentManifest, predeployment);
-    for (const field of Object.keys(expected)) equal(value[field], expected[field], `Deployment manifest ${field}`);
+    for (const field of Object.keys(expected)) equal(value[field], expected[field], 'Deployment manifest ' + field);
   }
   return structuredClone(value);
 }

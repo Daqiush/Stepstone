@@ -18,231 +18,435 @@ function repo() {
 async function deployment() { return import('../scripts/prepare-remote-dds-deployment.mjs'); }
 async function runner() { return import('../scripts/remote-worker-dds-soak.mjs'); }
 
-test('deployment manifest binds the exact wasm and harness bytes to a deterministic build ID', async () => {
-  const mod = await deployment(); const root = repo();
+const CONTEXT = { repository: 'bridge/stepstone', workflow: 'Remote DDS Soak', runId: '12345', runAttempt: '2', commitSha: 'a'.repeat(40) };
+const TOKEN = 'fake-source-token';
+const KEY = 'a'.repeat(43);
+const WORKER_ID = 'b'.repeat(32);
+const page = (items, number = 1, total = 1) => ({ success: true, result: items, result_info: { page: number, per_page: 100, total_pages: total } });
+const response = (payload, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => payload });
+async function ciIdentity() { return (await import('../scripts/remote-dds-ci-identity.mjs')).deriveCiIdentity({ ...CONTEXT, secret: TOKEN }); }
+function versionDetail(identity, tag = identity.ownershipTag) {
+  return { success: true, result: { id: 'deployed-v1', annotations: tag === null ? {} : { 'workers/tag': tag }, resources: { script: { etag: 'script-etag-1' }, bindings: [{ type: 'plain_text', name: 'DDS_REMOTE_TEST', text: 'true' }], script_runtime: { compatibility_date: '2026-09-22' } } } };
+}
+async function deploymentFixture(overrides = {}) {
+  const mod = await deployment(); const identity = await ciIdentity(); const root = repo();
+  const events = []; let deployed = false, deleted = false, buildId;
+  const fetchImpl = async (url, options = {}) => {
+    const parsed = new URL(url); events.push({ url, method: options.method ?? 'GET' });
+    if (parsed.hostname.endsWith('.workers.dev')) return response({ operationResult: { buildId, workerVersionId: 'deployed-v1' } });
+    if (options.method === 'DELETE') { deleted = true; return response({ success: true }); }
+    if (parsed.pathname.endsWith(`/workers/scripts/${identity.workerName}`)) return response({}, deployed && !deleted ? 200 : 404);
+    if (parsed.pathname.endsWith('/workers/workers')) return response(page(deployed && !deleted ? [{ id: WORKER_ID, name: identity.workerName }] : []));
+    if (parsed.pathname.endsWith('/workers/scripts-search')) return response(page(deployed && !deleted ? [{ script_name: identity.workerName }] : []));
+    if (parsed.pathname.endsWith('/versions')) return response({ ...page([]), result: { items: deployed && !deleted ? [{ id: 'deployed-v1' }] : [] } });
+    if (parsed.pathname.endsWith('/versions/deployed-v1')) return response(versionDetail(identity));
+    if (parsed.pathname.endsWith('/workers/subdomain')) return response({ success: true, result: { subdomain: 'example' } });
+    throw new Error(`Unexpected test request: ${url}`);
+  };
+  const execFile = (command, args, options = {}) => {
+    events.push({ command, args: [...args], input: options.input });
+    if (args[0] === 'deploy') { deployed = true; buildId = args.find((arg) => arg.startsWith('DDS_DEPLOYMENT_BUILD_ID:'))?.split(':')[1]; return ''; }
+    if (args[1] === 'secret') return '';
+    if (args[0] === '--version') return '4.33.0';
+    throw new Error('Unexpected test command');
+  };
+  const options = { root, accountId: 'acct', apiToken: TOKEN, remoteTestKey: KEY, context: CONTEXT, identity, fetchImpl, execFile, sleepImpl: async () => {}, ...overrides };
+  const preDeploymentIdentity = await mod.preflightTemporaryWorkerIdentity({ ...options, now: () => new Date('2026-10-01T00:00:00.000Z') });
+  return { mod, root, identity, events, options: { ...options, preDeploymentIdentity }, fetchImpl, execFile,
+    setDeployed: (value) => { deployed = value; }, isDeleted: () => deleted };
+}
+async function verifiedFixture() {
+  const f = await deploymentFixture();
+  try { return { root: f.root, verified: await f.mod.deployAndVerifyWorkers(f.options), mod: f.mod }; }
+  catch (error) { rmSync(f.root, { recursive: true, force: true }); throw error; }
+}
+
+test('deployment manifest binds ownership, configuration, exact endpoint, immutable version, and every asset', async () => {
+  const { root, verified, mod } = await verifiedFixture();
   try {
-    const manifest = mod.createDeploymentManifest({ root, verifiedDeployment: { versionId: 'v-123', apiVerified: true, wranglerVersion: '4.0.0', workersDevUrl: 'https://temporary.example.workers.dev', temporaryWorkerName: 'ss-dds-soak-00000000-0000-4000-8000-000000000001' } });
-    assert.equal(manifest.version, 1);
-    assert.match(manifest.buildId, /^[a-f0-9]{64}$/);
-    assert.match(manifest.assets.wasm.sha256, /^[a-f0-9]{64}$/);
+    const manifest = mod.createDeploymentManifest({ root, verifiedDeployment: verified });
+    assert.equal(manifest.version, 2);
+    assert.equal(manifest.kind, 'remote-dds-deployment-record');
+    assert.equal(manifest.ownershipTag, verified.identity.ownershipTag);
+    assert.equal(manifest.endpoint, verified.workersDevUrl);
+    assert.equal(manifest.localConfigurationSha256, verified.localConfigurationSha256);
+    assert.equal(manifest.scriptETag, 'script-etag-1');
+    assert.match(manifest.versionConfigurationSha256, /^[a-f0-9]{64}$/);
+    assert.equal(manifest.workerVersionId, 'deployed-v1');
+    assert.equal(manifest.assets.wasm.bytes, 7);
     assert.equal(Object.keys(manifest.assets.harness).length, 2);
-    assert.equal(JSON.stringify(manifest).includes('temporary.example.workers.dev'), false);
+    assert.equal(JSON.stringify(manifest).includes(KEY), false);
+    assert.equal(JSON.stringify(manifest).includes(TOKEN), false);
+    mod.assertDeploymentManifest(manifest, { root });
     writeFileSync(join(root, 'workers/vendor/bridge-dds/dds-worker.wasm'), 'wasm-v2');
     assert.throws(() => mod.assertDeploymentManifest(manifest, { root }), /Wasm asset hash changed/i);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test('deployment manifest rejects a missing version instead of assuming compatibility', async () => {
-  const mod = await deployment(); const root = repo();
+test('deployment manifest fails closed for missing or inconsistent ownership and endpoint evidence', async () => {
+  const { root, verified, mod } = await verifiedFixture();
   try {
-    const manifest = mod.createDeploymentManifest({ root, verifiedDeployment: { versionId: 'v-123', apiVerified: true, wranglerVersion: '4.0.0', workersDevUrl: 'https://temporary.example.workers.dev', temporaryWorkerName: 'ss-dds-soak-00000000-0000-4000-8000-000000000001' } }); delete manifest.version;
-    assert.throws(() => mod.assertDeploymentManifest(manifest, { root }), /version/i);
+    const manifest = mod.createDeploymentManifest({ root, verifiedDeployment: verified });
+    for (const mutate of [
+      (v) => { delete v.version; },
+      (v) => { delete v.ownershipTag; },
+      (v) => { v.verifiedDeployment.ownershipTag = 'b'.repeat(43); },
+      (v) => { v.endpoint = 'https://production.example.workers.dev'; },
+      (v) => { v.workerVersionId = 'other-version'; },
+      (v) => { v.assets.harness['workers/src/extra.mjs'] = { path: 'workers/src/extra.mjs', bytes: 1, sha256: 'a'.repeat(64) }; },
+      (v) => { v.DDS_REMOTE_TEST_KEY = KEY; },
+    ]) {
+      const changed = structuredClone(manifest); mutate(changed);
+      assert.throws(() => mod.assertDeploymentManifest(changed, { root }), /version|ownership|endpoint|Worker|harness|field/i);
+    }
+    assert.throws(() => mod.createDeploymentManifest({ root, workerVersionId: 'unverified' }), /verified deployment/i);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test('deployment manifest records Wasm bytes and requires an explicit deployed Worker version', async () => {
-  const mod = await deployment(); const root = repo();
-  try {
-    assert.throws(() => mod.createDeploymentManifest({ root, workerVersionId: 'v-123' }), /verified deployment/i);
-    const manifest = mod.createDeploymentManifest({ root, verifiedDeployment: { versionId: 'v-123', apiVerified: true, wranglerVersion: '4.0.0', workersDevUrl: 'https://temporary.example.workers.dev', temporaryWorkerName: 'ss-dds-soak-00000000-0000-4000-8000-000000000001' } });
-    assert.equal(manifest.assets.wasm.bytes, 7);
-    assert.equal(manifest.workerVersionId, 'v-123');
-  } finally { rmSync(root, { recursive: true, force: true }); }
+test('temporary Worker names accept UUID and derived GitHub forms while rejecting prefixes and production names', async () => {
+  const mod = await deployment(); const identity = await ciIdentity();
+  assert.equal(mod.assertTemporaryWorkerName(identity.workerName), identity.workerName);
+  assert.equal(mod.assertTemporaryWorkerName('ss-dds-soak-00000000-0000-4000-8000-000000000001'), 'ss-dds-soak-00000000-0000-4000-8000-000000000001');
+  for (const name of ['ss-dds-soak-', 'ss-dds-soak-gh-', 'ss-dds-soak-gh-1-1-UPPERCASE123', 'production-worker', 'ss-dds-soak-gh-1-1-too-short']) {
+    assert.throws(() => mod.assertTemporaryWorkerName(name), /temporary Worker/i);
+  }
 });
 
-test('deployment verification reads the exact deployed script-version resource and rejects a mismatched API id', async () => {
-  const mod = await deployment();
-  const calls = [];
-  const verified = await mod.verifyWorkersDeployment({
-    accountId: 'acct / one', scriptName: 'temporary dds', apiToken: 'test-token', expectedVersionId: 'version-123', wranglerVersion: '4.33.0',
-    fetchImpl: async (url, options) => {
-      calls.push({ url, options });
-      return { ok: true, json: async () => ({ success: true, result: { id: 'version-123' } }) };
-    },
-  });
-  assert.equal(calls[0].url, 'https://api.cloudflare.com/client/v4/accounts/acct%20%2F%20one/workers/scripts/temporary%20dds/versions/version-123');
-  assert.equal(calls[0].options.headers.authorization, 'Bearer test-token');
-  assert.equal(verified.versionId, 'version-123');
-  await assert.rejects(() => mod.verifyWorkersDeployment({
-    accountId: 'acct', scriptName: 'script', apiToken: 'test-token', expectedVersionId: 'version-123', wranglerVersion: '4.33.0',
-    fetchImpl: async () => ({ ok: true, json: async () => ({ success: true, result: { id: 'other-version' } }) }),
-  }), /did not verify/i);
+test('preflight is read-only, queries exact name and both complete listings, and timestamps the derived identity', async () => {
+  const f = await deploymentFixture();
+  try {
+    const record = f.options.preDeploymentIdentity;
+    assert.equal(record.workerName, f.identity.workerName);
+    assert.equal(record.ownershipTag, f.identity.ownershipTag);
+    assert.equal(record.noCollisionVerifiedAt, '2026-10-01T00:00:00.000Z');
+    assert.ok(f.events.some((e) => e.url?.endsWith('/workers/scripts/' + f.identity.workerName)));
+    assert.ok(f.events.some((e) => new URL(e.url).pathname.endsWith('/workers/workers')));
+    assert.ok(f.events.some((e) => new URL(e.url).pathname.endsWith('/workers/scripts-search')));
+    assert.ok(f.events.every((e) => e.method === 'GET'));
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 
-test('deployment integration resolves version and workers.dev URL from Cloudflare APIs and fails closed without secure inputs', async () => {
-  const mod = await deployment(); const root = repo();
-  try {
-    const calls = [];
-    const verified = await mod.deployAndVerifyWorkers({ root, accountId: 'acct', apiToken: 'token', remoteTestKey: 'a'.repeat(43), randomUUID: () => '11111111-1111-4111-8111-111111111111',
-      execFile: (command, args) => {
-        calls.push({ command, args });
-        if (args[1] === 'secret') return '';
-        if (args[0] === 'deploy') return 'deployed';
-        if (args[0] === '--version') return '4.33.0\n';
-        throw new Error('unexpected command');
-      },
-      fetchImpl: async (url) => {
-        if (url.endsWith('/versions')) return { ok: true, json: async () => ({ result: { items: [{ id: 'deployed-v1' }] } }) };
-        if (url.endsWith('/workers/subdomain')) return { ok: true, json: async () => ({ result: { subdomain: 'example' } }) };
-        assert.match(url, /workers\/scripts\/ss-dds-soak-11111111-1111-4111-8111-111111111111\/versions\/deployed-v1$/);
-        return { ok: true, json: async () => ({ result: { id: 'deployed-v1' } }) };
-      },
-    });
-    assert.equal(verified.versionId, 'deployed-v1');
-    assert.equal(verified.temporaryWorkerName, 'ss-dds-soak-11111111-1111-4111-8111-111111111111');
-    assert.equal(calls[1].args.includes('--json'), false);
-    await assert.rejects(() => mod.deployAndVerifyWorkers({ root, accountId: 'acct', apiToken: '' }), /requires account/i);
-  } finally { rmSync(root, { recursive: true, force: true }); }
+test('an exact-name collision rejects immediately with zero deployment or deletion', async () => {
+  const mod = await deployment(); const identity = await ciIdentity(); let reads = 0, mutations = 0;
+  await assert.rejects(() => mod.preflightTemporaryWorkerIdentity({ accountId: 'acct', apiToken: TOKEN, identity, context: CONTEXT,
+    fetchImpl: async (url, options = {}) => { reads++; if (options.method && options.method !== 'GET') mutations++; assert.ok(url.endsWith('/workers/scripts/' + identity.workerName)); return response({}); },
+    execFile: () => { mutations++; },
+  }), /collision|already exists/i);
+  assert.equal(reads, 1); assert.equal(mutations, 0);
 });
 
-test('temporary deployment retries the same generated Worker after the beta object becomes visible', async () => {
-  const mod = await deployment(); const root = repo();
+test('deployment requires a persisted preflight and rederives ownership from trusted arguments before any request', async () => {
+  const f = await deploymentFixture();
   try {
-    const temporaryWorkerName = 'ss-dds-soak-11111111-1111-4111-8111-111111111111';
-    let deployAttempts = 0;
-    const calls = [];
-    const verified = await mod.deployAndVerifyWorkers({ root, accountId: 'acct', apiToken: 'token', remoteTestKey: 'a'.repeat(43),
-      randomUUID: () => '11111111-1111-4111-8111-111111111111', sleepImpl: async () => {},
-      execFile: (command, args) => {
-        calls.push({ command, args });
+    for (const changes of [
+      { preDeploymentIdentity: undefined },
+      { apiToken: 'wrong-fake-token' },
+      { context: { ...CONTEXT, runAttempt: '3' } },
+      { preDeploymentIdentity: { ...f.options.preDeploymentIdentity, workerName: 'ss-dds-soak-gh-1-1-aaaaaaaaaaaa' } },
+    ]) {
+      let calls = 0;
+      await assert.rejects(() => f.mod.deployAndVerifyWorkers({ ...f.options, ...changes, fetchImpl: async () => { calls++; throw new Error('must not request'); }, execFile: () => { calls++; } }), /predeployment|identity|ownership|context|attestation/i);
+      assert.equal(calls, 0);
+    }
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('deployment repeats collision checks before mutation and passes the same validated name and ownership tag on code-10007 retry', async () => {
+  const f = await deploymentFixture(); let attempts = 0; const configs = [];
+  try {
+    const verified = await f.mod.deployAndVerifyWorkers({ ...f.options,
+      execFile: (command, args, options) => {
         if (args[0] === 'deploy') {
-          deployAttempts += 1;
-          if (deployAttempts === 1) throw new Error('Worker does not exist [code: 10007]');
-          return 'deployed';
+          attempts++;
+          const config = JSON.parse(require('node:fs').readFileSync(args[args.indexOf('--config') + 1], 'utf8'));
+          configs.push(config);
+          assert.equal(config.name, f.identity.workerName);
+          assert.equal(args[args.indexOf('--tag') + 1], f.identity.ownershipTag);
+          assert.equal(JSON.stringify(config).includes('DDS_REMOTE_TEST_KEY'), false);
+          f.setDeployed(true);
+          if (attempts === 1) throw new Error('Worker does not exist [code: 10007]');
         }
-        if (args[1] === 'secret') return '';
-        if (args[0] === '--version') return '4.33.0\n';
-        throw new Error('unexpected command');
-      },
-      fetchImpl: async (url) => {
-        calls.push({ url });
-        if (url.endsWith('/workers/workers')) return { ok: true, json: async () => ({ success: true, result: [{ id: 'a'.repeat(32), name: temporaryWorkerName }] }) };
-        if (url.endsWith('/versions')) return { ok: true, json: async () => ({ result: { items: [{ id: 'deployed-v1' }] } }) };
-        if (url.endsWith('/workers/subdomain')) return { ok: true, json: async () => ({ result: { subdomain: 'example' } }) };
-        return { ok: true, json: async () => ({ result: { id: 'deployed-v1' } }) };
+        return f.execFile(command, args, options);
       },
     });
-    assert.equal(deployAttempts, 2);
-    assert.equal(verified.temporaryWorkerName, temporaryWorkerName);
-    assert.equal(calls.filter((call) => call.args?.[0] === 'deploy').length, 2);
-  } finally { rmSync(root, { recursive: true, force: true }); }
+    assert.equal(attempts, 2);
+    assert.deepEqual(configs[1], configs[0]);
+    assert.equal(verified.versionId, 'deployed-v1');
+    assert.equal(verified.temporaryWorkerName, f.identity.workerName);
+    const firstDeploy = f.events.findIndex((e) => e.args?.[0] === 'deploy');
+    for (const suffix of ['/workers/workers', '/workers/scripts-search']) {
+      assert.ok(f.events.slice(0, firstDeploy).filter((e) => e.url && new URL(e.url).pathname.endsWith(suffix)).length >= 2);
+    }
+    const secret = f.events.find((e) => e.args?.[1] === 'secret');
+    assert.equal(secret.input, KEY + '\n');
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 
-test('temporary deployment deletes its exact partial beta Worker when the retry also fails', async () => {
-  const mod = await deployment(); const root = repo();
+test('deployment records the SHA-256 of the exact local temporary configuration bytes consumed by Wrangler', async () => {
+  const f = await deploymentFixture(); let bytes;
   try {
-    const temporaryWorkerName = 'ss-dds-soak-22222222-2222-4222-8222-222222222222';
-    const workerId = 'b'.repeat(32);
-    let deployAttempts = 0, deleted = false, listReads = 0;
-    await assert.rejects(() => mod.deployAndVerifyWorkers({ root, accountId: 'acct', apiToken: 'token', remoteTestKey: 'a'.repeat(43),
-      randomUUID: () => '22222222-2222-4222-8222-222222222222', sleepImpl: async () => {},
+    const verified = await f.mod.deployAndVerifyWorkers({ ...f.options, execFile: (command, args, options) => {
+      if (args[0] === 'deploy') bytes = require('node:fs').readFileSync(args[args.indexOf('--config') + 1]);
+      return f.execFile(command, args, options);
+    } });
+    assert.equal(verified.localConfigurationSha256, require('node:crypto').createHash('sha256').update(bytes).digest('hex'));
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('Wrangler uses the same explicit account and source token as the collision and ownership API checks', async () => {
+  const f = await deploymentFixture();
+  try {
+    await f.mod.deployAndVerifyWorkers({ ...f.options, execFile: (command, args, options) => {
+      assert.equal(options.env?.CLOUDFLARE_ACCOUNT_ID, 'acct');
+      assert.equal(options.env?.CLOUDFLARE_API_TOKEN, TOKEN);
+      return f.execFile(command, args, options);
+    } });
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('a new collision between persisted preflight and deployment causes zero mutation', async () => {
+  const f = await deploymentFixture(); f.setDeployed(true);
+  try {
+    await assert.rejects(() => f.mod.deployAndVerifyWorkers(f.options), /collision|already exists/i);
+    assert.equal(f.events.filter((e) => e.command || e.method === 'DELETE').length, 0);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('version verification requires the immutable version id and matching workers/tag annotation', async () => {
+  const mod = await deployment(); const identity = await ciIdentity();
+  const args = { accountId: 'acct / one', scriptName: identity.workerName, apiToken: TOKEN, expectedVersionId: 'deployed-v1', ownershipTag: identity.ownershipTag, wranglerVersion: '4.33.0' };
+  const verified = await mod.verifyWorkersDeployment({ ...args, fetchImpl: async (url) => {
+    assert.ok(url.includes('/accounts/acct%20%2F%20one/workers/scripts/' + identity.workerName + '/versions/deployed-v1'));
+    return response(versionDetail(identity));
+  } });
+  assert.equal(verified.scriptETag, 'script-etag-1');
+  for (const tag of [null, 'b'.repeat(43)]) await assert.rejects(() => mod.verifyWorkersDeployment({ ...args, fetchImpl: async () => response(versionDetail(identity, tag)) }), /ownership|tag/i);
+  await assert.rejects(() => mod.verifyWorkersDeployment({ ...args, fetchImpl: async () => response({ ...versionDetail(identity), result: { ...versionDetail(identity).result, id: 'other' } }) }), /version ID|immutable/i);
+});
+
+for (const [label, tag, versions, deletes] of [
+  ['no deployed versions', null, false, true],
+  ['matching immutable ownership', 'matching', true, true],
+  ['missing ownership', null, true, false],
+  ['foreign ownership', 'b'.repeat(43), true, false],
+]) test('failed deployment partial cleanup: ' + label, async () => {
+  const f = await deploymentFixture(); let attempts = 0, deleted = false;
+  try {
+    await assert.rejects(() => f.mod.deployAndVerifyWorkers({ ...f.options,
       execFile: (command, args) => {
-        if (args[0] !== 'deploy') throw new Error('unexpected command');
-        deployAttempts += 1;
+        assert.equal(args[0], 'deploy'); attempts++; f.setDeployed(true);
         throw new Error('Worker does not exist [code: 10007]');
       },
       fetchImpl: async (url, options = {}) => {
-        if (url.endsWith(`/workers/workers/${workerId}`) && options.method === 'DELETE') {
-          deleted = true;
-          return { ok: true, json: async () => ({ success: true }) };
-        }
-        if (url.endsWith('/workers/workers')) {
-          listReads += 1;
-          return { ok: true, json: async () => ({ success: true, result: deleted ? [] : [{ id: workerId, name: temporaryWorkerName }] }) };
-        }
-        throw new Error(`unexpected fetch: ${url}`);
+        if (options.method === 'DELETE') { deleted = true; assert.ok(url.endsWith('/workers/workers/' + WORKER_ID)); return f.fetchImpl(url, options); }
+        if (!versions && new URL(url).pathname.endsWith('/workers/scripts/' + f.identity.workerName)) return response({}, 404);
+        if (!versions && new URL(url).pathname.endsWith('/workers/scripts-search')) return response(page([]));
+        if (new URL(url).pathname.endsWith('/versions')) return response({ ...page([]), result: { items: versions ? [{ id: 'deployed-v1' }] : [] } });
+        if (url.endsWith('/versions/deployed-v1')) return response(versionDetail(f.identity, tag === 'matching' ? f.identity.ownershipTag : tag));
+        return f.fetchImpl(url, options);
       },
-    }), /10007/);
-    assert.equal(deployAttempts, 2);
-    assert.equal(deleted, true);
-    assert.equal(listReads, 2);
-  } finally { rmSync(root, { recursive: true, force: true }); }
+    }), deletes ? /10007/ : /ownership|tag|refus/i);
+    assert.equal(attempts, deletes ? 2 : 1); assert.equal(deleted, deletes);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 
-test('temporary remote deployment enables only workers.dev and keeps the test key out of generated configuration', async () => {
-  const mod = await deployment(); const root = repo();
+test('deployment refuses mismatched remote build/version evidence before generating a manifest', async () => {
+  for (const field of ['buildId', 'workerVersionId']) {
+    const f = await deploymentFixture();
+    try {
+      await assert.rejects(() => f.mod.deployAndVerifyWorkers({ ...f.options, fetchImpl: async (url, options) => {
+        if (new URL(url).hostname.endsWith('.workers.dev')) {
+          const payload = await (await f.fetchImpl(url, options)).json(); payload.operationResult[field] = 'wrong-' + field;
+          return response(payload);
+        }
+        return f.fetchImpl(url, options);
+      } }), /remote.*evidence|build|version/i);
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  }
+});
+
+test('shared API finds later-page exact objects and legacy scripts without treating dual API representations as duplicates', async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity();
+  const reads = [];
+  const options = { accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName, fetchImpl: async (url) => {
+    const parsed = new URL(url), number = Number(parsed.searchParams.get('page') ?? '1'); reads.push(url);
+    assert.equal(parsed.searchParams.get('per_page'), '100');
+    if (parsed.pathname.endsWith('/workers/workers')) return response(page(number === 1 ? [{ id: 'c'.repeat(32), name: 'other' }] : [{ id: WORKER_ID, name: identity.workerName }], number, 2));
+    if (parsed.pathname.endsWith('/workers/scripts-search')) {
+      assert.equal(parsed.searchParams.get('name'), identity.workerName);
+      return response(page(number === 1 ? [{ script_name: 'near-' + identity.workerName }] : [{ script_name: identity.workerName }], number, 2));
+    }
+    throw new Error('unexpected');
+  } };
+  assert.deepEqual(await api.findExactWorker(options), { id: WORKER_ID, name: identity.workerName });
+  assert.equal((await api.listLegacyExactScript(options)).name, identity.workerName);
+  assert.equal(reads.length, 4);
+});
+
+for (const target of ['objects', 'legacy', 'versions']) {
+  for (const bad of ['missing metadata', 'malformed cursor', 'repeated cursor', 'cyclic cursor', 'inconsistent pages', 'non-advancing page', 'duplicate exact']) {
+    test(target + ' pagination fails closed on ' + bad, async () => {
+      const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity(); let reads = 0;
+      const item = target === 'objects' ? { id: WORKER_ID, name: identity.workerName } : target === 'legacy' ? { script_name: identity.workerName } : { id: 'deployed-v1' };
+      const fetchImpl = async (url) => {
+        if (url.endsWith('/versions/deployed-v1')) return response(versionDetail(identity));
+        reads++;
+        const items = bad === 'duplicate exact' ? [item] : [];
+        let metadata;
+        if (bad === 'malformed cursor') metadata = { cursor: 123 };
+        else if (bad === 'repeated cursor') metadata = { cursor: 'same' };
+        else if (bad === 'cyclic cursor') metadata = { cursor: reads % 2 ? 'a' : 'b' };
+        else if (bad === 'inconsistent pages') metadata = { page: reads, per_page: 100, total_pages: reads === 1 ? 2 : 3 };
+        else if (bad === 'non-advancing page') metadata = { page: 1, per_page: 100, total_pages: 2 };
+        else if (bad === 'duplicate exact') metadata = { page: reads, per_page: 100, total_pages: 2 };
+        const payload = { success: true, result: target === 'versions' ? { items } : items };
+        if (metadata) payload.result_info = metadata;
+        return response(payload);
+      };
+      const options = { accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName, fetchImpl };
+      const method = target === 'objects' ? api.findExactWorker : target === 'legacy' ? api.listLegacyExactScript : api.readWorkerVersions;
+      await assert.rejects(() => method(options), /pagination|cursor|duplicate|page/i);
+      assert.ok(reads <= 3);
+    });
+  }
+}
+
+test('shared API normalizes every immutable version with script ETag and canonical config fingerprint without credentials', async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity();
+  const { canonicalJson } = await import('../scripts/remote-dds-soak-state.mjs'); const crypto = require('node:crypto');
+  const detail = versionDetail(identity);
+  const result = await api.readWorkerVersions({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName, fetchImpl: async (url) => {
+    if (url.endsWith('/versions/deployed-v1')) return response(detail);
+    return response({ ...page([]), result: { items: [{ id: 'deployed-v1' }] } });
+  } });
+  assert.equal(result.status, 'PRESENT'); const records = result.versions;
+  assert.equal(records.length, 1); assert.equal(records[0].id, 'deployed-v1'); assert.equal(records[0].ownershipTag, identity.ownershipTag);
+  assert.equal(records[0].scriptETag, 'script-etag-1');
+  assert.equal(records[0].versionConfigurationSha256, crypto.createHash('sha256').update(canonicalJson({ bindings: detail.result.resources.bindings, script_runtime: detail.result.resources.script_runtime })).digest('hex'));
+  assert.equal(JSON.stringify(records).includes(TOKEN), false);
+});
+
+test('a missing versions endpoint returns typed absence, while missing immutable detail and permission failures refuse', async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity();
+  const options = { accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName };
+  for (const payload of [response({}, 404), response({ success: false, errors: [{ code: 10007, message: 'Worker not found' }] }, 400)]) {
+    assert.deepEqual(await api.readWorkerVersions({ ...options, fetchImpl: async () => payload }), { status: 'ABSENT_ENDPOINT', versions: [] });
+  }
+  for (const status of [401, 403, 500]) await assert.rejects(() => api.readWorkerVersions({ ...options, fetchImpl: async () => response({ success: false }, status) }), /failed|Cloudflare/i);
+  await assert.rejects(() => api.readWorkerVersions({ ...options, versionId: 'missing', fetchImpl: async () => response({}, 404) }), /failed|immutable|Cloudflare/i);
+});
+
+test('an absent versions endpoint permits cleanup only for a current exact placeholder with both legacy readers absent', async () => {
+  for (const legacyExists of [false, true]) {
+    const f = await deploymentFixture(); let deletes = 0;
+    try {
+      await assert.rejects(() => f.mod.deployAndVerifyWorkers({ ...f.options,
+        execFile: () => { f.setDeployed(true); throw new Error('Worker does not exist [code: 10007]'); },
+        fetchImpl: async (url, options = {}) => {
+          if (options.method === 'DELETE') deletes++;
+          const path = new URL(url).pathname;
+          if (path.endsWith('/versions')) return response({}, 404);
+          if (!legacyExists && path.endsWith('/workers/scripts/' + f.identity.workerName)) return response({}, 404);
+          if (!legacyExists && path.endsWith('/workers/scripts-search')) return response(page([]));
+          return f.fetchImpl(url, options);
+        },
+      }), legacyExists ? /ownership|placeholder|refus/i : /10007/);
+      assert.equal(deletes, legacyExists ? 0 : 1);
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  }
+});
+
+test('temporary configuration removes production routes and rejects persisted test key material', async () => {
+  const mod = await deployment(); const root = repo(); const identity = await ciIdentity();
   try {
     writeFileSync(join(root, 'workers/wrangler.jsonc'), JSON.stringify({ name: 'normal-worker', main: 'src/index.mjs', workers_dev: false, routes: [{ pattern: 'stepstone.hogetsu.uk/*' }] }));
-    const name = 'ss-dds-soak-11111111-1111-4111-8111-111111111111';
-    const config = mod.createTemporaryWorkersConfig({ root, temporaryWorkerName: name });
-    assert.equal(config.name, name);
-    assert.equal(config.workers_dev, true);
-    assert.equal('routes' in config, false);
-    assert.equal(JSON.stringify(config).includes('DDS_REMOTE_TEST_KEY'), false);
-    assert.throws(() => mod.createTemporaryWorkersConfig({ root, temporaryWorkerName: 'normal-worker' }), /temporary Worker/i);
-    assert.throws(() => mod.createTemporaryWorkersConfig({ root, scriptName: 'normal-worker' }), /temporary Worker/i);
+    const config = mod.createTemporaryWorkersConfig({ root, temporaryWorkerName: identity.workerName });
+    assert.equal(config.name, identity.workerName); assert.equal(config.workers_dev, true); assert.equal('routes' in config, false);
+    writeFileSync(join(root, 'workers/wrangler.jsonc'), JSON.stringify({ name: 'normal', main: 'src/index.mjs', vars: { DDS_REMOTE_TEST_KEY: KEY } }));
+    assert.throws(() => mod.createTemporaryWorkersConfig({ root, temporaryWorkerName: identity.workerName }), /test key|DDS_REMOTE_TEST_KEY/i);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test('temporary remote deployment requires an in-memory test key and obtains a workers.dev URL from Cloudflare APIs', async () => {
-  const mod = await deployment(); const root = repo();
-  try {
-    const calls = [];
-    const deployed = await mod.deployAndVerifyWorkers({ root, accountId: 'acct', apiToken: 'token', remoteTestKey: 'a'.repeat(43), randomUUID: () => '22222222-2222-4222-8222-222222222222',
-      execFile: (command, args, options = {}) => {
-        calls.push({ command, args, options });
-        if (args[1] === 'secret') { assert.equal(options.input, `${'a'.repeat(43)}\n`); return ''; }
-        if (args[0] === 'deploy') return 'deployed';
-        if (args[0] === '--version') return '4.33.0\n';
-        throw new Error('unexpected command');
-      },
-      fetchImpl: async (url) => url.endsWith('/versions')
-        ? ({ ok: true, json: async () => ({ result: { items: [{ id: 'deployed-v1' }] } }) })
-        : url.endsWith('/workers/subdomain')
-          ? ({ ok: true, json: async () => ({ result: { subdomain: 'example' } }) })
-          : ({ ok: true, json: async () => ({ result: { id: 'deployed-v1' } }) }),
-    });
-    assert.equal(deployed.workersDevUrl, 'https://ss-dds-soak-22222222-2222-4222-8222-222222222222.example.workers.dev');
-    assert.equal(calls[0].args[0], 'deploy');
-    assert.equal(calls[1].command, process.execPath);
-    assert.equal(calls[1].args.slice(1, 4).join(' '), 'secret put DDS_REMOTE_TEST_KEY');
-    assert.equal(calls[1].options.shell, undefined);
-    assert.equal(calls[1].options.input, `${'a'.repeat(43)}\n`);
-    await assert.rejects(() => mod.deployAndVerifyWorkers({ root, accountId: 'acct', apiToken: 'token' }), /test key/i);
-  } finally { rmSync(root, { recursive: true, force: true }); }
+test('shared mutation API disables only the exact workers.dev subdomain and deletes only the verified immutable object', async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity(); const calls = [];
+  const options = { accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName, worker: { id: WORKER_ID, name: identity.workerName }, fetchImpl: async (url, init) => { calls.push({ url, init }); return response({ success: true }); } };
+  await api.disableWorkersDevSubdomain(options);
+  await api.deleteExactWorker(options);
+  assert.ok(calls[0].url.endsWith('/workers/scripts/' + identity.workerName + '/subdomain'));
+  assert.equal(calls[0].init.method, 'POST'); assert.deepEqual(JSON.parse(calls[0].init.body), { enabled: false, previews_enabled: false });
+  assert.ok(calls[1].url.endsWith('/workers/workers/' + WORKER_ID)); assert.equal(calls[1].init.method, 'DELETE');
+  await assert.rejects(() => api.deleteExactWorker({ ...options, worker: { id: WORKER_ID, name: 'production-worker' } }), /exact|temporary Worker/i);
+  assert.equal(calls.length, 2);
 });
 
-test('temporary Worker teardown uses only a generated identity, closes the keyed route, then deletes and confirms absence', async () => {
-  const mod = await deployment(); const root = repo();
+test('deployment CLI rejects unknown, duplicate, mixed modes, and missing trusted context before accessing secrets or network', async () => {
+  const { spawnSync } = require('node:child_process');
+  const script = join(__dirname, '../scripts/prepare-remote-dds-deployment.mjs');
+  for (const args of [
+    ['--deploy-and-verify', '--out', 'unused.json'],
+    ['--preflight', '--identity', 'x', '--out', 'unused.json'],
+    ['--preflight', '--preflight', '--out', 'unused.json'],
+    ['--preflight', '--deploy-from-identity', 'x', '--out', 'unused.json'],
+    ['--unknown', '--out', 'unused.json'],
+  ]) {
+    const result = spawnSync(process.execPath, [script, ...args], { encoding: 'utf8', env: { ...process.env, CLOUDFLARE_API_TOKEN: TOKEN, DDS_REMOTE_TEST_KEY: KEY } });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /argument|mode|required|Unknown|Duplicate/i);
+    assert.equal(result.stderr.includes(TOKEN), false); assert.equal(result.stderr.includes(KEY), false);
+  }
+});
+
+test('preflight and deploy CLI forms atomically persist secret-free records with trusted context', async () => {
+  const f = await deploymentFixture();
   try {
-    const calls = [];
-    const temporaryWorkerName = 'ss-dds-soak-33333333-3333-4333-8333-333333333333';
-    const workersDevUrl = 'https://ss-dds-soak-33333333-3333-4333-8333-333333333333.example.workers.dev';
-    const workerId = 'c'.repeat(32);
-    let listed = true;
-    await mod.teardownTemporaryWorkers({ root, accountId: 'acct', temporaryWorkerName, workersDevUrl, remoteTestKey: 'a'.repeat(43), apiToken: 'token', randomUUID: () => '44444444-4444-4444-8444-444444444444',
-      execFile: (command, args, options) => { calls.push({ command, args, options }); return args[0] === 'deploy' ? 'deployed' : ''; },
+    const input = join(f.root, 'identity.json'), pre = join(f.root, 'pre-deployment.json'), out = join(f.root, 'deployment.json');
+    writeFileSync(input, JSON.stringify(f.identity));
+    const context = ['--repository', CONTEXT.repository, '--workflow', CONTEXT.workflow, '--run-id', CONTEXT.runId, '--run-attempt', CONTEXT.runAttempt, '--commit-sha', CONTEXT.commitSha];
+    const env = { CLOUDFLARE_ACCOUNT_ID: 'acct', CLOUDFLARE_API_TOKEN: TOKEN, DDS_REMOTE_TEST_KEY: KEY };
+    const dependencies = { root: f.root, fetchImpl: f.fetchImpl, execFile: f.execFile };
+    const identity = await f.mod.runDeploymentCli(['--preflight', '--identity', input, ...context, '--out', pre], env, dependencies);
+    assert.deepEqual(JSON.parse(require('node:fs').readFileSync(pre, 'utf8')), identity);
+    assert.equal(f.events.filter((e) => e.command).length, 0);
+    const manifest = await f.mod.runDeploymentCli(['--deploy-from-identity', pre, ...context, '--out', out], env, dependencies);
+    assert.deepEqual(JSON.parse(require('node:fs').readFileSync(out, 'utf8')), manifest);
+    f.mod.assertDeploymentManifest(manifest, { root: f.root });
+    assert.equal(require('node:fs').readFileSync(out, 'utf8').includes(KEY), false);
+    assert.equal(require('node:fs').readFileSync(out, 'utf8').includes(TOKEN), false);
+    assert.equal(require('node:fs').readdirSync(f.root).some((name) => name.endsWith('.tmp')), false);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('partial cleanup refuses a replacement immutable object after a code-10007 retry', async () => {
+  const f = await deploymentFixture(); let currentReads = 0, deletes = 0;
+  try {
+    await assert.rejects(() => f.mod.deployAndVerifyWorkers({ ...f.options,
+      execFile: () => { f.setDeployed(true); throw new Error('Worker does not exist [code: 10007]'); },
       fetchImpl: async (url, options = {}) => {
-        calls.push({ url, options });
-        if (url === `${workersDevUrl}/__dds/metrics`) return { ok: false, status: 404, json: async () => ({}) };
-        if (url.endsWith(`/workers/workers/${workerId}`) && options.method === 'DELETE') {
-          listed = false;
-          return { ok: true, json: async () => ({ success: true }) };
+        const path = new URL(url).pathname;
+        if (options.method === 'DELETE') deletes++;
+        if (path.endsWith('/workers/workers')) {
+          currentReads++;
+          if (currentReads >= 3) return response(page([{ id: 'c'.repeat(32), name: f.identity.workerName }]));
         }
-        if (url.endsWith('/workers/workers')) return { ok: true, json: async () => ({ success: true, result: listed ? [{ id: workerId, name: temporaryWorkerName }] : [] }) };
-        throw new Error(`unexpected fetch: ${url}`);
+        if (path.endsWith('/versions')) return response({ ...page([]), result: { items: [] } });
+        return f.fetchImpl(url, options);
+      },
+    }), /immutable.*(changed|mismatch)|replacement|refus/i);
+    assert.equal(deletes, 0);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('the existing teardown adapter supplies the exact name to shared deletion and confirms both API representations absent', async () => {
+  const f = await deploymentFixture(); f.setDeployed(true);
+  try {
+    const result = await f.mod.teardownTemporaryWorkers({ ...f.options, temporaryWorkerName: f.identity.workerName,
+      workersDevUrl: 'https://' + f.identity.workerName + '.example.workers.dev', fetchImpl: async (url, options) => {
+        if (new URL(url).hostname.endsWith('.workers.dev')) return response({}, 404);
+        return f.fetchImpl(url, options);
       },
     });
-    assert.ok(calls.find((call) => call.args?.includes('DDS_REMOTE_TEST:false')));
-    const closeDeploy = calls.find((call) => call.args?.[0] === 'deploy');
-    assert.equal(closeDeploy.args.includes('--json'), false);
-    if (process.platform === 'win32') {
-      assert.equal(closeDeploy.command, 'wrangler.cmd');
-      assert.equal(closeDeploy.options.shell, true);
-    }
-    const closureProbe = calls.find((call) => call.url === `${workersDevUrl}/__dds/metrics`);
-    assert.equal(closureProbe.options.method, 'POST');
-    assert.equal(closureProbe.options.headers['x-dds-test-key'], 'a'.repeat(43));
-    assert.match(closureProbe.options.headers['x-dds-run-id'], /^[0-9a-f-]{36}$/i);
-    assert.equal(closureProbe.options.headers['x-dds-operation-id'], 'teardown.close.000001');
-    assert.equal(calls.find((call) => call.options?.method === 'DELETE').url, `https://api.cloudflare.com/client/v4/accounts/acct/workers/workers/${workerId}`);
-    assert.equal(calls.filter((call) => call.url?.endsWith('/workers/workers')).length, 2);
-    assert.equal(JSON.stringify(calls).includes('DDS_REMOTE_TEST_KEY'), false);
-    await assert.rejects(() => mod.teardownTemporaryWorkers({ root, accountId: 'acct', temporaryWorkerName, workersDevUrl, remoteTestKey: 'a'.repeat(43), apiToken: 'token',
-      execFile: () => '', fetchImpl: async (url) => url === `${workersDevUrl}/__dds/metrics` ? ({ ok: true, status: 200, json: async () => ({}) }) : ({ ok: false, status: 404, json: async () => ({}) }),
-    }), /opaque 404/i);
-    await assert.rejects(() => mod.teardownTemporaryWorkers({ root, accountId: 'acct', temporaryWorkerName: 'production-worker', workersDevUrl, remoteTestKey: 'a'.repeat(43), apiToken: 'token' }), /temporary Worker/i);
-  } finally { rmSync(root, { recursive: true, force: true }); }
+    assert.deepEqual(result, { deleted: true }); assert.equal(f.isDeleted(), true);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 
 test('remote runner permits only a workers.dev HTTPS endpoint and checks endpoint build ID', async () => {

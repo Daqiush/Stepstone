@@ -6,8 +6,10 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { canonicalJson, requestHash } from './remote-dds-soak-state.mjs';
 import { writeReportCheckpoint } from './worker-dds-checkpoint.mjs';
+import { deriveCiIdentity, assertGithubContext, assertCiIdentity, createPreDeploymentIdentity, assertPreDeploymentIdentity, createDeploymentRecord, assertDeploymentRecord } from './remote-dds-ci-identity.mjs';
+import { findExactWorker, listLegacyExactScript, readWorkerVersions, deleteExactWorker, confirmExactAbsence } from './cloudflare-temporary-worker-api.mjs';
 
-export const DEPLOYMENT_MANIFEST_VERSION = 1;
+export const DEPLOYMENT_MANIFEST_VERSION = 2;
 export const WASM_PATH = 'workers/vendor/bridge-dds/dds-worker.wasm';
 export const TEMPORARY_WORKER_PREFIX = 'ss-dds-soak-';
 const WRANGLER_CLI_PATH = resolve(import.meta.dirname, '../node_modules/wrangler/bin/wrangler.js');
@@ -29,128 +31,134 @@ function asset(root, path, label) {
   return { path, bytes: bytes.byteLength, sha256: sha256(bytes) };
 }
 
-export function assertVerifiedDeployment(record, { requireWorkersDevUrl = true } = {}) {
+export function assertVerifiedDeployment(record) {
   if (!record || record.apiVerified !== true || typeof record.versionId !== 'string' || !record.versionId.trim()
-      || typeof record.wranglerVersion !== 'string' || !record.wranglerVersion.trim()
-      || (requireWorkersDevUrl && typeof record.workersDevUrl !== 'string')) throw new Error('A verified deployment record is required');
-  const normalized = { versionId: record.versionId.trim(), apiVerified: true, wranglerVersion: record.wranglerVersion.trim(), temporaryWorkerName: assertTemporaryWorkerName(record.temporaryWorkerName) };
-  if (record.workersDevUrl !== undefined) normalized.workersDevUrl = assertWorkersDevUrl(record.workersDevUrl);
-  return normalized;
+      || typeof record.wranglerVersion !== 'string' || !record.wranglerVersion.trim()) throw new Error('A verified deployment record is required');
+  const identity = assertPreDeploymentIdentity(record.identity);
+  const temporaryWorkerName = assertTemporaryWorkerName(record.temporaryWorkerName);
+  if (temporaryWorkerName !== identity.workerName || record.ownershipTag !== identity.ownershipTag) throw new Error('Verified deployment ownership identity does not match');
+  for (const field of ['localConfigurationSha256', 'versionConfigurationSha256']) if (!/^[a-f0-9]{64}$/.test(record[field] ?? '')) throw new Error('Verified deployment configuration hash is invalid');
+  if (typeof record.scriptETag !== 'string' || !record.scriptETag.trim()) throw new Error('Verified deployment script ETag is required');
+  return { versionId: record.versionId, apiVerified: true, wranglerVersion: record.wranglerVersion, temporaryWorkerName,
+    workersDevUrl: assertWorkersDevUrl(record.workersDevUrl), identity, ownershipTag: identity.ownershipTag,
+    localConfigurationSha256: record.localConfigurationSha256, scriptETag: record.scriptETag, versionConfigurationSha256: record.versionConfigurationSha256 };
 }
 export function assertWorkersDevUrl(value) {
   let url; try { url = new URL(value); } catch { throw new Error('Wrangler deployment must return an HTTPS workers.dev root URL'); }
-  if (url.protocol !== 'https:' || !url.hostname.endsWith('.workers.dev') || url.pathname !== '/' || url.search || url.hash || url.username || url.password) {
-    throw new Error('Wrangler deployment must return an HTTPS workers.dev root URL');
-  }
+  if (typeof value !== 'string' || url.protocol !== 'https:' || !url.hostname.endsWith('.workers.dev') || url.pathname !== '/' || url.search || url.hash || url.username || url.password || url.port) throw new Error('Wrangler deployment must return an HTTPS workers.dev root URL');
   return url.toString().replace(/\/$/, '');
 }
 export function assertTemporaryWorkerName(value) {
-  if (typeof value !== 'string' || !new RegExp(`^${TEMPORARY_WORKER_PREFIX}[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`, 'i').test(value)) {
-    throw new Error('A generated temporary Worker identity is required');
-  }
+  const uuid = /^ss-dds-soak-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const github = /^ss-dds-soak-gh-[0-9]+-[0-9]+-[a-z0-9_-]{12}$/;
+  if (typeof value !== 'string' || value.length > 63 || (!uuid.test(value) && !github.test(value))) throw new Error('A generated temporary Worker identity is required');
   return value.toLowerCase();
 }
 export function createTemporaryWorkerName(randomUUID = systemRandomUUID) {
-  return assertTemporaryWorkerName(`${TEMPORARY_WORKER_PREFIX}${randomUUID()}`);
+  return assertTemporaryWorkerName(TEMPORARY_WORKER_PREFIX + randomUUID());
 }
 export function createTemporaryWorkersConfig({ root = resolve(import.meta.dirname, '..'), temporaryWorkerName } = {}) {
   const scriptName = assertTemporaryWorkerName(temporaryWorkerName);
   const source = JSON.parse(readFileSync(resolve(root, 'workers/wrangler.jsonc'), 'utf8'));
-  // A temporary verification Worker may only be exposed through workers.dev.
-  // Explicitly discard every route/zone field from the project configuration.
+  if (JSON.stringify(source).includes('DDS_REMOTE_TEST_KEY')) throw new Error('DDS_REMOTE_TEST_KEY must be absent from temporary configuration');
   for (const key of ['route', 'routes', 'zone_id', 'zone_name']) delete source[key];
   return { ...source, main: resolve(root, 'workers', source.main), name: scriptName, workers_dev: true };
 }
-
-function workersObjectsUrl(accountId) {
-  return `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/workers/workers`;
+function trustedIdentity({ accountId, apiToken, context }) {
+  if (!accountId || !apiToken) throw new Error('Temporary Workers preflight requires account and token');
+  return deriveCiIdentity({ ...context, secret: apiToken });
 }
-
-async function findTemporaryWorkerObject({ fetchImpl, accountId, apiToken, temporaryWorkerName }) {
-  const scriptName = assertTemporaryWorkerName(temporaryWorkerName);
-  const response = await fetchImpl(workersObjectsUrl(accountId), { headers: { authorization: `Bearer ${apiToken}` } });
-  const payload = await response.json();
-  if (!response.ok || payload?.success !== true || !Array.isArray(payload.result)) throw new Error('Workers API did not list Worker objects');
-  const matches = payload.result.filter((item) => item?.name === scriptName);
-  if (matches.length > 1) throw new Error('Workers API returned duplicate temporary Worker identities');
-  if (!matches.length) return null;
-  const worker = matches[0];
-  if (typeof worker.id !== 'string' || !/^[a-f0-9]{32}$/i.test(worker.id)) throw new Error('Workers API returned an invalid temporary Worker ID');
-  return { id: worker.id, name: scriptName };
+export async function preflightTemporaryWorkerIdentity({ fetchImpl = fetch, accountId, apiToken, context, identity, now = () => new Date() }) {
+  const trusted = trustedIdentity({ accountId, apiToken, context });
+  const supplied = assertCiIdentity(identity, { context });
+  if (canonicalJson(supplied) !== canonicalJson(trusted)) throw new Error('Predeployment identity does not match derived ownership');
+  await confirmExactAbsence({ fetchImpl, accountId, apiToken, temporaryWorkerName: trusted.workerName });
+  return createPreDeploymentIdentity({ identity: trusted, noCollisionVerifiedAt: now().toISOString() });
 }
-
-async function deleteTemporaryWorkerObject({ fetchImpl, accountId, apiToken, worker }) {
-  const scriptName = assertTemporaryWorkerName(worker?.name);
-  if (typeof worker?.id !== 'string' || !/^[a-f0-9]{32}$/i.test(worker.id)) throw new Error('A verified temporary Worker object is required');
-  const base = workersObjectsUrl(accountId);
-  const deleted = await fetchImpl(`${base}/${encodeURIComponent(worker.id)}`, { method: 'DELETE', headers: { authorization: `Bearer ${apiToken}` } });
-  const deletedPayload = await deleted.json();
-  if (!deleted.ok || deletedPayload?.success !== true) throw new Error('Workers API did not delete the temporary Worker object');
-  const absent = await findTemporaryWorkerObject({ fetchImpl, accountId, apiToken, temporaryWorkerName: scriptName });
-  if (absent !== null) throw new Error('Temporary Worker object still exists after deletion');
+export async function verifyWorkersDeployment({ fetchImpl = fetch, accountId, scriptName, apiToken, expectedVersionId, ownershipTag, wranglerVersion }) {
+  if (!accountId || !apiToken || !expectedVersionId || !wranglerVersion || !/^[A-Za-z0-9_-]{43}$/.test(ownershipTag ?? '')) throw new Error('Workers API verification requires account, script, token, version, ownership tag, and Wrangler version');
+  const result = await readWorkerVersions({ fetchImpl, accountId, apiToken, temporaryWorkerName: assertTemporaryWorkerName(scriptName), versionId: expectedVersionId });
+  if (result.status !== 'PRESENT') throw new Error('Cloudflare immutable version is absent');
+  const [version] = result.versions;
+  if (version.ownershipTag !== ownershipTag) throw new Error('Immutable Worker version ownership tag does not match');
+  return { versionId: version.id, ownershipTag, scriptETag: version.scriptETag, versionConfigurationSha256: version.versionConfigurationSha256, apiVerified: true, wranglerVersion: String(wranglerVersion).trim() };
+}
+async function assertPartialOwnership(options) {
+  const worker = await findExactWorker(options);
+  const legacy = await listLegacyExactScript({ ...options, includeExact: true });
+  if (!worker && !legacy) return null;
+  if (!worker) throw new Error('Refusing mutation: legacy-only Worker identity is inconsistent');
+  if (options.expectedWorkerId !== undefined && worker.id !== options.expectedWorkerId) throw new Error('Refusing mutation: immutable Worker object changed after deployment retry');
+  const result = await readWorkerVersions(options);
+  if (result.status === 'ABSENT_ENDPOINT' && legacy) throw new Error('Refusing mutation: absent versions endpoint does not prove an undeployed placeholder');
+  if (result.versions.some((version) => version.ownershipTag !== options.ownershipTag)) throw new Error('Refusing mutation: partial Worker immutable version ownership tag is missing or mismatched');
+  return worker;
+}
+async function deleteTemporaryWorkerObject(options) {
+  const exact = { ...options, temporaryWorkerName: options.worker?.name };
+  await deleteExactWorker(exact);
+  await confirmExactAbsence(exact);
   return { deleted: true };
 }
-function findWorkersDevUrl(value) {
-  if (typeof value === 'string') {
-    try { return assertWorkersDevUrl(value); } catch { return null; }
-  }
-  if (Array.isArray(value)) return value.map(findWorkersDevUrl).find(Boolean) ?? null;
-  if (value && typeof value === 'object') return Object.values(value).map(findWorkersDevUrl).find(Boolean) ?? null;
-  return null;
-}
-export async function verifyWorkersDeployment({ fetchImpl = fetch, accountId, scriptName, apiToken, expectedVersionId, wranglerVersion }) {
-  if (!accountId || !scriptName || !apiToken || !expectedVersionId || !wranglerVersion) throw new Error('Workers API verification requires account, script, token, version, and Wrangler version');
-  const response = await fetchImpl(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(scriptName)}/versions/${encodeURIComponent(expectedVersionId)}`, { headers: { authorization: `Bearer ${apiToken}` } });
-  const payload = await response.json();
-  if (!response.ok || payload?.result?.id !== expectedVersionId) throw new Error('Workers API did not verify the deployed version ID');
-  return { versionId: String(expectedVersionId).trim(), apiVerified: true, wranglerVersion: String(wranglerVersion).trim() };
-}
-export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImpl = fetch, wrangler = process.platform === 'win32' ? 'wrangler.cmd' : 'wrangler', root = resolve(import.meta.dirname, '..'), accountId, apiToken, remoteTestKey, randomUUID = systemRandomUUID,
+export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImpl = fetch, wrangler = process.platform === 'win32' ? 'wrangler.cmd' : 'wrangler',
+  root = resolve(import.meta.dirname, '..'), accountId, apiToken, remoteTestKey, context, preDeploymentIdentity,
   sleepImpl = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)) }) {
-  if (!accountId || !apiToken || !remoteTestKey) throw new Error('Temporary Workers deployment requires account, token, and remote test key');
-  if (!/^[A-Za-z0-9_-]{43}$/.test(remoteTestKey)) throw new Error('Remote test key must be a 32-byte base64url value');
-  const temporaryWorkerName = createTemporaryWorkerName(randomUUID);
-  const assets = { wasm: asset(root, WASM_PATH, 'Wasm'), harness: Object.fromEntries(harnessPaths(root).map((path) => [path, asset(root, path, 'harness')])) };
+  const trusted = trustedIdentity({ accountId, apiToken, context });
+  const identity = assertPreDeploymentIdentity(preDeploymentIdentity, { trustedIdentity: trusted, context });
+  if (!/^[A-Za-z0-9_-]{43}$/.test(remoteTestKey ?? '')) throw new Error('Remote test key must be a 32-byte base64url value');
+  const temporaryWorkerName = assertTemporaryWorkerName(trusted.workerName), ownershipTag = trusted.ownershipTag;
+  const apiOptions = { fetchImpl, accountId, apiToken, temporaryWorkerName, ownershipTag };
+  // A persisted no-collision record is evidence, not authority to choose a name.
+  await confirmExactAbsence(apiOptions);
+  const assets = deploymentAssets(root);
   const buildId = sha256(canonicalJson({ version: DEPLOYMENT_MANIFEST_VERSION, assets }));
+  const configuration = createTemporaryWorkersConfig({ root, temporaryWorkerName });
+  const configurationBytes = JSON.stringify(configuration) + '\n';
+  const localConfigurationSha256 = sha256(configurationBytes);
   const configDir = mkdtempSync(join(tmpdir(), 'stepstone-dds-soak-'));
   const configPath = join(configDir, 'wrangler.json');
-  let knownWorker = null;
   try {
-    // Deploy first so Wrangler never has to create a placeholder Worker while
-    // consuming the secret from stdin.  Until the secret exists, the remote
-    // harness still fails closed with an opaque 404.
-    writeFileSync(configPath, `${JSON.stringify(createTemporaryWorkersConfig({ root, temporaryWorkerName }))}\n`, 'utf8');
-    const childOptions = { encoding: 'utf8', cwd: root, ...(process.platform === 'win32' ? { shell: true } : {}) };
-    const deployArgs = ['deploy', '--config', configPath,
-      '--var', 'DDS_REMOTE_TEST:true', '--var', `DDS_DEPLOYMENT_BUILD_ID:${buildId}`];
-    try {
-      execFile(wrangler, deployArgs, childOptions);
-    } catch (firstError) {
-      knownWorker = await findTemporaryWorkerObject({ fetchImpl, accountId, apiToken, temporaryWorkerName });
-      if (knownWorker === null) throw firstError;
+    writeFileSync(configPath, configurationBytes, 'utf8');
+    const childEnvironment = { ...process.env, CLOUDFLARE_ACCOUNT_ID: accountId, CLOUDFLARE_API_TOKEN: apiToken };
+    const childOptions = { encoding: 'utf8', cwd: root, env: childEnvironment, ...(process.platform === 'win32' ? { shell: true } : {}), stdio: ['pipe', 'pipe', 'pipe'] };
+    const deployArgs = ['deploy', '--config', configPath, '--tag', ownershipTag,
+      '--var', 'DDS_REMOTE_TEST:true', '--var', 'DDS_DEPLOYMENT_BUILD_ID:' + buildId];
+    try { execFile(wrangler, deployArgs, childOptions); }
+    catch (firstError) {
+      if (!/\b10007\b/.test(String(firstError.message))) throw firstError;
+      const partial = await assertPartialOwnership(apiOptions);
+      if (partial === null) throw firstError;
+      apiOptions.expectedWorkerId = partial.id;
       await sleepImpl(2000);
       execFile(wrangler, deployArgs, childOptions);
     }
-    // The key is intentionally supplied only to Wrangler stdin, never config or report.
     execFile(process.execPath, [WRANGLER_CLI_PATH, 'secret', 'put', 'DDS_REMOTE_TEST_KEY', '--config', configPath],
-      { encoding: 'utf8', cwd: root, input: `${remoteTestKey}\n` });
-    const headers = { authorization: `Bearer ${apiToken}` };
-    const [versionsResponse, subdomainResponse] = await Promise.all([
-      fetchImpl(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(temporaryWorkerName)}/versions`, { headers }),
-      fetchImpl(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/workers/subdomain`, { headers }),
-    ]);
-    const versions = await versionsResponse.json(); const subdomain = await subdomainResponse.json();
-    const versionId = versions?.result?.items?.[0]?.id;
-    const workersDevUrl = subdomain?.result?.subdomain ? `https://${temporaryWorkerName}.${subdomain.result.subdomain}.workers.dev` : null;
-    if (!versionId || !workersDevUrl) throw new Error('Wrangler deployment did not return a version ID and workers.dev URL');
+      { encoding: 'utf8', cwd: root, env: childEnvironment, input: remoteTestKey + '\n', stdio: ['pipe', 'pipe', 'pipe'] });
+    const result = await readWorkerVersions(apiOptions);
+    const versions = result.versions;
+    if (result.status !== 'PRESENT' || !versions.length || versions.some((version) => version.ownershipTag !== ownershipTag)) throw new Error('Deployed immutable Worker version ownership tag is missing or mismatched');
+    const subdomainResponse = await fetchImpl('https://api.cloudflare.com/client/v4/accounts/' + encodeURIComponent(accountId) + '/workers/subdomain', { headers: { authorization: 'Bearer ' + apiToken } });
+    const subdomain = await subdomainResponse.json();
+    if (!subdomainResponse.ok || subdomain.success !== true || typeof subdomain.result?.subdomain !== 'string' || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(subdomain.result.subdomain)) throw new Error('Cloudflare did not verify the workers.dev subdomain');
+    const workersDevUrl = 'https://' + temporaryWorkerName + '.' + subdomain.result.subdomain + '.workers.dev';
     const wranglerVersion = String(execFile(wrangler, ['--version'], childOptions)).trim();
-    const verified = await verifyWorkersDeployment({ fetchImpl, accountId, scriptName: temporaryWorkerName, apiToken, expectedVersionId: versionId, wranglerVersion });
-    return { ...verified, workersDevUrl, temporaryWorkerName };
+    const verified = await verifyWorkersDeployment({ fetchImpl, accountId, scriptName: temporaryWorkerName, apiToken, expectedVersionId: versions[0].id, ownershipTag, wranglerVersion });
+    const route = '/__dds/metrics', body = '{}';
+    const remote = await fetchImpl(workersDevUrl + route, { method: 'POST', body, headers: {
+      'content-type': 'application/json', 'x-dds-test-key': remoteTestKey, 'x-dds-run-id': systemRandomUUID(),
+      'x-dds-operation-id': 'deployment.verify.000001', 'x-dds-request-hash': requestHash(route, body), 'x-dds-shard': '0',
+    } });
+    const evidence = await remote.json();
+    if (!remote.ok || evidence?.operationResult?.buildId !== buildId || evidence?.operationResult?.workerVersionId !== verified.versionId) throw new Error('Remote deployment evidence did not verify the build and immutable version');
+    return assertVerifiedDeployment({ ...verified, workersDevUrl, temporaryWorkerName, identity, localConfigurationSha256 });
   } catch (error) {
-    const worker = knownWorker ?? await findTemporaryWorkerObject({ fetchImpl, accountId, apiToken, temporaryWorkerName });
-    if (worker !== null) await deleteTemporaryWorkerObject({ fetchImpl, accountId, apiToken, worker });
+    const worker = await assertPartialOwnership(apiOptions);
+    if (worker) await deleteTemporaryWorkerObject({ ...apiOptions, worker });
     throw error;
   } finally { rmSync(configDir, { recursive: true, force: true }); }
+}
+function deploymentAssets(root) {
+  return { wasm: asset(root, WASM_PATH, 'Wasm'), harness: Object.fromEntries(harnessPaths(root).map((path) => [path, asset(root, path, 'harness')])) };
 }
 export async function teardownTemporaryWorkers({ execFile = execFileSync, fetchImpl = fetch, wrangler = process.platform === 'win32' ? 'wrangler.cmd' : 'wrangler', root = resolve(import.meta.dirname, '..'), accountId, temporaryWorkerName, workersDevUrl, remoteTestKey, apiToken, randomUUID = systemRandomUUID }) {
   if (!accountId || !temporaryWorkerName || !workersDevUrl || !apiToken || !remoteTestKey) throw new Error('Temporary Worker teardown requires account, generated identity, workers.dev URL, token, and remote test key');
@@ -172,50 +180,61 @@ export async function teardownTemporaryWorkers({ execFile = execFileSync, fetchI
       'x-dds-request-hash': requestHash(closeRoute, closeBody), 'x-dds-shard': '0',
     } });
     if (closeProbe.status !== 404) throw new Error('Temporary Worker closure probe did not receive opaque 404');
-    const worker = await findTemporaryWorkerObject({ fetchImpl, accountId, apiToken, temporaryWorkerName: scriptName });
+    const worker = await findExactWorker({ fetchImpl, accountId, apiToken, temporaryWorkerName: scriptName });
     if (worker === null) throw new Error('Temporary Worker object is missing before deletion');
     return await deleteTemporaryWorkerObject({ fetchImpl, accountId, apiToken, worker });
   } finally { rmSync(configDir, { recursive: true, force: true }); }
 }
 export function createDeploymentManifest({ root = resolve(import.meta.dirname, '..'), verifiedDeployment } = {}) {
   const deployment = assertVerifiedDeployment(verifiedDeployment);
-  const assets = {
-    wasm: asset(root, WASM_PATH, 'Wasm'),
-    harness: Object.fromEntries(harnessPaths(root).map((path) => [path, asset(root, path, 'harness')])),
-  };
+  const assets = deploymentAssets(root);
   const fingerprint = { version: DEPLOYMENT_MANIFEST_VERSION, assets };
-  // The endpoint and key are ephemeral transport inputs.  The durable manifest
-  // retains only the generated identity required for safe teardown.
-  const persistedDeployment = { versionId: deployment.versionId, apiVerified: true, wranglerVersion: deployment.wranglerVersion, temporaryWorkerName: deployment.temporaryWorkerName };
-  return { ...fingerprint, workerVersionId: deployment.versionId, verifiedDeployment: persistedDeployment, buildId: sha256(canonicalJson(fingerprint)) };
+  const { versionId, apiVerified, wranglerVersion, temporaryWorkerName, ownershipTag } = deployment;
+  return createDeploymentRecord({ identity: deployment.identity, endpoint: deployment.workersDevUrl,
+    deploymentManifest: { ...fingerprint, workerVersionId: versionId, verifiedDeployment: { versionId, apiVerified, wranglerVersion, temporaryWorkerName, ownershipTag }, buildId: sha256(canonicalJson(fingerprint)) },
+    localConfigurationSha256: deployment.localConfigurationSha256, scriptETag: deployment.scriptETag, versionConfigurationSha256: deployment.versionConfigurationSha256 });
 }
-
 export function assertDeploymentManifest(manifest, { root = resolve(import.meta.dirname, '..') } = {}) {
-  if (!manifest || manifest.version !== DEPLOYMENT_MANIFEST_VERSION) throw new Error('Unsupported or missing deployment manifest version');
-  if (typeof manifest.buildId !== 'string' || !/^[a-f0-9]{64}$/.test(manifest.buildId)) throw new Error('Deployment manifest build ID is invalid');
-  if (typeof manifest.workerVersionId !== 'string' || !manifest.workerVersionId) throw new Error('Deployment manifest Worker version ID is invalid');
-  const verifiedDeployment = assertVerifiedDeployment(manifest.verifiedDeployment, { requireWorkersDevUrl: false });
-  const assets = {
-    wasm: asset(root, WASM_PATH, 'Wasm'),
-    harness: Object.fromEntries(harnessPaths(root).map((path) => [path, asset(root, path, 'harness')])),
-  };
-  const fingerprint = { version: DEPLOYMENT_MANIFEST_VERSION, assets };
-  const current = { ...fingerprint, workerVersionId: verifiedDeployment.versionId, verifiedDeployment: { versionId: verifiedDeployment.versionId, apiVerified: true, wranglerVersion: verifiedDeployment.wranglerVersion, temporaryWorkerName: verifiedDeployment.temporaryWorkerName }, buildId: sha256(canonicalJson(fingerprint)) };
-  if (manifest.assets?.wasm?.sha256 !== current.assets.wasm.sha256) throw new Error('Wasm asset hash changed since deployment manifest was generated');
-  for (const path of harnessPaths(root)) {
-    if (manifest.assets?.harness?.[path]?.sha256 !== current.assets.harness[path].sha256) throw new Error(`Harness asset hash changed since deployment manifest was generated: ${path}`);
+  const record = assertDeploymentRecord(manifest);
+  const assets = deploymentAssets(root);
+  if (canonicalJson(Object.keys(record.assets.harness).sort()) !== canonicalJson(Object.keys(assets.harness).sort())) throw new Error('Deployment manifest harness asset set changed');
+  if (canonicalJson(record.assets.wasm) !== canonicalJson(assets.wasm)) throw new Error('Wasm asset hash changed since deployment manifest was generated');
+  for (const path of Object.keys(assets.harness)) if (canonicalJson(record.assets.harness[path]) !== canonicalJson(assets.harness[path])) throw new Error('Harness asset hash changed since deployment manifest was generated: ' + path);
+  if (record.buildId !== sha256(canonicalJson({ version: DEPLOYMENT_MANIFEST_VERSION, assets }))) throw new Error('Deployment manifest build ID does not bind the current assets');
+  return record;
+}
+export function parseDeploymentOptions(args) {
+  const common = ['--repository', '--workflow', '--run-id', '--run-attempt', '--commit-sha', '--out'];
+  const allowed = new Set(['--preflight', '--identity', '--deploy-from-identity', ...common]);
+  const values = new Map();
+  for (let index = 0; index < args.length; index++) {
+    const key = args[index];
+    if (!allowed.has(key)) throw new Error('Unknown deployment CLI argument');
+    if (values.has(key)) throw new Error('Duplicate deployment CLI argument');
+    if (key === '--preflight') { values.set(key, true); continue; }
+    const value = args[++index];
+    if (!value || value.startsWith('--')) throw new Error('Missing deployment CLI argument value');
+    values.set(key, value);
   }
-  if (manifest.buildId !== current.buildId) throw new Error('Deployment manifest build ID does not bind the current assets');
-  return current;
+  const preflight = values.has('--preflight'), deploy = values.has('--deploy-from-identity');
+  if (preflight === deploy) throw new Error('Exactly one deployment CLI mode is required');
+  const required = new Set([...(preflight ? ['--preflight', '--identity'] : ['--deploy-from-identity']), ...common]);
+  for (const key of values.keys()) if (!required.has(key)) throw new Error('Deployment CLI modes cannot mix arguments');
+  for (const key of required) if (!values.has(key)) throw new Error('Missing required deployment CLI argument: ' + key);
+  const context = assertGithubContext({ repository: values.get('--repository'), workflow: values.get('--workflow'), runId: values.get('--run-id'), runAttempt: values.get('--run-attempt'), commitSha: values.get('--commit-sha') });
+  return { preflight, context, input: values.get(preflight ? '--identity' : '--deploy-from-identity'), out: values.get('--out') };
 }
-
-function option(name, fallback) { const at = process.argv.indexOf(name); return at < 0 ? fallback : process.argv[at + 1]; }
-async function runCli() {
-  const out = option('--out', null);
-  if (!out) throw new Error('--out is required');
-  if (!process.argv.includes('--deploy-and-verify')) throw new Error('--deploy-and-verify is required; verified deployment JSON is not accepted');
-  const manifest = createDeploymentManifest({ verifiedDeployment: await deployAndVerifyWorkers({ accountId: process.env.CLOUDFLARE_ACCOUNT_ID, scriptName: process.env.CLOUDFLARE_WORKER_NAME, apiToken: process.env.CLOUDFLARE_API_TOKEN, remoteTestKey: process.env.DDS_REMOTE_TEST_KEY }) });
-  writeReportCheckpoint(resolve(process.cwd(), out), manifest);
-  console.log(`Generated remote DDS deployment manifest: ${manifest.buildId}`);
+export async function runDeploymentCli(args, env = process.env, dependencies = {}) {
+  const options = parseDeploymentOptions(args);
+  const input = JSON.parse(readFileSync(resolve(options.input), 'utf8'));
+  const common = { ...dependencies, accountId: env.CLOUDFLARE_ACCOUNT_ID, apiToken: env.CLOUDFLARE_API_TOKEN, context: options.context };
+  const record = options.preflight ? await preflightTemporaryWorkerIdentity({ ...common, identity: input })
+    : createDeploymentManifest({ root: dependencies.root, verifiedDeployment: await deployAndVerifyWorkers({ ...common, preDeploymentIdentity: input, remoteTestKey: env.DDS_REMOTE_TEST_KEY }) });
+  writeReportCheckpoint(resolve(options.out), record);
+  return record;
 }
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) runCli().catch((error) => { console.error(error.message); process.exitCode = 1; });
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) runDeploymentCli(process.argv.slice(2)).catch(() => {
+  // Error objects from a child process or fetch may contain source credentials.
+  console.error('Remote DDS deployment failed; verify CLI arguments, identity, collision, and ownership evidence.');
+  process.exitCode = 1;
+});

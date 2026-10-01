@@ -48,8 +48,8 @@ test('deterministic CI identity contains only non-secret ownership metadata', as
 });
 
 function manifest(identity) {
-  return { version: 1, buildId: '1'.repeat(64), workerVersionId: 'worker-v1',
-    verifiedDeployment: { versionId: 'worker-v1', apiVerified: true, wranglerVersion: '4.33.0', temporaryWorkerName: identity.workerName },
+  return { version: 2, buildId: '1'.repeat(64), workerVersionId: 'worker-v1',
+    verifiedDeployment: { versionId: 'worker-v1', apiVerified: true, wranglerVersion: '4.33.0', temporaryWorkerName: identity.workerName, ownershipTag: identity.ownershipTag },
     assets: { wasm: { path: 'workers/vendor/bridge-dds/dds-worker.wasm', bytes: 4, sha256: '2'.repeat(64) }, harness: {
       'workers/src/index.mjs': { path: 'workers/src/index.mjs', bytes: 8, sha256: '3'.repeat(64) },
       'workers/src/harness-router.mjs': { path: 'workers/src/harness-router.mjs', bytes: 9, sha256: '4'.repeat(64) },
@@ -78,18 +78,18 @@ test('deployment record binds the complete deployment manifest and Cloudflare ob
   const record = m.createDeploymentRecord({ identity, endpoint: `https://${identity.workerName}.example.workers.dev`, deploymentManifest,
     localConfigurationSha256: '5'.repeat(64), scriptETag: '"etag-observed"', versionConfigurationSha256: '6'.repeat(64) });
   assert.deepEqual(record, { schemaVersion: 1, kind: 'remote-dds-deployment-record', identity, endpoint: `https://${identity.workerName}.example.workers.dev`,
-    deploymentManifestVersion: 1, buildId: '1'.repeat(64), workerVersionId: 'worker-v1', wranglerVersion: '4.33.0',
-    assets: { wasmSha256: '2'.repeat(64), harnessSha256: { 'workers/src/index.mjs': '3'.repeat(64), 'workers/src/harness-router.mjs': '4'.repeat(64) } },
+    version: 2, deploymentManifestVersion: 2, ownershipTag: identity.ownershipTag, verifiedDeployment: deploymentManifest.verifiedDeployment, buildId: '1'.repeat(64), workerVersionId: 'worker-v1', wranglerVersion: '4.33.0',
+    assets: deploymentManifest.assets,
     localConfigurationSha256: '5'.repeat(64), scriptETag: '"etag-observed"', versionConfigurationSha256: '6'.repeat(64) });
   assert.deepEqual(m.assertDeploymentRecord(record, { identity, deploymentManifest }), record);
   for (const endpoint of ['http://worker.example.workers.dev', 'https://worker.example.workers.dev/path', 'https://worker.example.workers.dev?x=1', 'https://worker.example.workers.dev/', 'https://worker.example.com', `https://${identity.workerName}.example.workers.dev/#x`, `https://other.example.workers.dev`, `https://${identity.workerName}.workers.dev`]) {
     assert.throws(() => m.assertDeploymentRecord({ ...record, endpoint }), /endpoint|workers.dev/i);
   }
   for (const mutate of [
-    (r) => { r.assets.harnessSha256['workers/src/extra.mjs'] = '7'.repeat(64); },
-    (r) => { delete r.assets.harnessSha256['workers/src/index.mjs']; },
-    (r) => { r.assets.harnessSha256['workers/src/index.mjs'] = '7'.repeat(64); },
-    (r) => { r.assets.wasmSha256 = '7'.repeat(64); },
+    (r) => { r.assets.harness['workers/src/extra.mjs'] = { path: 'workers/src/extra.mjs', bytes: 1, sha256: '7'.repeat(64) }; },
+    (r) => { delete r.assets.harness['workers/src/index.mjs']; },
+    (r) => { r.assets.harness['workers/src/index.mjs'].sha256 = '7'.repeat(64); },
+    (r) => { r.assets.wasm.sha256 = '7'.repeat(64); },
     (r) => { r.workerVersionId = 'other'; },
     (r) => { r.wranglerVersion = 'other'; },
     (r) => { r.buildId = '7'.repeat(64); },
@@ -232,8 +232,8 @@ test('all identity assertions reject non-plain roots and recursive deployment ma
   for (const field of ['identity', 'assets']) {
     for (const nonPlain of nonPlainObjects(record[field])) assert.throws(() => m.assertDeploymentRecord({ ...record, [field]: nonPlain }), /plain object/i);
   }
-  for (const nonPlain of nonPlainObjects(record.assets.harnessSha256)) {
-    assert.throws(() => m.assertDeploymentRecord({ ...record, assets: { ...record.assets, harnessSha256: nonPlain } }), /plain object/i);
+  for (const nonPlain of nonPlainObjects(record.assets.harness)) {
+    assert.throws(() => m.assertDeploymentRecord({ ...record, assets: { ...record.assets, harness: nonPlain } }), /plain object/i);
   }
   for (const nonPlain of nonPlainObjects(deploymentManifest)) assert.throws(() => m.assertDeploymentRecord(record, { deploymentManifest: nonPlain }), /plain object/i);
   for (const field of ['verifiedDeployment', 'assets']) {

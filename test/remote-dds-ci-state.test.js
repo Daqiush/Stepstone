@@ -19,7 +19,7 @@ async function fixture(t) {
   const trustedIdentity = identityModule.deriveCiIdentity({ ...CONTEXT, secret: 'not-persisted' });
   const identity = identityModule.createPreDeploymentIdentity({ identity: trustedIdentity, noCollisionVerifiedAt: '2026-09-30T12:00:00.000Z' });
   const deployment = identityModule.createDeploymentRecord({ identity, endpoint: `https://${identity.workerName}.example.workers.dev`,
-    deploymentManifest: { version: 1, buildId: '1'.repeat(64), workerVersionId: 'worker-v1', verifiedDeployment: { apiVerified: true, versionId: 'worker-v1', wranglerVersion: '4.33.0', temporaryWorkerName: identity.workerName },
+    deploymentManifest: { version: 2, buildId: '1'.repeat(64), workerVersionId: 'worker-v1', verifiedDeployment: { apiVerified: true, versionId: 'worker-v1', wranglerVersion: '4.33.0', temporaryWorkerName: identity.workerName, ownershipTag: identity.ownershipTag },
       assets: { wasm: { path: 'workers/vendor/bridge-dds/dds-worker.wasm', bytes: 4, sha256: '2'.repeat(64) }, harness: {
         'workers/src/index.mjs': { path: 'workers/src/index.mjs', bytes: 8, sha256: '3'.repeat(64) },
         'workers/src/harness-router.mjs': { path: 'workers/src/harness-router.mjs', bytes: 9, sha256: '4'.repeat(64) },
@@ -91,13 +91,13 @@ test('state bindings reject every GitHub or independent deployment drift includi
     (s) => { s.identity.workerName = 'ss-dds-soak-gh-123456789-2-000000000000'; }, (s) => { s.identity.ownershipTag = 'a'.repeat(43); },
     (s) => { s.identity.noCollisionVerifiedAt = '2026-09-30T12:02:00.000Z'; },
     (s) => { s.deployment.endpoint = `https://${s.identity.workerName}.other.workers.dev`; },
-    (s) => { s.deployment.workerVersionId = 'worker-v2'; }, (s) => { s.deployment.deploymentManifestVersion = 2; },
+    (s) => { s.deployment.workerVersionId = 'worker-v2'; }, (s) => { s.deployment.deploymentManifestVersion = 1; },
     (s) => { s.deployment.wranglerVersion = '4.34.0'; }, (s) => { s.deployment.buildId = '7'.repeat(64); },
     (s) => { s.deployment.localConfigurationSha256 = '7'.repeat(64); }, (s) => { s.deployment.scriptETag = 'other-etag'; },
-    (s) => { s.deployment.versionConfigurationSha256 = '7'.repeat(64); }, (s) => { s.deployment.assets.wasmSha256 = '7'.repeat(64); },
-    (s) => { s.deployment.assets.harnessSha256['workers/src/index.mjs'] = '7'.repeat(64); },
-    (s) => { s.deployment.assets.harnessSha256['workers/src/extra.mjs'] = '7'.repeat(64); },
-    (s) => { delete s.deployment.assets.harnessSha256['workers/src/index.mjs']; },
+    (s) => { s.deployment.versionConfigurationSha256 = '7'.repeat(64); }, (s) => { s.deployment.assets.wasm.sha256 = '7'.repeat(64); },
+    (s) => { s.deployment.assets.harness['workers/src/index.mjs'].sha256 = '7'.repeat(64); },
+    (s) => { s.deployment.assets.harness['workers/src/extra.mjs'] = { path: 'workers/src/extra.mjs', bytes: 1, sha256: '7'.repeat(64) }; },
+    (s) => { delete s.deployment.assets.harness['workers/src/index.mjs']; },
   ];
   for (const mutate of changes) {
     const changed = structuredClone(state); mutate(changed); saveState(stateDir, changed);
@@ -184,8 +184,8 @@ test('state assertions reject non-plain roots and recursive files/identity/deplo
   for (const field of ['files', 'identity', 'deployment']) {
     for (const nonPlain of nonPlainObjects(state[field])) assert.throws(() => m.assertStateManifest({ ...state, [field]: nonPlain }), /plain object/i);
   }
-  for (const nonPlain of nonPlainObjects(state.deployment.assets.harnessSha256)) {
-    assert.throws(() => m.assertStateManifest({ ...state, deployment: { ...state.deployment, assets: { ...state.deployment.assets, harnessSha256: nonPlain } } }), /plain object/i);
+  for (const nonPlain of nonPlainObjects(state.deployment.assets.harness)) {
+    assert.throws(() => m.assertStateManifest({ ...state, deployment: { ...state.deployment, assets: { ...state.deployment.assets, harness: nonPlain } } }), /plain object/i);
   }
 });
 

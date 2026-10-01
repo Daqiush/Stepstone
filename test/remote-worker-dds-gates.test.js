@@ -38,10 +38,14 @@ async function validRun() {
   ]);
   const runId = 'soak-00000000-0000-4000-8000-000000000000';
   const manifest = createRunManifest({ root: ROOT, runId });
+  const { deriveCiIdentity, createPreDeploymentIdentity } = await import('../scripts/remote-dds-ci-identity.mjs');
+  const trusted = deriveCiIdentity({ repository: 'bridge/stepstone', workflow: 'Remote DDS Soak', runId: '12345', runAttempt: '2', commitSha: 'a'.repeat(40), secret: 'fake-token' });
+  const identity = createPreDeploymentIdentity({ identity: trusted, noCollisionVerifiedAt: '2026-10-01T00:00:00.000Z' });
   const deployment = createDeploymentManifest({ root: ROOT, verifiedDeployment: {
+    identity, ownershipTag: identity.ownershipTag, localConfigurationSha256: 'a'.repeat(64), scriptETag: 'script-etag', versionConfigurationSha256: 'b'.repeat(64),
     versionId: 'version-verified', apiVerified: true, wranglerVersion: '4.137.0',
-    temporaryWorkerName: 'ss-dds-soak-00000000-0000-4000-8000-000000000001',
-    workersDevUrl: 'https://ss-dds-soak-00000000-0000-4000-8000-000000000001.example.workers.dev',
+    temporaryWorkerName: identity.workerName,
+    workersDevUrl: `https://${identity.workerName}.example.workers.dev`,
   } });
   const fixtures = JSON.parse(readFileSync(fixturePath, 'utf8'));
   const preflightRemote = { ok: true, activationId: activation(0), buildId: deployment.buildId, workerVersionId: deployment.workerVersionId };
@@ -201,6 +205,10 @@ for (const [name, mutate] of [
   ['activation', (r) => { r.evidence.operations[0].activationId = activation(2); }],
   ['activation', (r) => { r.evidence.preflight.activationId = activation(1); }],
   ['deployment', (r) => { r.deployment.verifiedDeployment.apiVerified = false; }],
+  ['deployment', (r) => { delete r.deployment.ownershipTag; }],
+  ['deployment', (r) => { r.deployment.verifiedDeployment.ownershipTag = 'c'.repeat(43); }],
+  ['deployment', (r) => { r.deployment.endpoint = 'https://foreign.example.workers.dev'; }],
+  ['deployment', (r) => { r.deployment.DDS_REMOTE_TEST_KEY = 'secret'; }],
   ['wasm-bundle', (r) => { r.deployment.assets.wasm.bytes = 3 * 1024 * 1024; }],
   ['heap', (r) => { r.evidence.operations[0].heapBytes = 100663296; }],
   ['p99-wasm-elapsed', (r) => { for (let i = 0; i < 221; i++) r.evidence.operations[i].wasmElapsedMs = 1000; }],
