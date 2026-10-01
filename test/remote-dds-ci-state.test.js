@@ -175,3 +175,32 @@ test('all CLI modes bind fresh trusted identity to explicit GitHub context befor
     const result = runCli([...mode, ...args]); assert.notEqual(result.status, 0); assert.match(result.stderr, /context|match/i); assert.equal(existsSync(out), false);
   }
 });
+
+test('state assertions reject non-plain roots and recursive files/identity/deployment maps', async (t) => {
+  const f = await fixture(t); const m = await mod(); const state = m.createReadyState(f.inputs);
+  class Record {}
+  const nonPlainObjects = (value) => [Object.assign(new Date(), value), Object.assign([], value), Object.assign(new Record(), value)];
+  for (const nonPlain of nonPlainObjects(state)) assert.throws(() => m.assertStateManifest(nonPlain), /plain object/i);
+  for (const field of ['files', 'identity', 'deployment']) {
+    for (const nonPlain of nonPlainObjects(state[field])) assert.throws(() => m.assertStateManifest({ ...state, [field]: nonPlain }), /plain object/i);
+  }
+  for (const nonPlain of nonPlainObjects(state.deployment.assets.harnessSha256)) {
+    assert.throws(() => m.assertStateManifest({ ...state, deployment: { ...state.deployment, assets: { ...state.deployment.assets, harnessSha256: nonPlain } } }), /plain object/i);
+  }
+});
+
+test('state assertions accept null-prototype data and normalize every recursive map', async (t) => {
+  const f = await fixture(t); const m = await mod(); const state = m.createReadyState(f.inputs);
+  function nullPrototypeData(value) {
+    if (!value || typeof value !== 'object') return value;
+    return Object.assign(Object.create(null), Object.fromEntries(Object.entries(value).map(([key, item]) => [key, nullPrototypeData(item)])));
+  }
+  function assertPlainData(value) {
+    if (!value || typeof value !== 'object') return;
+    assert.equal(Object.getPrototypeOf(value), Object.prototype);
+    for (const item of Object.values(value)) assertPlainData(item);
+  }
+  const normalized = m.assertStateManifest(nullPrototypeData(state));
+  assertPlainData(normalized);
+  assert.deepEqual(normalized, state);
+});

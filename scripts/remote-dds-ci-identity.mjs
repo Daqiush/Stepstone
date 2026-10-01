@@ -1,6 +1,6 @@
 import { createHmac } from 'node:crypto';
-import { appendFileSync, existsSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { appendFileSync, existsSync, readFileSync, realpathSync } from 'node:fs';
+import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { canonicalJson } from './remote-dds-soak-state.mjs';
 import { writeReportCheckpoint } from './worker-dds-checkpoint.mjs';
@@ -12,7 +12,7 @@ const PRE_FIELDS = [...CORE_FIELDS, 'noCollisionVerifiedAt'];
 const DEPLOYMENT_FIELDS = ['schemaVersion', 'kind', 'identity', 'endpoint', 'deploymentManifestVersion', 'buildId', 'workerVersionId', 'wranglerVersion', 'assets', 'localConfigurationSha256', 'scriptETag', 'versionConfigurationSha256'];
 
 function object(value, label) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} must be an object`);
+  if (!value || typeof value !== 'object' || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw new Error(`${label} must be a plain object`);
   return value;
 }
 function exactFields(value, fields, label) {
@@ -112,8 +112,9 @@ function manifestSnapshot(value, identity) {
   if (value.version !== 1) throw new Error('Unsupported deployment manifest version');
   const verified = object(value.verifiedDeployment, 'Verified deployment');
   if (verified.apiVerified !== true || verified.temporaryWorkerName !== identity.workerName || verified.versionId !== value.workerVersionId) throw new Error('Deployment manifest does not bind the identity and Worker version');
-  const wasmSha256 = asset(value.assets?.wasm, 'workers/vendor/bridge-dds/dds-worker.wasm');
-  const harness = object(value.assets?.harness, 'Deployment manifest harness');
+  const assets = object(value.assets, 'Deployment manifest assets');
+  const wasmSha256 = asset(assets.wasm, 'workers/vendor/bridge-dds/dds-worker.wasm');
+  const harness = object(assets.harness, 'Deployment manifest harness');
   const keys = Object.keys(harness);
   if (!keys.length || keys.some((path) => !/^workers\/src\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_.-]+\.mjs$/.test(path))) throw new Error('Deployment manifest harness paths are invalid');
   return { deploymentManifestVersion: value.version, buildId: hash(value.buildId, 'Deployment manifest build ID'), workerVersionId: nonempty(value.workerVersionId, 'Deployment Worker version'), wranglerVersion: nonempty(verified.wranglerVersion, 'Deployment Wrangler version'),
@@ -168,12 +169,27 @@ function parseCli(args) {
   for (const key of allowed) if (key !== '--identity-out' && !values.has(key)) throw new Error(`Missing required identity CLI argument: ${key}`);
   return values;
 }
+function canonicalOutputTarget(path) {
+  let ancestor = resolve(path); const missing = [];
+  for (;;) {
+    try {
+      // Resolve metadata only, including directory junctions and missing targets.
+      const canonical = resolve(realpathSync.native(ancestor), ...missing);
+      return process.platform === 'win32' ? canonical.toLowerCase() : canonical;
+    } catch (error) {
+      if (!['ENOENT', 'ENOTDIR'].includes(error.code)) throw error;
+      const parent = dirname(ancestor);
+      if (parent === ancestor) throw error;
+      missing.unshift(basename(ancestor)); ancestor = parent;
+    }
+  }
+}
 function runCli() {
   const args = parseCli(process.argv.slice(2));
   const input = { repository: args.get('--repository'), workflow: args.get('--workflow'), runId: args.get('--run-id'), runAttempt: args.get('--run-attempt'), commitSha: args.get('--commit-sha'), secret: process.env.CLOUDFLARE_API_TOKEN };
   const identity = deriveCiIdentity(input); const key = deriveRemoteTestKey(input);
   const envFile = resolve(args.get('--github-env')); const out = args.has('--identity-out') ? resolve(args.get('--identity-out')) : null;
-  if (out === envFile) throw new Error('Identity output and GitHub environment must be separate files');
+  if (out && canonicalOutputTarget(out) === canonicalOutputTarget(envFile)) throw new Error('Identity output and GitHub environment must be separate files');
   const existing = existsSync(envFile) ? readFileSync(envFile) : Buffer.alloc(0);
   const separator = existing.length && existing.at(-1) !== 10 ? '\n' : '';
   process.stdout.write(`::add-mask::${key}\n`);

@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict');
-const { mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync } = require('node:fs');
+const { mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync, mkdirSync, symlinkSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { join, resolve } = require('node:path');
 const { spawnSync } = require('node:child_process');
@@ -158,4 +158,103 @@ test('derive CLI appends a separate GitHub environment assignment when its last 
     assert.equal(result.status, 0, result.stderr);
     assert.equal(readFileSync(githubEnv, 'utf8'), 'EXISTING=value\nDDS_REMOTE_TEST_KEY=EpcIq_vg1echjFz_T43uSTY6xxYXivOmobzaTD8CVVk\n');
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('derive CLI rejects Windows case aliases of one output before any writes', { skip: process.platform !== 'win32' }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dds-ci-output-case-'));
+  try {
+    const githubEnv = join(dir, 'github.env'); const out = join(dir, 'GITHUB.ENV');
+    const original = 'EXISTING=case-sensitive-content\n'; writeFileSync(githubEnv, original);
+    const result = spawnSync(process.execPath, [cli, '--derive', ...contextArgs, '--github-env', githubEnv, '--identity-out', out], { env: { ...process.env, CLOUDFLARE_API_TOKEN: INPUT.secret }, encoding: 'utf8' });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /separate files|same.*target/i);
+    assert.equal(result.stdout, '');
+    assert.equal(readFileSync(githubEnv, 'utf8'), original);
+    assert.equal(readFileSync(out, 'utf8'), original);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('derive CLI rejects parent junction/symlink output aliases before any writes', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dds-ci-output-parent-'));
+  try {
+    const parent = join(dir, 'real-parent'); const alias = join(dir, 'alias-parent'); mkdirSync(parent);
+    symlinkSync(parent, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    const githubEnv = join(parent, 'github.env'); const out = join(alias, 'github.env');
+    const original = 'EXISTING=junction-original-content\n'; writeFileSync(githubEnv, original);
+    const result = spawnSync(process.execPath, [cli, '--derive', ...contextArgs, '--github-env', githubEnv, '--identity-out', out], { env: { ...process.env, CLOUDFLARE_API_TOKEN: INPUT.secret }, encoding: 'utf8' });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /separate files|same.*target/i);
+    assert.equal(result.stdout, '');
+    assert.equal(readFileSync(githubEnv, 'utf8'), original);
+    assert.equal(readFileSync(out, 'utf8'), original);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('derive CLI rejects aliased output paths even before the output file exists', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dds-ci-output-new-'));
+  try {
+    const parent = join(dir, 'real-parent'); const alias = join(dir, 'alias-parent'); mkdirSync(parent);
+    symlinkSync(parent, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    const githubEnv = join(parent, 'github.env'); const out = join(alias, 'github.env');
+    const result = spawnSync(process.execPath, [cli, '--derive', ...contextArgs, '--github-env', githubEnv, '--identity-out', out], { env: { ...process.env, CLOUDFLARE_API_TOKEN: INPUT.secret }, encoding: 'utf8' });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /separate files|same.*target/i);
+    assert.equal(result.stdout, '');
+    assert.equal(existsSync(githubEnv), false);
+    assert.equal(existsSync(out), false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+function nonPlainObjects(value) {
+  class Record {}
+  return [Object.assign(new Date(), value), Object.assign([], value), Object.assign(new Record(), value)];
+}
+function nullPrototypeData(value) {
+  if (!value || typeof value !== 'object') return value;
+  return Object.assign(Object.create(null), Object.fromEntries(Object.entries(value).map(([key, item]) => [key, nullPrototypeData(item)])));
+}
+function assertPlainData(value) {
+  if (!value || typeof value !== 'object') return;
+  assert.equal(Object.getPrototypeOf(value), Object.prototype);
+  for (const item of Object.values(value)) assertPlainData(item);
+}
+
+test('all identity assertions reject non-plain roots and recursive deployment maps', async () => {
+  const m = await mod(); const identity = m.deriveCiIdentity(INPUT);
+  const predeployment = m.createPreDeploymentIdentity({ identity, noCollisionVerifiedAt: '2026-09-30T12:00:00.000Z' });
+  const deploymentManifest = manifest(identity);
+  const record = m.createDeploymentRecord({ identity: predeployment, endpoint: `https://${identity.workerName}.example.workers.dev`, deploymentManifest,
+    localConfigurationSha256: '5'.repeat(64), scriptETag: '"etag-observed"', versionConfigurationSha256: '6'.repeat(64) });
+  const context = Object.fromEntries(['repository', 'workflow', 'runId', 'runAttempt', 'commitSha'].map((field) => [field, INPUT[field]]));
+  for (const [assertion, value] of [[m.assertGithubContext, context], [m.assertCiIdentity, identity], [m.assertPreDeploymentIdentity, predeployment], [m.assertDeploymentRecord, record]]) {
+    for (const nonPlain of nonPlainObjects(value)) assert.throws(() => assertion(nonPlain), /plain object/i);
+  }
+  for (const field of ['identity', 'assets']) {
+    for (const nonPlain of nonPlainObjects(record[field])) assert.throws(() => m.assertDeploymentRecord({ ...record, [field]: nonPlain }), /plain object/i);
+  }
+  for (const nonPlain of nonPlainObjects(record.assets.harnessSha256)) {
+    assert.throws(() => m.assertDeploymentRecord({ ...record, assets: { ...record.assets, harnessSha256: nonPlain } }), /plain object/i);
+  }
+  for (const nonPlain of nonPlainObjects(deploymentManifest)) assert.throws(() => m.assertDeploymentRecord(record, { deploymentManifest: nonPlain }), /plain object/i);
+  for (const field of ['verifiedDeployment', 'assets']) {
+    for (const nonPlain of nonPlainObjects(deploymentManifest[field])) assert.throws(() => m.assertDeploymentRecord(record, { deploymentManifest: { ...deploymentManifest, [field]: nonPlain } }), /plain object/i);
+  }
+  for (const field of ['wasm', 'harness']) {
+    for (const nonPlain of nonPlainObjects(deploymentManifest.assets[field])) assert.throws(() => m.assertDeploymentRecord(record, { deploymentManifest: { ...deploymentManifest, assets: { ...deploymentManifest.assets, [field]: nonPlain } } }), /plain object/i);
+  }
+  for (const nonPlain of nonPlainObjects(deploymentManifest.assets.harness['workers/src/index.mjs'])) {
+    assert.throws(() => m.assertDeploymentRecord(record, { deploymentManifest: { ...deploymentManifest, assets: { ...deploymentManifest.assets, harness: { ...deploymentManifest.assets.harness, 'workers/src/index.mjs': nonPlain } } } }), /plain object/i);
+  }
+});
+
+test('identity assertions accept null-prototype maps and return normalized plain data', async () => {
+  const m = await mod(); const identity = m.deriveCiIdentity(INPUT);
+  const predeployment = m.createPreDeploymentIdentity({ identity, noCollisionVerifiedAt: '2026-09-30T12:00:00.000Z' });
+  const record = m.createDeploymentRecord({ identity: predeployment, endpoint: `https://${identity.workerName}.example.workers.dev`, deploymentManifest: manifest(identity),
+    localConfigurationSha256: '5'.repeat(64), scriptETag: '"etag-observed"', versionConfigurationSha256: '6'.repeat(64) });
+  for (const [assertion, value] of [[m.assertGithubContext, INPUT], [m.assertCiIdentity, identity], [m.assertPreDeploymentIdentity, predeployment], [m.assertDeploymentRecord, record]]) {
+    const normalized = assertion(nullPrototypeData(value));
+    assertPlainData(normalized);
+    assert.deepEqual(normalized, assertion(value));
+  }
 });

@@ -11,7 +11,8 @@ const STATE_FIELDS = ['schemaVersion', 'kind', 'segment', 'disposition', 'identi
 const DISPOSITIONS = ['PAUSED', 'COMPLETE', 'FAILED'];
 const STATE_FILE = 'state-manifest.json';
 function exactFields(value, fields, label) {
-  if (!value || typeof value !== 'object' || Array.isArray(value) || canonicalJson(Object.keys(value).sort()) !== canonicalJson([...fields].sort())) throw new Error(`${label} has missing or unexpected fields`);
+  if (!value || typeof value !== 'object' || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw new Error(`${label} must be a plain object`);
+  if (canonicalJson(Object.keys(value).sort()) !== canonicalJson([...fields].sort())) throw new Error(`${label} has missing or unexpected fields`);
 }
 function equal(actual, expected, label) {
   if (canonicalJson(actual) !== canonicalJson(expected)) throw new Error(`${label} does not match`);
