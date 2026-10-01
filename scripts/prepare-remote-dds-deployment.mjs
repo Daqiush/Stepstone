@@ -83,16 +83,35 @@ export async function verifyWorkersDeployment({ fetchImpl = fetch, accountId, sc
   if (version.ownershipTag !== ownershipTag) throw new Error('Immutable Worker version ownership tag does not match');
   return { versionId: version.id, ownershipTag, scriptETag: version.scriptETag, versionConfigurationSha256: version.versionConfigurationSha256, apiVerified: true, wranglerVersion: String(wranglerVersion).trim() };
 }
+class OwnershipRefusal extends Error {}
+async function readOwnershipSnapshot(options) {
+  try {
+    const worker = await findExactWorker(options);
+    const legacy = await listLegacyExactScript({ ...options, includeExact: true });
+    if (!worker && !legacy) return null;
+    if (!worker) throw new OwnershipRefusal('Refusing mutation: legacy-only Worker identity is inconsistent');
+    if (options.expectedWorkerId !== undefined && worker.id !== options.expectedWorkerId) throw new OwnershipRefusal('Refusing mutation: immutable Worker object changed after deployment');
+    const versionEvidence = await readWorkerVersions(options);
+    if (versionEvidence.status === 'ABSENT_ENDPOINT' && legacy) throw new OwnershipRefusal('Refusing mutation: absent versions endpoint does not prove an undeployed placeholder');
+    if (versionEvidence.versions.some((version) => version.ownershipTag !== options.ownershipTag)) throw new OwnershipRefusal('Refusing mutation: immutable Worker version ownership tag is missing or mismatched');
+    return { worker, legacy, versionEvidence };
+  } catch (error) {
+    if (error instanceof OwnershipRefusal) throw error;
+    throw new OwnershipRefusal('Refusing mutation: complete Worker ownership evidence could not be verified', { cause: error });
+  }
+}
+function sameOwnershipSnapshot(actual, expected) {
+  const normalize = (snapshot) => snapshot === null ? null : { ...snapshot, versionEvidence: { ...snapshot.versionEvidence,
+    versions: [...snapshot.versionEvidence.versions].sort((a, b) => a.id.localeCompare(b.id)) } };
+  if (canonicalJson(normalize(actual)) !== canonicalJson(normalize(expected))) throw new OwnershipRefusal('Refusing mutation: Worker ownership snapshot changed before deployment retry');
+}
+async function assertDeployedOwnership(options) {
+  const snapshot = await readOwnershipSnapshot(options);
+  if (!snapshot || snapshot.versionEvidence.status !== 'PRESENT' || !snapshot.versionEvidence.versions.length) throw new OwnershipRefusal('Refusing mutation: deployed immutable Worker version ownership is absent');
+  return snapshot;
+}
 async function assertPartialOwnership(options) {
-  const worker = await findExactWorker(options);
-  const legacy = await listLegacyExactScript({ ...options, includeExact: true });
-  if (!worker && !legacy) return null;
-  if (!worker) throw new Error('Refusing mutation: legacy-only Worker identity is inconsistent');
-  if (options.expectedWorkerId !== undefined && worker.id !== options.expectedWorkerId) throw new Error('Refusing mutation: immutable Worker object changed after deployment retry');
-  const result = await readWorkerVersions(options);
-  if (result.status === 'ABSENT_ENDPOINT' && legacy) throw new Error('Refusing mutation: absent versions endpoint does not prove an undeployed placeholder');
-  if (result.versions.some((version) => version.ownershipTag !== options.ownershipTag)) throw new Error('Refusing mutation: partial Worker immutable version ownership tag is missing or mismatched');
-  return worker;
+  return (await readOwnershipSnapshot(options))?.worker ?? null;
 }
 async function deleteTemporaryWorkerObject(options) {
   const exact = { ...options, temporaryWorkerName: options.worker?.name };
@@ -126,23 +145,33 @@ export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImp
     try { execFile(wrangler, deployArgs, childOptions); }
     catch (firstError) {
       if (!/\b10007\b/.test(String(firstError.message))) throw firstError;
-      const partial = await assertPartialOwnership(apiOptions);
+      const partial = await readOwnershipSnapshot(apiOptions);
       if (partial === null) throw firstError;
-      apiOptions.expectedWorkerId = partial.id;
+      apiOptions.expectedWorkerId = partial.worker.id;
       await sleepImpl(2000);
+      sameOwnershipSnapshot(await readOwnershipSnapshot(apiOptions), partial);
       execFile(wrangler, deployArgs, childOptions);
     }
+    const beforeSecret = await assertDeployedOwnership(apiOptions);
+    apiOptions.expectedWorkerId = beforeSecret.worker.id;
     execFile(process.execPath, [WRANGLER_CLI_PATH, 'secret', 'put', 'DDS_REMOTE_TEST_KEY', '--config', configPath],
       { encoding: 'utf8', cwd: root, env: childEnvironment, input: remoteTestKey + '\n', stdio: ['pipe', 'pipe', 'pipe'] });
-    const result = await readWorkerVersions(apiOptions);
-    const versions = result.versions;
-    if (result.status !== 'PRESENT' || !versions.length || versions.some((version) => version.ownershipTag !== ownershipTag)) throw new Error('Deployed immutable Worker version ownership tag is missing or mismatched');
+    const afterSecret = await assertDeployedOwnership(apiOptions);
+    const versions = afterSecret.versionEvidence.versions;
     const subdomainResponse = await fetchImpl('https://api.cloudflare.com/client/v4/accounts/' + encodeURIComponent(accountId) + '/workers/subdomain', { headers: { authorization: 'Bearer ' + apiToken } });
     const subdomain = await subdomainResponse.json();
     if (!subdomainResponse.ok || subdomain.success !== true || typeof subdomain.result?.subdomain !== 'string' || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(subdomain.result.subdomain)) throw new Error('Cloudflare did not verify the workers.dev subdomain');
     const workersDevUrl = 'https://' + temporaryWorkerName + '.' + subdomain.result.subdomain + '.workers.dev';
     const wranglerVersion = String(execFile(wrangler, ['--version'], childOptions)).trim();
-    const verified = await verifyWorkersDeployment({ fetchImpl, accountId, scriptName: temporaryWorkerName, apiToken, expectedVersionId: versions[0].id, ownershipTag, wranglerVersion });
+    let verified;
+    try {
+      verified = await verifyWorkersDeployment({ fetchImpl, accountId, scriptName: temporaryWorkerName, apiToken, expectedVersionId: versions[0].id, ownershipTag, wranglerVersion });
+      const currentMetadata = { id: verified.versionId, ownershipTag: verified.ownershipTag, scriptETag: verified.scriptETag, versionConfigurationSha256: verified.versionConfigurationSha256 };
+      if (canonicalJson(currentMetadata) !== canonicalJson(versions[0])) throw new OwnershipRefusal('Refusing mutation: immutable version metadata changed after ownership verification');
+    } catch (error) {
+      if (error instanceof OwnershipRefusal) throw error;
+      throw new OwnershipRefusal('Refusing mutation: final immutable version ownership metadata could not be verified', { cause: error });
+    }
     const route = '/__dds/metrics', body = '{}';
     const remote = await fetchImpl(workersDevUrl + route, { method: 'POST', body, headers: {
       'content-type': 'application/json', 'x-dds-test-key': remoteTestKey, 'x-dds-run-id': systemRandomUUID(),
@@ -152,6 +181,9 @@ export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImp
     if (!remote.ok || evidence?.operationResult?.buildId !== buildId || evidence?.operationResult?.workerVersionId !== verified.versionId) throw new Error('Remote deployment evidence did not verify the build and immutable version');
     return assertVerifiedDeployment({ ...verified, workersDevUrl, temporaryWorkerName, identity, localConfigurationSha256 });
   } catch (error) {
+    // An ownership refusal is final for this attempt, even if a later read would
+    // appear owned again. It never grants authority for rollback mutations.
+    if (error instanceof OwnershipRefusal) throw error;
     const worker = await assertPartialOwnership(apiOptions);
     if (worker) await deleteTemporaryWorkerObject({ ...apiOptions, worker });
     throw error;

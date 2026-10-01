@@ -449,6 +449,169 @@ test('the existing teardown adapter supplies the exact name to shared deletion a
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 
+test('retry refuses Worker replacement during the sleep window with no second deploy, secret, or cleanup', async () => {
+  const f = await deploymentFixture(); let sleepingComplete = false, attempts = 0, secrets = 0, deletes = 0;
+  try {
+    await assert.rejects(() => f.mod.deployAndVerifyWorkers({ ...f.options,
+      sleepImpl: async () => { sleepingComplete = true; },
+      execFile: (command, args) => {
+        if (args[0] === 'deploy') { attempts++; f.setDeployed(true); if (attempts === 1) throw new Error('Worker does not exist [code: 10007]'); return ''; }
+        if (args[1] === 'secret') { secrets++; return ''; }
+        return '4.33.0';
+      },
+      fetchImpl: async (url, options = {}) => {
+        if (options.method === 'DELETE') deletes++;
+        if (sleepingComplete && new URL(url).pathname.endsWith('/workers/workers')) return response(page([{ id: 'c'.repeat(32), name: f.identity.workerName }]));
+        return f.fetchImpl(url, options);
+      },
+    }), /refus|immutable|ownership/i);
+    assert.equal(attempts, 1); assert.equal(secrets, 0); assert.equal(deletes, 0);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('retry refuses ownership-state drift during sleep even if immutable Worker ID and tag remain unchanged', async () => {
+  const f = await deploymentFixture(); let afterSleep = false, attempts = 0, secrets = 0, deletes = 0;
+  try {
+    await assert.rejects(() => f.mod.deployAndVerifyWorkers({ ...f.options,
+      sleepImpl: async () => { afterSleep = true; },
+      execFile: (command, args) => {
+        if (args[0] === 'deploy') { attempts++; f.setDeployed(true); throw new Error('Worker does not exist [code: 10007]'); }
+        if (args[1] === 'secret') secrets++;
+        return '';
+      },
+      fetchImpl: async (url, options = {}) => {
+        if (options.method === 'DELETE') deletes++;
+        if (afterSleep && new URL(url).pathname.endsWith('/versions/deployed-v1')) {
+          const detail = versionDetail(f.identity); detail.result.resources.script.etag = 'replacement-script-etag'; return response(detail);
+        }
+        return f.fetchImpl(url, options);
+      },
+    }), /refus|changed|snapshot|ownership/i);
+    assert.equal(attempts, 1); assert.equal(secrets, 0); assert.equal(deletes, 0);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+for (const tag of [null, 'b'.repeat(43)]) test('successful Wrangler deploy with unowned version refuses secret mutation and cleanup: ' + (tag === null ? 'missing tag' : 'foreign tag'), async () => {
+  const f = await deploymentFixture(); let secrets = 0, deletes = 0;
+  try {
+    await assert.rejects(() => f.mod.deployAndVerifyWorkers({ ...f.options,
+      execFile: (command, args, options) => { if (args[1] === 'secret') secrets++; return f.execFile(command, args, options); },
+      fetchImpl: async (url, options = {}) => {
+        if (options.method === 'DELETE') deletes++;
+        if (new URL(url).pathname.endsWith('/versions/deployed-v1')) return response(versionDetail(f.identity, tag));
+        return f.fetchImpl(url, options);
+      },
+    }), /ownership|tag|refus/i);
+    assert.equal(secrets, 0); assert.equal(deletes, 0);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+for (const target of ['objects', 'legacy', 'versions']) test('official ' + target + ' page reader rejects a cursor-only terminal envelope', async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity();
+  const options = { accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
+    fetchImpl: async () => response({ success: true, result: target === 'versions' ? { items: [] } : [], result_info: { cursor: null } }),
+  };
+  const method = target === 'objects' ? api.findExactWorker : target === 'legacy' ? api.listLegacyExactScript : api.readWorkerVersions;
+  await assert.rejects(() => method(options), /pagination|page/i);
+});
+
+test('secret upload is bracketed by complete exact object, legacy, and immutable version ownership reads', async () => {
+  const f = await deploymentFixture(); let uploaded = false, boundary;
+  try {
+    await f.mod.deployAndVerifyWorkers({ ...f.options, execFile: (command, args, options) => {
+      if (args[1] === 'secret') {
+        const deployedAt = f.events.findLastIndex((e) => e.args?.[0] === 'deploy');
+        const before = f.events.slice(deployedAt + 1);
+        for (const suffix of ['/workers/workers', '/workers/scripts-search', '/workers/scripts/' + f.identity.workerName, '/versions/deployed-v1']) {
+          assert.ok(before.some((e) => e.url && new URL(e.url).pathname.endsWith(suffix)), 'ownership read missing before secret: ' + suffix);
+        }
+        boundary = f.events.length; uploaded = true;
+      }
+      return f.execFile(command, args, options);
+    } });
+    assert.equal(uploaded, true);
+    const after = f.events.slice(boundary);
+    for (const suffix of ['/workers/workers', '/workers/scripts-search', '/workers/scripts/' + f.identity.workerName, '/versions/deployed-v1']) {
+      assert.ok(after.some((e) => e.url && new URL(e.url).pathname.endsWith(suffix)), 'ownership read missing after secret: ' + suffix);
+    }
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('a replaced immutable Worker after secret upload is refused without cleanup', async () => {
+  const f = await deploymentFixture(); let uploaded = false, deletes = 0;
+  try {
+    await assert.rejects(() => f.mod.deployAndVerifyWorkers({ ...f.options,
+      execFile: (command, args, options) => { if (args[1] === 'secret') uploaded = true; return f.execFile(command, args, options); },
+      fetchImpl: async (url, options = {}) => {
+        if (options.method === 'DELETE') deletes++;
+        if (uploaded && new URL(url).pathname.endsWith('/workers/workers')) return response(page([{ id: 'c'.repeat(32), name: f.identity.workerName }]));
+        return f.fetchImpl(url, options);
+      },
+    }), /immutable|refus|ownership/i);
+    assert.equal(uploaded, true); assert.equal(deletes, 0);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+for (const tag of [null, 'b'.repeat(43)]) test('post-secret ownership refusal cannot authorize cleanup through a later owned response: ' + (tag === null ? 'missing tag' : 'foreign tag'), async () => {
+  const f = await deploymentFixture(); let uploaded = false, rejectedOnce = false, deletes = 0;
+  try {
+    await assert.rejects(() => f.mod.deployAndVerifyWorkers({ ...f.options,
+      execFile: (command, args, options) => { if (args[1] === 'secret') uploaded = true; return f.execFile(command, args, options); },
+      fetchImpl: async (url, options = {}) => {
+        if (options.method === 'DELETE') deletes++;
+        if (uploaded && !rejectedOnce && new URL(url).pathname.endsWith('/versions/deployed-v1')) {
+          rejectedOnce = true; return response(versionDetail(f.identity, tag));
+        }
+        return f.fetchImpl(url, options);
+      },
+    }), /ownership|tag|refus/i);
+    assert.equal(uploaded, true); assert.equal(rejectedOnce, true); assert.equal(deletes, 0);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('a secret-created immutable version is reverified and supplies the final id, ETag, and configuration fingerprint', async () => {
+  const f = await deploymentFixture(); let uploaded = false;
+  const finalDetail = versionDetail(f.identity); finalDetail.result.id = 'deployed-v2'; finalDetail.result.resources.script.etag = 'script-etag-2';
+  finalDetail.result.resources.bindings.push({ type: 'secret_text', name: 'DDS_REMOTE_TEST_KEY' });
+  try {
+    const verified = await f.mod.deployAndVerifyWorkers({ ...f.options,
+      execFile: (command, args, options) => { if (args[1] === 'secret') uploaded = true; return f.execFile(command, args, options); },
+      fetchImpl: async (url, options = {}) => {
+        const path = new URL(url).pathname;
+        if (uploaded && path.endsWith('/versions')) return response({ ...page([]), result: { items: [{ id: 'deployed-v2' }, { id: 'deployed-v1' }] } });
+        if (uploaded && path.endsWith('/versions/deployed-v2')) return response(finalDetail);
+        if (new URL(url).hostname.endsWith('.workers.dev')) {
+          const payload = await (await f.fetchImpl(url, options)).json(); payload.operationResult.workerVersionId = 'deployed-v2'; return response(payload);
+        }
+        return f.fetchImpl(url, options);
+      },
+    });
+    assert.equal(verified.versionId, 'deployed-v2'); assert.equal(verified.scriptETag, 'script-etag-2');
+    const { canonicalJson } = await import('../scripts/remote-dds-soak-state.mjs');
+    assert.equal(verified.versionConfigurationSha256, require('node:crypto').createHash('sha256').update(canonicalJson({ bindings: finalDetail.result.resources.bindings, script_runtime: finalDetail.result.resources.script_runtime })).digest('hex'));
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+for (const drift of ['missing tag', 'foreign tag', 'script ETag', 'version config']) test('final exact-version detail refuses ' + drift + ' drift without cleanup', async () => {
+  const f = await deploymentFixture(); let detailReads = 0, deletes = 0;
+  try {
+    await assert.rejects(() => f.mod.deployAndVerifyWorkers({ ...f.options, fetchImpl: async (url, options = {}) => {
+      if (options.method === 'DELETE') deletes++;
+      if (new URL(url).pathname.endsWith('/versions/deployed-v1')) {
+        detailReads++;
+        if (detailReads === 3) {
+          const detail = versionDetail(f.identity, drift === 'missing tag' ? null : drift === 'foreign tag' ? 'b'.repeat(43) : f.identity.ownershipTag);
+          if (drift === 'script ETag') detail.result.resources.script.etag = 'changed-etag';
+          if (drift === 'version config') detail.result.resources.script_runtime.compatibility_date = '2026-09-30';
+          return response(detail);
+        }
+      }
+      return f.fetchImpl(url, options);
+    } }), /ownership|immutable|metadata|refus|changed/i);
+    assert.equal(deletes, 0);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test('remote runner permits only a workers.dev HTTPS endpoint and checks endpoint build ID', async () => {
   const mod = await runner();
   assert.equal(mod.assertRemoteEndpoint('https://bridge-dds.example.workers.dev/'), 'https://bridge-dds.example.workers.dev');

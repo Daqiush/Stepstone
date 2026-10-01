@@ -20,16 +20,15 @@ async function jsonRequest(client, url, options = {}, { allowNotFound = false } 
   if (!response.ok || payload?.success !== true) throw new Error('Cloudflare API request failed');
   return payload;
 }
-// A paginated endpoint must explicitly prove its final page. A missing cursor or
-// page envelope is never interpreted as exhaustion, even for an empty result.
+// These three official endpoints use pages. A cursor from a different API cannot
+// prove exhaustion when the requested page metadata is missing.
 async function listAll(client, path, { query = {}, items = (payload) => payload.result, allowNotFound = false } = {}) {
-  const results = []; const seenCursors = new Set(); let cursor, mode, totalPages, perPage;
+  const results = []; let totalPages, perPage;
   for (let page = 1; page <= 100000; page++) {
     const url = new URL(`${client.base}/${path}`);
     for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value);
     url.searchParams.set('per_page', '100');
-    if (cursor !== undefined) url.searchParams.set('cursor', cursor);
-    else url.searchParams.set('page', String(page));
+    url.searchParams.set('page', String(page));
     const payload = await jsonRequest(client, url.toString(), {}, { allowNotFound });
     if (payload === null) {
       if (page !== 1) throw new Error('Cloudflare pagination endpoint vanished before termination');
@@ -37,26 +36,13 @@ async function listAll(client, path, { query = {}, items = (payload) => payload.
     }
     const values = items(payload); const info = payload.result_info;
     if (!Array.isArray(values) || !info || typeof info !== 'object' || Array.isArray(info)) throw new Error('Cloudflare pagination metadata is missing or malformed');
-    const pageMode = ['page', 'per_page', 'total_pages'].some((key) => Object.hasOwn(info, key));
-    const nextMode = pageMode ? 'page' : 'cursor';
-    if (mode && mode !== nextMode) throw new Error('Cloudflare pagination mode changed');
-    mode = nextMode;
+    if (!Number.isSafeInteger(info.page) || info.page !== page || !Number.isSafeInteger(info.per_page) || info.per_page < 1 || info.per_page > 100
+        || !Number.isSafeInteger(info.total_pages) || info.total_pages < 0 || info.total_pages > 100000 || values.length > info.per_page
+        || (info.total_pages === 0 && (page !== 1 || values.length !== 0)) || (info.total_pages > 0 && page > info.total_pages)) throw new Error('Cloudflare pagination page is missing, malformed, or non-advancing');
+    if (totalPages !== undefined && (totalPages !== info.total_pages || perPage !== info.per_page)) throw new Error('Cloudflare pagination pages are inconsistent');
+    totalPages = info.total_pages; perPage = info.per_page;
     results.push(...values);
-    if (pageMode) {
-      if (!Number.isSafeInteger(info.page) || info.page !== page || !Number.isSafeInteger(info.per_page) || info.per_page < 1 || info.per_page > 100
-          || !Number.isSafeInteger(info.total_pages) || info.total_pages < 0 || info.total_pages > 100000 || values.length > info.per_page
-          || (info.total_pages === 0 && (page !== 1 || values.length !== 0)) || (info.total_pages > 0 && page > info.total_pages)) throw new Error('Cloudflare pagination page is malformed or non-advancing');
-      if (totalPages !== undefined && (totalPages !== info.total_pages || perPage !== info.per_page)) throw new Error('Cloudflare pagination pages are inconsistent');
-      totalPages = info.total_pages; perPage = info.per_page;
-      if (page >= totalPages) return results;
-    } else {
-      if (!Object.hasOwn(info, 'cursor')) throw new Error('Cloudflare pagination cursor is missing');
-      const next = info.cursor;
-      if (next === null || next === '') return results;
-      if (typeof next !== 'string' || next.length > 2048 || /[\s\x00-\x1f\x7f]/.test(next)) throw new Error('Cloudflare pagination cursor is malformed');
-      if (seenCursors.has(next) || next === cursor) throw new Error('Cloudflare pagination cursor is cyclic or non-advancing');
-      seenCursors.add(next); cursor = next;
-    }
+    if (page >= totalPages) return results;
   }
   throw new Error('Cloudflare pagination did not terminate');
 }
