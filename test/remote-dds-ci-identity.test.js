@@ -48,7 +48,7 @@ test('deterministic CI identity contains only non-secret ownership metadata', as
 });
 
 function manifest(identity) {
-  return { version: 2, buildId: '1'.repeat(64), workerId: 'a'.repeat(32), workerVersionId: 'worker-v1',
+  return { version: 2, buildId: '652571ef684a7acc3e4ebab4e58520d49b844f87cb964e71dd955ee68e8ac547', workerId: 'a'.repeat(32), workerVersionId: 'worker-v1',
     verifiedDeployment: { workerId: 'a'.repeat(32), versionId: 'worker-v1', apiVerified: true, wranglerVersion: '4.33.0', temporaryWorkerName: identity.workerName, ownershipTag: identity.ownershipTag },
     assets: { wasm: { path: 'workers/vendor/bridge-dds/dds-worker.wasm', bytes: 4, sha256: '2'.repeat(64) }, harness: {
       'workers/src/index.mjs': { path: 'workers/src/index.mjs', bytes: 8, sha256: '3'.repeat(64) },
@@ -78,7 +78,7 @@ test('deployment record binds the complete deployment manifest and Cloudflare ob
   const record = m.createDeploymentRecord({ identity, endpoint: `https://${identity.workerName}.example.workers.dev`, deploymentManifest,
     localConfigurationSha256: '5'.repeat(64), scriptETag: '"etag-observed"', versionConfigurationSha256: '6'.repeat(64) });
   assert.deepEqual(record, { schemaVersion: 1, kind: 'remote-dds-deployment-record', identity, endpoint: `https://${identity.workerName}.example.workers.dev`,
-    version: 2, deploymentManifestVersion: 2, ownershipTag: identity.ownershipTag, verifiedDeployment: deploymentManifest.verifiedDeployment, buildId: '1'.repeat(64), workerId: 'a'.repeat(32), workerVersionId: 'worker-v1', wranglerVersion: '4.33.0',
+    version: 2, deploymentManifestVersion: 2, ownershipTag: identity.ownershipTag, verifiedDeployment: deploymentManifest.verifiedDeployment, buildId: deploymentManifest.buildId, workerId: 'a'.repeat(32), workerVersionId: 'worker-v1', wranglerVersion: '4.33.0',
     assets: deploymentManifest.assets,
     localConfigurationSha256: '5'.repeat(64), scriptETag: '"etag-observed"', versionConfigurationSha256: '6'.repeat(64) });
   assert.deepEqual(m.assertDeploymentRecord(record, { identity, deploymentManifest }), record);
@@ -110,6 +110,25 @@ test('deployment record binds the complete deployment manifest and Cloudflare ob
   for (const field of ['localConfigurationSha256', 'scriptETag', 'versionConfigurationSha256']) {
     assert.throws(() => m.assertDeploymentRecord({ ...record, [field]: '' }), /hash|ETag|Sha256/i);
   }
+});
+
+test('deployment record rejects independently changed build ID or assets without relying on an external manifest', async () => {
+  const m = await mod(), trustedIdentity = m.deriveCiIdentity(INPUT);
+  const identity = m.createPreDeploymentIdentity({ identity: trustedIdentity, noCollisionVerifiedAt: '2026-09-30T12:00:00.000Z' });
+  const record = m.createDeploymentRecord({ identity, endpoint: `https://${identity.workerName}.example.workers.dev`, deploymentManifest: manifest(identity),
+    localConfigurationSha256: '5'.repeat(64), scriptETag: '"etag-observed"', versionConfigurationSha256: '6'.repeat(64) });
+  for (const mutate of [
+    (r) => { r.buildId = '7'.repeat(64); },
+    (r) => { r.assets.wasm.sha256 = '7'.repeat(64); },
+    (r) => { r.assets.wasm.bytes++; },
+    (r) => { r.assets.harness['workers/src/index.mjs'].sha256 = '7'.repeat(64); },
+    (r) => { delete r.assets.harness['workers/src/index.mjs']; },
+    (r) => { r.assets.harness['workers/src/extra.mjs'] = { path: 'workers/src/extra.mjs', bytes: 1, sha256: '7'.repeat(64) }; },
+  ]) {
+    const changed = structuredClone(record); mutate(changed);
+    assert.throws(() => m.assertDeploymentRecord(changed), /build ID|assets/i);
+  }
+  assert.deepEqual(m.assertDeploymentRecord(record), record);
 });
 
 test('identity derivation strictly rejects invalid context and absent source secret', async () => {

@@ -166,7 +166,7 @@ export async function readOwnershipSnapshot(options) {
     if (options.expectedWorkerId !== undefined && worker.id !== options.expectedWorkerId) throw new OwnershipRefusal('Refusing mutation: immutable Worker object changed after deployment');
     const versionEvidence = await readWorkerVersions(options);
     observeImmutableVersions(versionEvidence.versions, options.observedVersions ?? new Map());
-    if (versionEvidence.status === 'ABSENT_ENDPOINT' && legacy) throw new OwnershipRefusal('Refusing mutation: absent versions endpoint does not prove an undeployed placeholder');
+    if (versionEvidence.versions.length === 0 && legacy) throw new OwnershipRefusal('Refusing mutation: empty version evidence with an existing legacy script does not prove an undeployed placeholder');
     if (versionEvidence.versions.some((version) => version.ownershipTag !== options.ownershipTag)) throw new OwnershipRefusal('Refusing mutation: immutable Worker version ownership tag is missing or mismatched');
     return { worker, legacy, versionEvidence };
   } catch (error) {

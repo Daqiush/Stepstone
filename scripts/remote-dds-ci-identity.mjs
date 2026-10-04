@@ -1,4 +1,4 @@
-import { createHmac } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import { appendFileSync, existsSync, readFileSync, realpathSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -140,6 +140,8 @@ export function assertDeploymentRecord(value, { identity, trustedIdentity, conte
   assertEndpoint(value.endpoint, predeployment.workerName);
   if (value.ownershipTag !== predeployment.ownershipTag) throw new Error('Deployment ownership tag does not match identity');
   const snapshot = manifestSnapshot(value, predeployment);
+  const assetBuildId = createHash('sha256').update(canonicalJson({ version: value.version, assets: value.assets })).digest('hex');
+  if (value.buildId !== assetBuildId) throw new Error('Deployment build ID does not match version and assets');
   equal(value.wranglerVersion, snapshot.wranglerVersion, 'Deployment Wrangler version');
   hash(value.localConfigurationSha256, 'localConfigurationSha256'); nonempty(value.scriptETag, 'scriptETag'); hash(value.versionConfigurationSha256, 'versionConfigurationSha256');
   if (deploymentManifest) {

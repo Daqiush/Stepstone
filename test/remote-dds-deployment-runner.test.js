@@ -521,6 +521,21 @@ test('an absent versions endpoint permits cleanup only for a current exact place
   }
 });
 
+test('PRESENT empty versions with a legacy exact script cannot authorize retry or rollback cleanup', async () => {
+  const f = await deploymentFixture(); let attempts = 0, deletes = 0;
+  try {
+    await assert.rejects(() => f.mod.deployAndVerifyWorkers({ ...f.options,
+      execFile: () => { attempts++; f.setDeployed(true); throw new Error('Worker does not exist [code: 10007]'); },
+      fetchImpl: async (url, options = {}) => {
+        if (options.method === 'DELETE') deletes++;
+        if (new URL(url).pathname.endsWith('/versions')) return response(versionPage([]));
+        return f.fetchImpl(url, options);
+      },
+    }), /ownership|placeholder|refus/i);
+    assert.equal(attempts, 1); assert.equal(deletes, 0);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test('temporary configuration removes production routes and rejects persisted test key material', async () => {
   const mod = await deployment(); const root = repo(); const identity = await ciIdentity();
   try {

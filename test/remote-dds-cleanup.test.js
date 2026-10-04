@@ -29,6 +29,7 @@ async function fixture() {
     verifiedDeployment: { workerId: WORKER_ID, versionId: 'deployed-v1', apiVerified: true, wranglerVersion: '4.33.0', temporaryWorkerName: identity.workerName, ownershipTag: identity.ownershipTag },
     ownershipTag: identity.ownershipTag, localConfigurationSha256: '4'.repeat(64), scriptETag: resources.script.etag,
     versionConfigurationSha256: createHash('sha256').update(canonicalJson({ bindings: resources.bindings, script_runtime: resources.script_runtime })).digest('hex') };
+  record.buildId = createHash('sha256').update(canonicalJson({ version: 2, assets: record.assets })).digest('hex');
   const state = { present: true, mapping: true, legacy: true, versionsAbsent: false, workerId: WORKER_ID, details: [detail], probeStatus: 404, subdomain: 'example' };
   const calls = [];
   let intercept = async () => undefined;
@@ -105,7 +106,7 @@ for (const drift of ['worker ID', 'version', 'tag', 'missing tag', 'ETag', 'conf
   assert.equal(f.mutations().length, 0);
 });
 
-for (const drift of ['name', 'tag', 'timestamp', 'context', 'missing attestation', 'missing object ID', 'nested object ID']) test('invalid trusted input rejects ' + drift + ' before network', async () => {
+for (const drift of ['name', 'tag', 'timestamp', 'context', 'missing attestation', 'missing object ID', 'nested object ID', 'build ID', 'assets']) test('invalid trusted input rejects ' + drift + ' before network', async () => {
   const m = await mod(), f = await fixture(), options = structuredClone({ ...f.options, fetchImpl: undefined }); options.fetchImpl = f.fetchImpl;
   if (drift === 'name') options.preDeploymentIdentity.workerName = 'ss-dds-soak-gh-1-1-aaaaaaaaaaaa';
   if (drift === 'tag') options.preDeploymentIdentity.ownershipTag = 'b'.repeat(43);
@@ -114,6 +115,8 @@ for (const drift of ['name', 'tag', 'timestamp', 'context', 'missing attestation
   if (drift === 'missing attestation') delete options.preDeploymentIdentity;
   if (drift === 'missing object ID') delete options.deploymentRecord.workerId;
   if (drift === 'nested object ID') options.deploymentRecord.verifiedDeployment.workerId = 'b'.repeat(32);
+  if (drift === 'build ID') options.deploymentRecord.buildId = 'b'.repeat(64);
+  if (drift === 'assets') options.deploymentRecord.assets.wasm.sha256 = 'b'.repeat(64);
   await assert.rejects(() => m.cleanupRemoteDdsDeployment(options)); assert.equal(f.calls.length, 0);
 });
 
@@ -246,6 +249,18 @@ test('supplemental endpoint mismatch is refused even when the exact object is al
 test('versions endpoint absence with a legacy representation refuses placeholder recovery', async () => {
   const m = await mod(), f = await fixture(); f.state.details = []; f.state.versionsAbsent = true;
   await assert.rejects(() => m.cleanupRemoteDdsDeployment({ ...f.options, deploymentRecord: undefined })); assert.equal(f.mutations().length, 0);
+});
+
+for (const legacy of ['both readers', 'exact endpoint only', 'search only']) test('PRESENT empty versions with ' + legacy + ' legacy presence refuses all cleanup mutations', async () => {
+  const m = await mod(), f = await fixture(); f.state.details = [];
+  f.intercept(async ({ parsed, method }) => {
+    if (method !== 'GET') return;
+    if (legacy === 'search only' && parsed.pathname.endsWith(`/scripts/${f.identity.workerName}`)) return notFound();
+    if (legacy === 'exact endpoint only' && parsed.pathname.endsWith('/scripts-search')) return response(page([]));
+  });
+  await assert.rejects(() => m.cleanupRemoteDdsDeployment({ ...f.options, deploymentRecord: undefined }));
+  assert.equal(f.mutations().filter(({ url }) => url.endsWith('/subdomain')).length, 0);
+  assert.equal(f.mutations().filter(({ url }) => !url.endsWith('/subdomain')).length, 0);
 });
 
 test('legacy-only ownership cannot authorize deletion', async () => {
