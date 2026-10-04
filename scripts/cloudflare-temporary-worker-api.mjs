@@ -125,8 +125,17 @@ export async function readWorkerVersions(options) {
 export async function disableWorkersDevSubdomain(options) {
   const client = inputs(options);
   verifiedExactWorker(options.worker, client);
-  const payload = await jsonRequest(client, `${client.base}/scripts/${encodeURIComponent(client.name)}/subdomain`, { method: 'DELETE' }, { allowNotFound: true });
-  return { disabled: true, alreadyAbsent: payload === null };
+  let payload;
+  try {
+    payload = await jsonRequest(client, `${client.base}/scripts/${encodeURIComponent(client.name)}/subdomain`, { method: 'DELETE' }, { allowNotFound: true });
+  } catch {
+    throw new OwnershipRefusal('Refusing object deletion: workers.dev mapping disable response could not be verified');
+  }
+  if (payload === null) return { disabled: false, absent: true };
+  const result = payload.result;
+  if (payload.success !== true || !result || typeof result !== 'object' || ![Object.prototype, null].includes(Object.getPrototypeOf(result))
+      || result.enabled !== false || result.previews_enabled !== false) throw new OwnershipRefusal('Refusing object deletion: workers.dev mapping disable response did not confirm disabled settings');
+  return { disabled: true, absent: false };
 }
 function verifiedExactWorker(worker, client) {
   if (!worker || normalizedWorkers.get(worker) !== client.base || worker.name !== client.name) throw new Error('A normalized verified exact temporary Worker object is required');

@@ -37,7 +37,7 @@ async function deploymentFixture(overrides = {}) {
   const fetchImpl = async (url, options = {}) => {
     const parsed = new URL(url); events.push({ url, method: options.method ?? 'GET' });
     if (parsed.hostname.endsWith('.workers.dev')) return parsed.pathname === '/' ? response({}, 404) : response({ operationResult: { buildId, workerVersionId: 'deployed-v1' } });
-    if (options.method === 'DELETE' && parsed.pathname.endsWith('/subdomain')) return response({ success: true });
+    if (options.method === 'DELETE' && parsed.pathname.endsWith('/subdomain')) return response({ success: true, result: { enabled: false, previews_enabled: false }, errors: [], messages: [] });
     if (options.method === 'DELETE') { deleted = true; return response({ success: true }); }
     if (parsed.pathname.endsWith(`/workers/scripts/${identity.workerName}`)) return deployed && !deleted ? response({}) : notFound();
     if (parsed.pathname.endsWith('/workers/workers')) return response(page(deployed && !deleted ? [{ id: WORKER_ID, name: identity.workerName }] : []));
@@ -551,7 +551,8 @@ test('shared mutation API disables only the exact workers.dev subdomain and dele
   const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity(); const calls = [];
   const options = { accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName, fetchImpl: async (url, init = {}) => {
     if ((init.method ?? 'GET') === 'GET') return response(page([{ id: WORKER_ID, name: identity.workerName }]));
-    calls.push({ url, init }); return response({ success: true });
+    calls.push({ url, init }); return response(url.endsWith('/subdomain')
+      ? { success: true, result: { enabled: false, previews_enabled: false }, errors: [], messages: [] } : { success: true });
   } };
   options.worker = await api.findExactWorker(options);
   await api.disableWorkersDevSubdomain(options);

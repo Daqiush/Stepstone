@@ -42,7 +42,7 @@ async function fixture() {
     if (method === 'DELETE' && path.endsWith('/subdomain')) {
       assert.ok(path.endsWith(`/scripts/${identity.workerName}/subdomain`));
       if (!state.mapping) return notFound();
-      state.mapping = false; return response({ success: true });
+      state.mapping = false; return response({ success: true, result: { enabled: false, previews_enabled: false }, errors: [], messages: [] });
     }
     if (method === 'DELETE') { assert.ok(path.endsWith('/workers/' + state.workerId)); state.present = false; state.legacy = false; return response({ success: true }); }
     assert.equal(method, 'GET', 'cleanup must not create any Worker version');
@@ -227,6 +227,65 @@ for (const status of [401, 403, 500]) test('subdomain HTTP ' + status + ' with a
   const m = await mod(), f = await fixture();
   f.intercept(async ({ parsed, method }) => method === 'DELETE' && parsed.pathname.endsWith('/subdomain') ? response({ success: false, errors: [{ code: 10007 }] }, status) : undefined);
   await assert.rejects(() => m.cleanupRemoteDdsDeployment(f.options)); assert.equal(f.mutations().length, 1); assert.equal(f.state.present, true);
+});
+
+const disabledPayload = () => ({ success: true, result: { enabled: false, previews_enabled: false }, errors: [], messages: [] });
+const invalidDisableReplies = [
+  ['missing result', () => response({ success: true })],
+  ['null result', () => response({ success: true, result: null })],
+  ['string result', () => response({ success: true, result: 'false' })],
+  ['array result', () => response({ success: true, result: [] })],
+  ['non-plain result', () => { const result = Object.assign(new Date(), { enabled: false, previews_enabled: false }); return { ok: true, status: 200, json: async () => ({ success: true, result }) }; }],
+  ['inherited result prototype', () => { const result = Object.assign(Object.create({ foreign: true }), { enabled: false, previews_enabled: false }); return { ok: true, status: 200, json: async () => ({ success: true, result }) }; }],
+  ['missing success', () => response({ result: { enabled: false, previews_enabled: false } })],
+  ['false success', () => response({ ...disabledPayload(), success: false })],
+  ['string success', () => response({ ...disabledPayload(), success: 'true' })],
+  ['malformed JSON', () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError('fake malformed response'); } })],
+  ['empty HTTP 204', () => ({ ok: true, status: 204, json: async () => { throw new SyntaxError('empty response'); } })],
+  ['HTTP 404 without typed errors', () => response({ success: false }, 404)],
+  ['HTTP 404 mixed errors', () => response({ success: false, errors: [{ code: 10007 }, { code: 10000 }] }, 404)],
+  ['HTTP 400 mixed errors', () => response({ success: false, errors: [{ code: 10007 }, { code: 10000 }] }, 400)],
+  ['HTTP 404 permission message', () => response({ success: false, errors: [{ code: 10007, message: 'Permission denied' }] }, 404)],
+  ...[401, 403, 429, 500, 503].map((status) => [`HTTP ${status} not-found code`, () => response({ success: false, errors: [{ code: 10007 }] }, status)]),
+  ...['enabled', 'previews_enabled'].flatMap((field) => [
+    [`missing ${field}`, () => { const payload = disabledPayload(); delete payload.result[field]; return response(payload); }],
+    ...[true, null, 'false', 0].map((value) => [`${field}=${JSON.stringify(value)}`, () => response({ ...disabledPayload(), result: { ...disabledPayload().result, [field]: value } })]),
+  ]),
+];
+for (const [label, makeReply] of invalidDisableReplies) {
+  for (const flow of ['shared helper', 'cleanup']) test(flow + ' refuses unconfirmed subdomain disable: ' + label, async () => {
+    const m = await mod(), api = await import('../scripts/cloudflare-temporary-worker-api.mjs'), f = await fixture();
+    const options = { ...f.options, temporaryWorkerName: f.identity.workerName };
+    const worker = flow === 'shared helper' ? await api.findExactWorker(options) : undefined;
+    f.intercept(async ({ parsed, method }) => method === 'DELETE' && parsed.pathname.endsWith('/subdomain') ? makeReply() : undefined);
+    const action = flow === 'shared helper' ? () => api.disableWorkersDevSubdomain({ ...options, worker }) : () => m.cleanupRemoteDdsDeployment(f.options);
+    await assert.rejects(action, (error) => error instanceof api.OwnershipRefusal
+      && (flow === 'shared helper' || (error.cleanupResult?.subdomainDisabled === false && error.cleanupResult.objectDeleted === false)));
+    assert.equal(f.mutations().filter(({ url }) => !url.endsWith('/subdomain')).length, 0);
+    assert.equal(f.calls.filter(({ url }) => url === f.endpoint).length, 0);
+  });
+}
+
+test('shared helper accepts only an explicit disabled plain-object response as a successful disable', async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'), f = await fixture();
+  const options = { ...f.options, temporaryWorkerName: f.identity.workerName };
+  const worker = await api.findExactWorker(options);
+  assert.deepEqual(await api.disableWorkersDevSubdomain({ ...options, worker }), { disabled: true, absent: false });
+});
+
+for (const status of [400, 404]) test('typed HTTP ' + status + ' mapping absence remains idempotent and revalidates before object deletion', async () => {
+  const m = await mod(), api = await import('../scripts/cloudflare-temporary-worker-api.mjs'), f = await fixture();
+  const options = { ...f.options, temporaryWorkerName: f.identity.workerName };
+  const worker = await api.findExactWorker(options);
+  f.intercept(async ({ parsed, method }) => method === 'DELETE' && parsed.pathname.endsWith('/subdomain')
+    ? response({ success: false, errors: [{ code: 10007, message: 'Worker not found' }] }, status) : undefined);
+  assert.deepEqual(await api.disableWorkersDevSubdomain({ ...options, worker }), { disabled: false, absent: true });
+  const start = f.calls.length;
+  assert.equal((await m.cleanupRemoteDdsDeployment(f.options)).status, 'deleted');
+  const calls = f.calls.slice(start), probe = calls.findIndex(({ url }) => url === f.endpoint);
+  const deletion = calls.findIndex(({ method, url }) => method === 'DELETE' && !url.endsWith('/subdomain'));
+  assert.ok(probe > 0 && probe < deletion);
+  assert.ok(calls.slice(probe + 1, deletion).some(({ url }) => url.endsWith('/versions/deployed-v1')));
 });
 
 for (const representation of ['current', 'legacy']) test('final ' + representation + ' absence must be confirmed after object deletion', async () => {
