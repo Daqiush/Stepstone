@@ -7,7 +7,8 @@ import { execFileSync } from 'node:child_process';
 import { canonicalJson, requestHash } from './remote-dds-soak-state.mjs';
 import { writeReportCheckpoint } from './worker-dds-checkpoint.mjs';
 import { deriveCiIdentity, assertGithubContext, assertCiIdentity, createPreDeploymentIdentity, assertPreDeploymentIdentity, createDeploymentRecord, assertDeploymentRecord } from './remote-dds-ci-identity.mjs';
-import { findExactWorker, listLegacyExactScript, readWorkerVersions, deleteExactWorker, confirmExactAbsence } from './cloudflare-temporary-worker-api.mjs';
+import { readWorkerVersions, confirmExactAbsence, OwnershipRefusal, observeImmutableVersions, readOwnershipSnapshot, sameOwnershipSnapshot } from './cloudflare-temporary-worker-api.mjs';
+import { cleanupRemoteDdsDeployment } from './cleanup-remote-dds-deployment.mjs';
 
 export const DEPLOYMENT_MANIFEST_VERSION = 2;
 export const WASM_PATH = 'workers/vendor/bridge-dds/dds-worker.wasm';
@@ -34,12 +35,13 @@ function asset(root, path, label) {
 export function assertVerifiedDeployment(record) {
   if (!record || record.apiVerified !== true || typeof record.versionId !== 'string' || !record.versionId.trim()
       || typeof record.wranglerVersion !== 'string' || !record.wranglerVersion.trim()) throw new Error('A verified deployment record is required');
+  if (typeof record.workerId !== 'string' || !/^[a-f0-9]{32}$/.test(record.workerId)) throw new Error('A verified immutable Worker ID is required');
   const identity = assertPreDeploymentIdentity(record.identity);
   const temporaryWorkerName = assertTemporaryWorkerName(record.temporaryWorkerName);
   if (temporaryWorkerName !== identity.workerName || record.ownershipTag !== identity.ownershipTag) throw new Error('Verified deployment ownership identity does not match');
   for (const field of ['localConfigurationSha256', 'versionConfigurationSha256']) if (!/^[a-f0-9]{64}$/.test(record[field] ?? '')) throw new Error('Verified deployment configuration hash is invalid');
   if (typeof record.scriptETag !== 'string' || !record.scriptETag.trim()) throw new Error('Verified deployment script ETag is required');
-  return { versionId: record.versionId, apiVerified: true, wranglerVersion: record.wranglerVersion, temporaryWorkerName,
+  return { workerId: record.workerId, versionId: record.versionId, apiVerified: true, wranglerVersion: record.wranglerVersion, temporaryWorkerName,
     workersDevUrl: assertWorkersDevUrl(record.workersDevUrl), identity, ownershipTag: identity.ownershipTag,
     localConfigurationSha256: record.localConfigurationSha256, scriptETag: record.scriptETag, versionConfigurationSha256: record.versionConfigurationSha256 };
 }
@@ -83,49 +85,10 @@ export async function verifyWorkersDeployment({ fetchImpl = fetch, accountId, sc
   if (version.ownershipTag !== ownershipTag) throw new Error('Immutable Worker version ownership tag does not match');
   return { versionId: version.id, ownershipTag, scriptETag: version.scriptETag, versionConfigurationSha256: version.versionConfigurationSha256, apiVerified: true, wranglerVersion: String(wranglerVersion).trim() };
 }
-class OwnershipRefusal extends Error {}
-function observeImmutableVersions(versions, observedVersions) {
-  for (const version of versions) {
-    const metadata = canonicalJson(version);
-    if (observedVersions.has(version.id) && observedVersions.get(version.id) !== metadata) throw new OwnershipRefusal('Refusing mutation: previously observed immutable version metadata changed');
-    observedVersions.set(version.id, metadata);
-  }
-}
-async function readOwnershipSnapshot(options) {
-  try {
-    const worker = await findExactWorker(options);
-    const legacy = await listLegacyExactScript({ ...options, includeExact: true });
-    if (!worker && !legacy) return null;
-    if (!worker) throw new OwnershipRefusal('Refusing mutation: legacy-only Worker identity is inconsistent');
-    if (options.expectedWorkerId !== undefined && worker.id !== options.expectedWorkerId) throw new OwnershipRefusal('Refusing mutation: immutable Worker object changed after deployment');
-    const versionEvidence = await readWorkerVersions(options);
-    observeImmutableVersions(versionEvidence.versions, options.observedVersions);
-    if (versionEvidence.status === 'ABSENT_ENDPOINT' && legacy) throw new OwnershipRefusal('Refusing mutation: absent versions endpoint does not prove an undeployed placeholder');
-    if (versionEvidence.versions.some((version) => version.ownershipTag !== options.ownershipTag)) throw new OwnershipRefusal('Refusing mutation: immutable Worker version ownership tag is missing or mismatched');
-    return { worker, legacy, versionEvidence };
-  } catch (error) {
-    if (error instanceof OwnershipRefusal) throw error;
-    throw new OwnershipRefusal('Refusing mutation: complete Worker ownership evidence could not be verified', { cause: error });
-  }
-}
-function sameOwnershipSnapshot(actual, expected) {
-  const normalize = (snapshot) => snapshot === null ? null : { ...snapshot, versionEvidence: { ...snapshot.versionEvidence,
-    versions: [...snapshot.versionEvidence.versions].sort((a, b) => a.id.localeCompare(b.id)) } };
-  if (canonicalJson(normalize(actual)) !== canonicalJson(normalize(expected))) throw new OwnershipRefusal('Refusing mutation: Worker ownership snapshot changed before deployment retry');
-}
 async function assertDeployedOwnership(options) {
   const snapshot = await readOwnershipSnapshot(options);
   if (!snapshot || snapshot.versionEvidence.status !== 'PRESENT' || !snapshot.versionEvidence.versions.length) throw new OwnershipRefusal('Refusing mutation: deployed immutable Worker version ownership is absent');
   return snapshot;
-}
-async function assertPartialOwnership(options) {
-  return (await readOwnershipSnapshot(options))?.worker ?? null;
-}
-async function deleteTemporaryWorkerObject(options) {
-  const exact = { ...options, temporaryWorkerName: options.worker?.name };
-  await deleteExactWorker(exact);
-  await confirmExactAbsence(exact);
-  return { deleted: true };
 }
 export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImpl = fetch, wrangler = process.platform === 'win32' ? 'wrangler.cmd' : 'wrangler',
   root = resolve(import.meta.dirname, '..'), accountId, apiToken, remoteTestKey, context, preDeploymentIdentity,
@@ -187,51 +150,29 @@ export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImp
     } });
     const evidence = await remote.json();
     if (!remote.ok || evidence?.operationResult?.buildId !== buildId || evidence?.operationResult?.workerVersionId !== verified.versionId) throw new Error('Remote deployment evidence did not verify the build and immutable version');
-    return assertVerifiedDeployment({ ...verified, workersDevUrl, temporaryWorkerName, identity, localConfigurationSha256 });
+    return assertVerifiedDeployment({ ...verified, workerId: afterSecret.worker.id, workersDevUrl, temporaryWorkerName, identity, localConfigurationSha256 });
   } catch (error) {
     // An ownership refusal is final for this attempt, even if a later read would
     // appear owned again. It never grants authority for rollback mutations.
     if (error instanceof OwnershipRefusal) throw error;
-    const worker = await assertPartialOwnership(apiOptions);
-    if (worker) await deleteTemporaryWorkerObject({ ...apiOptions, worker });
+    const partial = await readOwnershipSnapshot(apiOptions);
+    if (partial) await cleanupRemoteDdsDeployment({ ...apiOptions, context, preDeploymentIdentity: identity, initialOwnershipSnapshot: partial });
     throw error;
   } finally { rmSync(configDir, { recursive: true, force: true }); }
 }
 function deploymentAssets(root) {
   return { wasm: asset(root, WASM_PATH, 'Wasm'), harness: Object.fromEntries(harnessPaths(root).map((path) => [path, asset(root, path, 'harness')])) };
 }
-export async function teardownTemporaryWorkers({ execFile = execFileSync, fetchImpl = fetch, wrangler = process.platform === 'win32' ? 'wrangler.cmd' : 'wrangler', root = resolve(import.meta.dirname, '..'), accountId, temporaryWorkerName, workersDevUrl, remoteTestKey, apiToken, randomUUID = systemRandomUUID }) {
-  if (!accountId || !temporaryWorkerName || !workersDevUrl || !apiToken || !remoteTestKey) throw new Error('Temporary Worker teardown requires account, generated identity, workers.dev URL, token, and remote test key');
-  const scriptName = assertTemporaryWorkerName(temporaryWorkerName);
-  const endpoint = assertWorkersDevUrl(workersDevUrl);
-  if (!/^[A-Za-z0-9_-]{43}$/.test(remoteTestKey)) throw new Error('Remote test key must be a 32-byte base64url value');
-  const configDir = mkdtempSync(join(tmpdir(), 'stepstone-dds-soak-close-'));
-  const configPath = join(configDir, 'wrangler.json');
-  try {
-    writeFileSync(configPath, `${JSON.stringify(createTemporaryWorkersConfig({ root, temporaryWorkerName: scriptName }))}\n`, 'utf8');
-    // Close the authenticated harness before deleting the temporary endpoint.
-    const childOptions = { encoding: 'utf8', cwd: root, ...(process.platform === 'win32' ? { shell: true } : {}) };
-    execFile(wrangler, ['deploy', '--config', configPath, '--var', 'DDS_REMOTE_TEST:false'], childOptions);
-    const closeRoute = '/__dds/metrics';
-    const closeBody = '{}';
-    const closeProbe = await fetchImpl(`${endpoint}${closeRoute}`, { method: 'POST', body: closeBody, headers: {
-      'content-type': 'application/json', 'x-dds-test-key': remoteTestKey,
-      'x-dds-run-id': randomUUID(), 'x-dds-operation-id': 'teardown.close.000001',
-      'x-dds-request-hash': requestHash(closeRoute, closeBody), 'x-dds-shard': '0',
-    } });
-    if (closeProbe.status !== 404) throw new Error('Temporary Worker closure probe did not receive opaque 404');
-    const worker = await findExactWorker({ fetchImpl, accountId, apiToken, temporaryWorkerName: scriptName });
-    if (worker === null) throw new Error('Temporary Worker object is missing before deletion');
-    return await deleteTemporaryWorkerObject({ fetchImpl, accountId, apiToken, worker });
-  } finally { rmSync(configDir, { recursive: true, force: true }); }
+export async function teardownTemporaryWorkers(options) {
+  return cleanupRemoteDdsDeployment(options);
 }
 export function createDeploymentManifest({ root = resolve(import.meta.dirname, '..'), verifiedDeployment } = {}) {
   const deployment = assertVerifiedDeployment(verifiedDeployment);
   const assets = deploymentAssets(root);
   const fingerprint = { version: DEPLOYMENT_MANIFEST_VERSION, assets };
-  const { versionId, apiVerified, wranglerVersion, temporaryWorkerName, ownershipTag } = deployment;
+  const { workerId, versionId, apiVerified, wranglerVersion, temporaryWorkerName, ownershipTag } = deployment;
   return createDeploymentRecord({ identity: deployment.identity, endpoint: deployment.workersDevUrl,
-    deploymentManifest: { ...fingerprint, workerVersionId: versionId, verifiedDeployment: { versionId, apiVerified, wranglerVersion, temporaryWorkerName, ownershipTag }, buildId: sha256(canonicalJson(fingerprint)) },
+    deploymentManifest: { ...fingerprint, workerId, workerVersionId: versionId, verifiedDeployment: { workerId, versionId, apiVerified, wranglerVersion, temporaryWorkerName, ownershipTag }, buildId: sha256(canonicalJson(fingerprint)) },
     localConfigurationSha256: deployment.localConfigurationSha256, scriptETag: deployment.scriptETag, versionConfigurationSha256: deployment.versionConfigurationSha256 });
 }
 export function assertDeploymentManifest(manifest, { root = resolve(import.meta.dirname, '..') } = {}) {

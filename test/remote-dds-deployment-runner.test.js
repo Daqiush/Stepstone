@@ -36,7 +36,8 @@ async function deploymentFixture(overrides = {}) {
   const events = []; let deployed = false, deleted = false, buildId;
   const fetchImpl = async (url, options = {}) => {
     const parsed = new URL(url); events.push({ url, method: options.method ?? 'GET' });
-    if (parsed.hostname.endsWith('.workers.dev')) return response({ operationResult: { buildId, workerVersionId: 'deployed-v1' } });
+    if (parsed.hostname.endsWith('.workers.dev')) return parsed.pathname === '/' ? response({}, 404) : response({ operationResult: { buildId, workerVersionId: 'deployed-v1' } });
+    if (options.method === 'DELETE' && parsed.pathname.endsWith('/subdomain')) return response({ success: true });
     if (options.method === 'DELETE') { deleted = true; return response({ success: true }); }
     if (parsed.pathname.endsWith(`/workers/scripts/${identity.workerName}`)) return deployed && !deleted ? response({}) : notFound();
     if (parsed.pathname.endsWith('/workers/workers')) return response(page(deployed && !deleted ? [{ id: WORKER_ID, name: identity.workerName }] : []));
@@ -76,6 +77,9 @@ test('deployment manifest binds ownership, configuration, exact endpoint, immuta
     assert.equal(manifest.scriptETag, 'script-etag-1');
     assert.match(manifest.versionConfigurationSha256, /^[a-f0-9]{64}$/);
     assert.equal(manifest.workerVersionId, 'deployed-v1');
+    assert.equal(manifest.workerId, WORKER_ID);
+    assert.equal(manifest.verifiedDeployment.workerId, WORKER_ID);
+    assert.throws(() => mod.assertVerifiedDeployment({ ...verified, workerId: new String(WORKER_ID) }), /immutable Worker ID/i);
     assert.equal(manifest.assets.wasm.bytes, 7);
     assert.equal(Object.keys(manifest.assets.harness).length, 2);
     assert.equal(JSON.stringify(manifest).includes(KEY), false);
@@ -263,7 +267,7 @@ for (const [label, tag, versions, deletes] of [
         throw new Error('Worker does not exist [code: 10007]');
       },
       fetchImpl: async (url, options = {}) => {
-        if (options.method === 'DELETE') { deleted = true; assert.ok(url.endsWith('/workers/workers/' + WORKER_ID)); return f.fetchImpl(url, options); }
+        if (options.method === 'DELETE' && !url.endsWith('/subdomain')) { deleted = true; assert.ok(url.endsWith('/workers/workers/' + WORKER_ID)); return f.fetchImpl(url, options); }
         if (!versions && new URL(url).pathname.endsWith('/workers/scripts/' + f.identity.workerName)) return notFound();
         if (!versions && new URL(url).pathname.endsWith('/workers/scripts-search')) return response(page([]));
         if (new URL(url).pathname.endsWith('/versions')) return response(versionPage(versions ? [{ id: 'deployed-v1' }] : []));
@@ -504,7 +508,7 @@ test('an absent versions endpoint permits cleanup only for a current exact place
       await assert.rejects(() => f.mod.deployAndVerifyWorkers({ ...f.options,
         execFile: () => { f.setDeployed(true); throw new Error('Worker does not exist [code: 10007]'); },
         fetchImpl: async (url, options = {}) => {
-          if (options.method === 'DELETE') deletes++;
+          if (options.method === 'DELETE' && !url.endsWith('/subdomain')) deletes++;
           const path = new URL(url).pathname;
           if (path.endsWith('/versions')) return notFound();
           if (!legacyExists && path.endsWith('/workers/scripts/' + f.identity.workerName)) return notFound();
@@ -530,13 +534,21 @@ test('temporary configuration removes production routes and rejects persisted te
 
 test('shared mutation API disables only the exact workers.dev subdomain and deletes only the verified immutable object', async () => {
   const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity(); const calls = [];
-  const options = { accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName, worker: { id: WORKER_ID, name: identity.workerName }, fetchImpl: async (url, init) => { calls.push({ url, init }); return response({ success: true }); } };
+  const options = { accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName, fetchImpl: async (url, init = {}) => {
+    if ((init.method ?? 'GET') === 'GET') return response(page([{ id: WORKER_ID, name: identity.workerName }]));
+    calls.push({ url, init }); return response({ success: true });
+  } };
+  options.worker = await api.findExactWorker(options);
   await api.disableWorkersDevSubdomain(options);
   await api.deleteExactWorker(options);
   assert.ok(calls[0].url.endsWith('/workers/scripts/' + identity.workerName + '/subdomain'));
-  assert.equal(calls[0].init.method, 'POST'); assert.deepEqual(JSON.parse(calls[0].init.body), { enabled: false, previews_enabled: false });
+  assert.equal(calls[0].init.method, 'DELETE'); assert.equal(calls[0].init.body, undefined);
   assert.ok(calls[1].url.endsWith('/workers/workers/' + WORKER_ID)); assert.equal(calls[1].init.method, 'DELETE');
   await assert.rejects(() => api.deleteExactWorker({ ...options, worker: { id: WORKER_ID, name: 'production-worker' } }), /exact|temporary Worker/i);
+  await assert.rejects(() => api.deleteExactWorker({ ...options, worker: { id: WORKER_ID, name: identity.workerName } }), /verified|normalized|exact/i);
+  await assert.rejects(() => api.disableWorkersDevSubdomain({ ...options, worker: undefined }), /verified|normalized|exact/i);
+  await assert.rejects(() => api.deleteExactWorker({ ...options, accountId: 'other-account' }), /verified|normalized|exact/i);
+  await assert.rejects(() => api.disableWorkersDevSubdomain({ ...options, accountId: 'other-account' }), /verified|normalized|exact/i);
   assert.equal(calls.length, 2);
 });
 
@@ -597,7 +609,7 @@ test('partial cleanup refuses a replacement immutable object after a code-10007 
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 
-test('the existing teardown adapter supplies the exact name to shared deletion and confirms both API representations absent', async () => {
+test('the existing teardown adapter requires attestation and delegates to exact disable-probe-revalidate cleanup', async () => {
   const f = await deploymentFixture(); f.setDeployed(true);
   try {
     const result = await f.mod.teardownTemporaryWorkers({ ...f.options, temporaryWorkerName: f.identity.workerName,
@@ -606,7 +618,31 @@ test('the existing teardown adapter supplies the exact name to shared deletion a
         return f.fetchImpl(url, options);
       },
     });
-    assert.deepEqual(result, { deleted: true }); assert.equal(f.isDeleted(), true);
+    assert.equal(result.status, 'deleted'); assert.equal(result.currentAbsent, true); assert.equal(result.legacyAbsent, true); assert.equal(f.isDeleted(), true);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('legacy name-only teardown input fails before any external request', async () => {
+  const m = await deployment(); let calls = 0;
+  await assert.rejects(() => m.teardownTemporaryWorkers({ accountId: 'acct', apiToken: TOKEN, remoteTestKey: KEY,
+    temporaryWorkerName: 'ss-dds-soak-00000000-0000-4000-8000-000000000001', workersDevUrl: 'https://other.example.workers.dev',
+    fetchImpl: async () => { calls++; }, execFile: () => { calls++; } }), /identity|context|predeployment|attestation/i);
+  assert.equal(calls, 0);
+});
+
+test('teardown wrapper accepts a full deployment record and rejects supplemental identity mismatches', async () => {
+  const f = await deploymentFixture();
+  try {
+    const verified = await f.mod.deployAndVerifyWorkers(f.options);
+    const deploymentRecord = f.mod.createDeploymentManifest({ root: f.root, verifiedDeployment: verified });
+    for (const mismatch of [{ temporaryWorkerName: 'ss-dds-soak-gh-1-1-aaaaaaaaaaaa' }, { workersDevUrl: `https://${f.identity.workerName}.other.workers.dev` }]) {
+      const prior = f.events.filter((e) => e.method === 'DELETE' || e.command).length;
+      await assert.rejects(() => f.mod.teardownTemporaryWorkers({ ...f.options, deploymentRecord, ...mismatch }));
+      assert.equal(f.events.filter((e) => e.method === 'DELETE' || e.command).length, prior);
+    }
+    const result = await f.mod.teardownTemporaryWorkers({ ...f.options, deploymentRecord });
+    assert.equal(result.status, 'deleted');
+    assert.equal(f.events.filter((e) => e.args?.[0] === 'deploy').length, 1);
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 

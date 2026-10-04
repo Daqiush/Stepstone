@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto';
 import { canonicalJson } from './remote-dds-soak-state.mjs';
 
+// Mutation authority comes from a complete exact-object read, never a caller's
+// name-only object or a serialized artifact masquerading as an API observation.
+const normalizedWorkers = new WeakMap();
+
 function temporaryName(value) {
   const uuid = /^ss-dds-soak-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   const github = /^ss-dds-soak-gh-[0-9]+-[0-9]+-[a-z0-9_-]{12}$/;
@@ -77,7 +81,9 @@ export async function findExactWorker(options) {
   if (matches.length > 1) throw new Error('Cloudflare pagination returned duplicate exact Worker identities');
   if (!matches.length) return null;
   if (typeof matches[0].id !== 'string' || !/^[a-f0-9]{32}$/i.test(matches[0].id)) throw new Error('Cloudflare API returned an invalid immutable Worker ID');
-  return { id: matches[0].id, name: client.name };
+  const worker = Object.freeze({ id: matches[0].id.toLowerCase(), name: client.name });
+  normalizedWorkers.set(worker, client.base);
+  return worker;
 }
 export async function listLegacyExactScript(options) {
   const client = inputs(options); let exactExists = false;
@@ -118,13 +124,18 @@ export async function readWorkerVersions(options) {
 }
 export async function disableWorkersDevSubdomain(options) {
   const client = inputs(options);
-  await jsonRequest(client, `${client.base}/scripts/${encodeURIComponent(client.name)}/subdomain`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: false, previews_enabled: false }) });
-  return { disabled: true };
+  verifiedExactWorker(options.worker, client);
+  const payload = await jsonRequest(client, `${client.base}/scripts/${encodeURIComponent(client.name)}/subdomain`, { method: 'DELETE' }, { allowNotFound: true });
+  return { disabled: true, alreadyAbsent: payload === null };
+}
+function verifiedExactWorker(worker, client) {
+  if (!worker || normalizedWorkers.get(worker) !== client.base || worker.name !== client.name) throw new Error('A normalized verified exact temporary Worker object is required');
+  if (typeof worker.id !== 'string' || !/^[a-f0-9]{32}$/.test(worker.id)) throw new Error('A verified immutable temporary Worker ID is required');
+  return worker;
 }
 export async function deleteExactWorker(options) {
   const client = inputs(options); const worker = options.worker;
-  if (!worker || worker.name !== client.name) throw new Error('A verified exact temporary Worker object is required');
-  if (typeof worker.id !== 'string' || !/^[a-f0-9]{32}$/i.test(worker.id)) throw new Error('A verified immutable temporary Worker ID is required');
+  verifiedExactWorker(worker, client);
   const path = `workers/${encodeURIComponent(worker.id)}`;
   await jsonRequest(client, `${client.base}/${path}`, { method: 'DELETE' });
   return { deleted: true };
@@ -136,4 +147,36 @@ export async function confirmExactAbsence(options) {
   const legacy = await listLegacyExactScript(options);
   if (worker || legacy) throw new Error('Temporary Worker collision: exact name already exists');
   return { absent: true };
+}
+
+export class OwnershipRefusal extends Error {}
+export function observeImmutableVersions(versions, observedVersions) {
+  for (const version of versions) {
+    const metadata = canonicalJson(version);
+    if (observedVersions.has(version.id) && observedVersions.get(version.id) !== metadata) throw new OwnershipRefusal('Refusing mutation: previously observed immutable version metadata changed');
+    observedVersions.set(version.id, metadata);
+  }
+}
+export async function readOwnershipSnapshot(options) {
+  try {
+    const worker = await findExactWorker(options);
+    const legacy = await listLegacyExactScript({ ...options, includeExact: true });
+    if (!worker && !legacy) return null;
+    if (!worker) throw new OwnershipRefusal('Refusing mutation: legacy-only Worker identity is inconsistent');
+    if (options.expectedWorkerId !== undefined && worker.id !== options.expectedWorkerId) throw new OwnershipRefusal('Refusing mutation: immutable Worker object changed after deployment');
+    const versionEvidence = await readWorkerVersions(options);
+    observeImmutableVersions(versionEvidence.versions, options.observedVersions ?? new Map());
+    if (versionEvidence.status === 'ABSENT_ENDPOINT' && legacy) throw new OwnershipRefusal('Refusing mutation: absent versions endpoint does not prove an undeployed placeholder');
+    if (versionEvidence.versions.some((version) => version.ownershipTag !== options.ownershipTag)) throw new OwnershipRefusal('Refusing mutation: immutable Worker version ownership tag is missing or mismatched');
+    return { worker, legacy, versionEvidence };
+  } catch (error) {
+    if (error instanceof OwnershipRefusal) throw error;
+    throw new OwnershipRefusal('Refusing mutation: complete Worker ownership evidence could not be verified', { cause: error });
+  }
+}
+export function sameOwnershipSnapshot(actual, expected) {
+  const normalize = (snapshot) => snapshot === null ? null : { ...snapshot,
+    currentVersionId: snapshot.versionEvidence.versions[0]?.id ?? null,
+    versionEvidence: { ...snapshot.versionEvidence, versions: [...snapshot.versionEvidence.versions].sort((a, b) => a.id.localeCompare(b.id)) } };
+  if (canonicalJson(normalize(actual)) !== canonicalJson(normalize(expected))) throw new OwnershipRefusal('Refusing mutation: Worker ownership snapshot changed before mutation');
 }

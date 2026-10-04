@@ -9,7 +9,7 @@ export const CI_SCHEMA_VERSION = 1;
 const CONTEXT_FIELDS = ['repository', 'workflow', 'runId', 'runAttempt', 'commitSha'];
 const CORE_FIELDS = ['schemaVersion', 'kind', ...CONTEXT_FIELDS, 'workerName', 'ownershipTag'];
 const PRE_FIELDS = [...CORE_FIELDS, 'noCollisionVerifiedAt'];
-const DEPLOYMENT_FIELDS = ['schemaVersion', 'kind', 'identity', 'endpoint', 'version', 'deploymentManifestVersion', 'buildId', 'workerVersionId', 'wranglerVersion', 'assets', 'verifiedDeployment', 'ownershipTag', 'localConfigurationSha256', 'scriptETag', 'versionConfigurationSha256'];
+const DEPLOYMENT_FIELDS = ['schemaVersion', 'kind', 'identity', 'endpoint', 'version', 'deploymentManifestVersion', 'buildId', 'workerId', 'workerVersionId', 'wranglerVersion', 'assets', 'verifiedDeployment', 'ownershipTag', 'localConfigurationSha256', 'scriptETag', 'versionConfigurationSha256'];
 
 function object(value, label) {
   if (!value || typeof value !== 'object' || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw new Error(`${label} must be a plain object`);
@@ -96,7 +96,7 @@ export function assertPreDeploymentIdentity(value, { trustedIdentity, context } 
   if (trustedIdentity) equal(identityCore(value), assertCiIdentity(trustedIdentity, { context }), 'Predeployment identity trusted ownership');
   return structuredClone(value);
 }
-function assertEndpoint(value, name) {
+export function assertEndpoint(value, name) {
   let url; try { url = new URL(value); } catch { throw new Error('Deployment endpoint must be an exact HTTPS workers.dev root'); }
   const host = new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\\.workers\\.dev$`);
   if (typeof value !== 'string' || url.protocol !== 'https:' || !host.test(url.hostname) || url.pathname !== '/' || url.search || url.hash || url.username || url.password || url.port || url.toString().slice(0, -1) !== value) throw new Error('Deployment endpoint must be the exact generated Worker HTTPS workers.dev root');
@@ -111,7 +111,8 @@ function manifestSnapshot(value, identity) {
   object(value, 'Deployment manifest');
   if (value.version !== 2) throw new Error('Unsupported deployment manifest version');
   const verified = object(value.verifiedDeployment, 'Verified deployment');
-  exactFields(verified, ['versionId', 'apiVerified', 'wranglerVersion', 'temporaryWorkerName', 'ownershipTag'], 'Verified deployment');
+  exactFields(verified, ['workerId', 'versionId', 'apiVerified', 'wranglerVersion', 'temporaryWorkerName', 'ownershipTag'], 'Verified deployment');
+  if (typeof value.workerId !== 'string' || !/^[a-f0-9]{32}$/.test(value.workerId) || value.workerId !== verified.workerId) throw new Error('Deployment immutable Worker ID must be valid and match verified deployment');
   if (verified.apiVerified !== true || verified.temporaryWorkerName !== identity.workerName || verified.versionId !== value.workerVersionId
       || verified.ownershipTag !== identity.ownershipTag) throw new Error('Deployment manifest does not bind the ownership identity and Worker version');
   const assets = object(value.assets, 'Deployment manifest assets');
@@ -122,7 +123,7 @@ function manifestSnapshot(value, identity) {
   if (!keys.length || keys.some((path) => !/^workers\/src\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_.-]+\.mjs$/.test(path))) throw new Error('Deployment manifest harness paths are invalid');
   for (const path of keys) asset(harness[path], path);
   return { version: value.version, deploymentManifestVersion: value.version, buildId: hash(value.buildId, 'Deployment manifest build ID'),
-    workerVersionId: nonempty(value.workerVersionId, 'Deployment Worker version'), wranglerVersion: nonempty(verified.wranglerVersion, 'Deployment Wrangler version'),
+    workerId: value.workerId, workerVersionId: nonempty(value.workerVersionId, 'Deployment Worker version'), wranglerVersion: nonempty(verified.wranglerVersion, 'Deployment Wrangler version'),
     assets: structuredClone(assets), verifiedDeployment: structuredClone(verified) };
 }
 export function createDeploymentRecord({ identity, endpoint, deploymentManifest, localConfigurationSha256, scriptETag, versionConfigurationSha256 }) {
@@ -170,7 +171,7 @@ function parseCli(args) {
   for (const key of allowed) if (key !== '--identity-out' && !values.has(key)) throw new Error(`Missing required identity CLI argument: ${key}`);
   return values;
 }
-function canonicalOutputTarget(path) {
+export function canonicalOutputTarget(path) {
   let ancestor = resolve(path); const missing = [];
   for (;;) {
     try {

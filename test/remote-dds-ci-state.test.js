@@ -19,7 +19,7 @@ async function fixture(t) {
   const trustedIdentity = identityModule.deriveCiIdentity({ ...CONTEXT, secret: 'not-persisted' });
   const identity = identityModule.createPreDeploymentIdentity({ identity: trustedIdentity, noCollisionVerifiedAt: '2026-09-30T12:00:00.000Z' });
   const deployment = identityModule.createDeploymentRecord({ identity, endpoint: `https://${identity.workerName}.example.workers.dev`,
-    deploymentManifest: { version: 2, buildId: '1'.repeat(64), workerVersionId: 'worker-v1', verifiedDeployment: { apiVerified: true, versionId: 'worker-v1', wranglerVersion: '4.33.0', temporaryWorkerName: identity.workerName, ownershipTag: identity.ownershipTag },
+    deploymentManifest: { version: 2, buildId: '1'.repeat(64), workerId: 'a'.repeat(32), workerVersionId: 'worker-v1', verifiedDeployment: { workerId: 'a'.repeat(32), apiVerified: true, versionId: 'worker-v1', wranglerVersion: '4.33.0', temporaryWorkerName: identity.workerName, ownershipTag: identity.ownershipTag },
       assets: { wasm: { path: 'workers/vendor/bridge-dds/dds-worker.wasm', bytes: 4, sha256: '2'.repeat(64) }, harness: {
         'workers/src/index.mjs': { path: 'workers/src/index.mjs', bytes: 8, sha256: '3'.repeat(64) },
         'workers/src/harness-router.mjs': { path: 'workers/src/harness-router.mjs', bytes: 9, sha256: '4'.repeat(64) },
@@ -92,6 +92,7 @@ test('state bindings reject every GitHub or independent deployment drift includi
     (s) => { s.identity.noCollisionVerifiedAt = '2026-09-30T12:02:00.000Z'; },
     (s) => { s.deployment.endpoint = `https://${s.identity.workerName}.other.workers.dev`; },
     (s) => { s.deployment.workerVersionId = 'worker-v2'; }, (s) => { s.deployment.deploymentManifestVersion = 1; },
+    (s) => { s.deployment.workerId = 'b'.repeat(32); s.deployment.verifiedDeployment.workerId = 'b'.repeat(32); },
     (s) => { s.deployment.wranglerVersion = '4.34.0'; }, (s) => { s.deployment.buildId = '7'.repeat(64); },
     (s) => { s.deployment.localConfigurationSha256 = '7'.repeat(64); }, (s) => { s.deployment.scriptETag = 'other-etag'; },
     (s) => { s.deployment.versionConfigurationSha256 = '7'.repeat(64); }, (s) => { s.deployment.assets.wasm.sha256 = '7'.repeat(64); },

@@ -43,7 +43,7 @@ async function validRun() {
   const identity = createPreDeploymentIdentity({ identity: trusted, noCollisionVerifiedAt: '2026-10-01T00:00:00.000Z' });
   const deployment = createDeploymentManifest({ root: ROOT, verifiedDeployment: {
     identity, ownershipTag: identity.ownershipTag, localConfigurationSha256: 'a'.repeat(64), scriptETag: 'script-etag', versionConfigurationSha256: 'b'.repeat(64),
-    versionId: 'version-verified', apiVerified: true, wranglerVersion: '4.137.0',
+    workerId: 'b'.repeat(32), versionId: 'version-verified', apiVerified: true, wranglerVersion: '4.137.0',
     temporaryWorkerName: identity.workerName,
     workersDevUrl: `https://${identity.workerName}.example.workers.dev`,
   } });
@@ -205,6 +205,9 @@ for (const [name, mutate] of [
   ['activation', (r) => { r.evidence.operations[0].activationId = activation(2); }],
   ['activation', (r) => { r.evidence.preflight.activationId = activation(1); }],
   ['deployment', (r) => { r.deployment.verifiedDeployment.apiVerified = false; }],
+  ['deployment', (r) => { delete r.deployment.workerId; }],
+  ['deployment', (r) => { r.deployment.workerId = 'c'.repeat(32); }],
+  ['deployment', (r) => { delete r.deployment.verifiedDeployment.workerId; }],
   ['deployment', (r) => { delete r.deployment.ownershipTag; }],
   ['deployment', (r) => { r.deployment.verifiedDeployment.ownershipTag = 'c'.repeat(43); }],
   ['deployment', (r) => { r.deployment.endpoint = 'https://foreign.example.workers.dev'; }],
