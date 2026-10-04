@@ -14,16 +14,27 @@ function inputs(options) {
 }
 async function jsonRequest(client, url, options = {}, { allowNotFound = false } = {}) {
   const response = await client.fetchImpl(url, { ...options, headers: { ...client.headers, ...options.headers } });
-  if (allowNotFound && response.status === 404) return null;
   let payload; try { payload = await response.json(); } catch { throw new Error('Cloudflare API returned invalid JSON'); }
-  if (allowNotFound && !response.ok && payload?.success === false && Array.isArray(payload.errors) && payload.errors.some((error) => error?.code === 10007)) return null;
+  if (allowNotFound && explicitNotFound(response, payload)) return null;
   if (!response.ok || payload?.success !== true) throw new Error('Cloudflare API request failed');
   return payload;
+}
+function explicitNotFound(response, payload) {
+  const conflictingError = /permission|unauthori[sz]ed|forbidden|authentication|access denied|internal (?:server|service)|service (?:error|unavailable)|temporarily unavailable/i;
+  return [400, 404].includes(response.status) && payload?.success === false && Array.isArray(payload.errors) && payload.errors.length > 0
+    && payload.errors.every((error) => error?.code === 10007 && (error.message === undefined || (typeof error.message === 'string' && !conflictingError.test(error.message))));
+}
+async function exactScriptExists(client) {
+  const response = await client.fetchImpl(`${client.base}/scripts/${encodeURIComponent(client.name)}`, { headers: client.headers });
+  if (response.ok) return true;
+  let payload; try { payload = await response.json(); } catch { throw new Error('Cloudflare exact-name endpoint could not prove absence'); }
+  if (!explicitNotFound(response, payload)) throw new Error('Cloudflare exact-name endpoint could not prove absence');
+  return false;
 }
 // These three official endpoints use pages. A cursor from a different API cannot
 // prove exhaustion when the requested page metadata is missing.
 async function listAll(client, path, { query = {}, items = (payload) => payload.result, allowNotFound = false } = {}) {
-  const results = []; let totalPages, perPage;
+  const results = []; let totalPages, perPage, totalCount;
   for (let page = 1; page <= 100000; page++) {
     const url = new URL(`${client.base}/${path}`);
     for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value);
@@ -38,16 +49,30 @@ async function listAll(client, path, { query = {}, items = (payload) => payload.
     if (!Array.isArray(values) || !info || typeof info !== 'object' || Array.isArray(info)) throw new Error('Cloudflare pagination metadata is missing or malformed');
     if (!Number.isSafeInteger(info.page) || info.page !== page || !Number.isSafeInteger(info.per_page) || info.per_page < 1 || info.per_page > 100
         || !Number.isSafeInteger(info.total_pages) || info.total_pages < 0 || info.total_pages > 100000 || values.length > info.per_page
+        || !Number.isSafeInteger(info.count) || info.count !== values.length || !Number.isSafeInteger(info.total_count) || info.total_count < 0
         || (info.total_pages === 0 && (page !== 1 || values.length !== 0)) || (info.total_pages > 0 && page > info.total_pages)) throw new Error('Cloudflare pagination page is missing, malformed, or non-advancing');
-    if (totalPages !== undefined && (totalPages !== info.total_pages || perPage !== info.per_page)) throw new Error('Cloudflare pagination pages are inconsistent');
-    totalPages = info.total_pages; perPage = info.per_page;
+    const expectedPages = Math.ceil(info.total_count / info.per_page);
+    if ((info.total_count === 0 ? info.total_pages > 1 : info.total_pages !== expectedPages)
+        || info.count !== Math.min(info.per_page, Math.max(0, info.total_count - (page - 1) * info.per_page))) throw new Error('Cloudflare pagination counts and page capacity are inconsistent');
+    if (totalPages !== undefined && (totalPages !== info.total_pages || perPage !== info.per_page || totalCount !== info.total_count)) throw new Error('Cloudflare pagination pages are inconsistent');
+    totalPages = info.total_pages; perPage = info.per_page; totalCount = info.total_count;
     results.push(...values);
-    if (page >= totalPages) return results;
+    if (page >= totalPages) {
+      if (results.length !== totalCount) throw new Error('Cloudflare pagination cumulative count is inconsistent');
+      return results;
+    }
   }
   throw new Error('Cloudflare pagination did not terminate');
 }
 export async function findExactWorker(options) {
   const client = inputs(options); const workers = await listAll(client, 'workers');
+  const seen = new Map();
+  for (const worker of workers) {
+    if (typeof worker?.id !== 'string' || !/^[a-f0-9]{32}$/i.test(worker.id) || typeof worker.name !== 'string' || !worker.name || worker.name.trim() !== worker.name) throw new Error('Cloudflare API returned an invalid immutable Worker identity');
+    const id = worker.id.toLowerCase();
+    if (seen.has(id)) throw new Error(seen.get(id) === worker.name ? 'Cloudflare pagination returned duplicate Worker identities' : 'Cloudflare pagination returned conflicting names for an immutable Worker identity');
+    seen.set(id, worker.name);
+  }
   const matches = workers.filter((worker) => worker?.name === client.name);
   if (matches.length > 1) throw new Error('Cloudflare pagination returned duplicate exact Worker identities');
   if (!matches.length) return null;
@@ -56,12 +81,14 @@ export async function findExactWorker(options) {
 }
 export async function listLegacyExactScript(options) {
   const client = inputs(options); let exactExists = false;
-  if (options.includeExact === true) {
-    const exact = await client.fetchImpl(`${client.base}/scripts/${encodeURIComponent(client.name)}`, { headers: client.headers });
-    if (exact.ok) exactExists = true;
-    else if (exact.status !== 404) throw new Error('Cloudflare exact-name endpoint could not prove absence');
-  }
+  if (options.includeExact === true) exactExists = await exactScriptExists(client);
   const scripts = await listAll(client, 'scripts-search', { query: { name: client.name } });
+  const seen = new Set();
+  for (const script of scripts) {
+    if (typeof script?.script_name !== 'string' || !script.script_name || script.script_name.trim() !== script.script_name) throw new Error('Cloudflare API returned an invalid legacy script identity');
+    if (seen.has(script.script_name)) throw new Error('Cloudflare pagination returned duplicate legacy script identities');
+    seen.add(script.script_name);
+  }
   const matches = scripts.filter((script) => script?.script_name === client.name);
   if (matches.length > 1) throw new Error('Cloudflare pagination returned duplicate exact legacy scripts');
   return matches.length || exactExists ? { name: client.name } : null;
@@ -104,9 +131,7 @@ export async function deleteExactWorker(options) {
 }
 export async function confirmExactAbsence(options) {
   const client = inputs(options);
-  const exact = await client.fetchImpl(`${client.base}/scripts/${encodeURIComponent(client.name)}`, { headers: client.headers });
-  if (exact.ok) throw new Error('Temporary Worker collision: exact name already exists');
-  if (exact.status !== 404) throw new Error('Cloudflare exact-name endpoint could not prove absence');
+  if (await exactScriptExists(client)) throw new Error('Temporary Worker collision: exact name already exists');
   const worker = await findExactWorker(options);
   const legacy = await listLegacyExactScript(options);
   if (worker || legacy) throw new Error('Temporary Worker collision: exact name already exists');

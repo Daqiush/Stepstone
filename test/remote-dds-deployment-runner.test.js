@@ -22,23 +22,26 @@ const CONTEXT = { repository: 'bridge/stepstone', workflow: 'Remote DDS Soak', r
 const TOKEN = 'fake-source-token';
 const KEY = 'a'.repeat(43);
 const WORKER_ID = 'b'.repeat(32);
-const page = (items, number = 1, total = 1) => ({ success: true, result: items, result_info: { page: number, per_page: 100, total_pages: total } });
+const page = (items, number = 1, total = 1, perPage = 100, totalCount = (total - 1) * perPage + items.length) => ({ success: true, result: items,
+  result_info: { page: number, per_page: perPage, total_pages: total, count: items.length, total_count: totalCount } });
+const versionPage = (items, ...args) => ({ ...page(items, ...args), result: { items } });
 const response = (payload, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => payload });
-async function ciIdentity() { return (await import('../scripts/remote-dds-ci-identity.mjs')).deriveCiIdentity({ ...CONTEXT, secret: TOKEN }); }
+const notFound = (status = 404) => response({ success: false, errors: [{ code: 10007, message: 'Worker not found' }] }, status);
+async function ciIdentity(secret = TOKEN) { return (await import('../scripts/remote-dds-ci-identity.mjs')).deriveCiIdentity({ ...CONTEXT, secret }); }
 function versionDetail(identity, tag = identity.ownershipTag) {
   return { success: true, result: { id: 'deployed-v1', annotations: tag === null ? {} : { 'workers/tag': tag }, resources: { script: { etag: 'script-etag-1' }, bindings: [{ type: 'plain_text', name: 'DDS_REMOTE_TEST', text: 'true' }], script_runtime: { compatibility_date: '2026-09-22' } } } };
 }
 async function deploymentFixture(overrides = {}) {
-  const mod = await deployment(); const identity = await ciIdentity(); const root = repo();
+  const mod = await deployment(); const identity = await ciIdentity(overrides.apiToken ?? TOKEN); const root = repo();
   const events = []; let deployed = false, deleted = false, buildId;
   const fetchImpl = async (url, options = {}) => {
     const parsed = new URL(url); events.push({ url, method: options.method ?? 'GET' });
     if (parsed.hostname.endsWith('.workers.dev')) return response({ operationResult: { buildId, workerVersionId: 'deployed-v1' } });
     if (options.method === 'DELETE') { deleted = true; return response({ success: true }); }
-    if (parsed.pathname.endsWith(`/workers/scripts/${identity.workerName}`)) return response({}, deployed && !deleted ? 200 : 404);
+    if (parsed.pathname.endsWith(`/workers/scripts/${identity.workerName}`)) return deployed && !deleted ? response({}) : notFound();
     if (parsed.pathname.endsWith('/workers/workers')) return response(page(deployed && !deleted ? [{ id: WORKER_ID, name: identity.workerName }] : []));
     if (parsed.pathname.endsWith('/workers/scripts-search')) return response(page(deployed && !deleted ? [{ script_name: identity.workerName }] : []));
-    if (parsed.pathname.endsWith('/versions')) return response({ ...page([]), result: { items: deployed && !deleted ? [{ id: 'deployed-v1' }] : [] } });
+    if (parsed.pathname.endsWith('/versions')) return response(versionPage(deployed && !deleted ? [{ id: 'deployed-v1' }] : []));
     if (parsed.pathname.endsWith('/versions/deployed-v1')) return response(versionDetail(identity));
     if (parsed.pathname.endsWith('/workers/subdomain')) return response({ success: true, result: { subdomain: 'example' } });
     throw new Error(`Unexpected test request: ${url}`);
@@ -161,7 +164,7 @@ test('deployment repeats collision checks before mutation and passes the same va
           const config = JSON.parse(require('node:fs').readFileSync(args[args.indexOf('--config') + 1], 'utf8'));
           configs.push(config);
           assert.equal(config.name, f.identity.workerName);
-          assert.equal(args[args.indexOf('--tag') + 1], f.identity.ownershipTag);
+          assert.ok(args.includes('--tag=' + f.identity.ownershipTag));
           assert.equal(JSON.stringify(config).includes('DDS_REMOTE_TEST_KEY'), false);
           f.setDeployed(true);
           if (attempts === 1) throw new Error('Worker does not exist [code: 10007]');
@@ -179,6 +182,28 @@ test('deployment repeats collision checks before mutation and passes the same va
     }
     const secret = f.events.find((e) => e.args?.[1] === 'secret');
     assert.equal(secret.input, KEY + '\n');
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('both deploy attempts pass a canonical leading-hyphen ownership tag as one argument', async () => {
+  const f = await deploymentFixture({ apiToken: 'leading-tag-fake-54' }); let attempts = 0;
+  try {
+    assert.match(f.identity.ownershipTag, /^-[A-Za-z0-9_-]{42}$/);
+    assert.equal(Buffer.from(f.identity.ownershipTag, 'base64url').toString('base64url'), f.identity.ownershipTag);
+    await f.mod.deployAndVerifyWorkers({ ...f.options, execFile: (command, args, options) => {
+      if (args[0] === 'deploy') {
+        attempts++;
+        assert.equal(args.filter((arg) => arg.startsWith('--tag=')).length, 1);
+        assert.ok(args.includes('--tag=' + f.identity.ownershipTag));
+        assert.equal(args.includes('--tag'), false);
+        assert.equal(args.includes(f.identity.ownershipTag), false);
+        f.execFile(command, args, options);
+        if (attempts === 1) throw new Error('Worker does not exist [code: 10007]');
+        return '';
+      }
+      return f.execFile(command, args, options);
+    } });
+    assert.equal(attempts, 2);
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 
@@ -239,9 +264,9 @@ for (const [label, tag, versions, deletes] of [
       },
       fetchImpl: async (url, options = {}) => {
         if (options.method === 'DELETE') { deleted = true; assert.ok(url.endsWith('/workers/workers/' + WORKER_ID)); return f.fetchImpl(url, options); }
-        if (!versions && new URL(url).pathname.endsWith('/workers/scripts/' + f.identity.workerName)) return response({}, 404);
+        if (!versions && new URL(url).pathname.endsWith('/workers/scripts/' + f.identity.workerName)) return notFound();
         if (!versions && new URL(url).pathname.endsWith('/workers/scripts-search')) return response(page([]));
-        if (new URL(url).pathname.endsWith('/versions')) return response({ ...page([]), result: { items: versions ? [{ id: 'deployed-v1' }] : [] } });
+        if (new URL(url).pathname.endsWith('/versions')) return response(versionPage(versions ? [{ id: 'deployed-v1' }] : []));
         if (url.endsWith('/versions/deployed-v1')) return response(versionDetail(f.identity, tag === 'matching' ? f.identity.ownershipTag : tag));
         return f.fetchImpl(url, options);
       },
@@ -271,10 +296,10 @@ test('shared API finds later-page exact objects and legacy scripts without treat
   const options = { accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName, fetchImpl: async (url) => {
     const parsed = new URL(url), number = Number(parsed.searchParams.get('page') ?? '1'); reads.push(url);
     assert.equal(parsed.searchParams.get('per_page'), '100');
-    if (parsed.pathname.endsWith('/workers/workers')) return response(page(number === 1 ? [{ id: 'c'.repeat(32), name: 'other' }] : [{ id: WORKER_ID, name: identity.workerName }], number, 2));
+    if (parsed.pathname.endsWith('/workers/workers')) return response(page(number === 1 ? [{ id: 'c'.repeat(32), name: 'other' }] : [{ id: WORKER_ID, name: identity.workerName }], number, 2, 1, 2));
     if (parsed.pathname.endsWith('/workers/scripts-search')) {
       assert.equal(parsed.searchParams.get('name'), identity.workerName);
-      return response(page(number === 1 ? [{ script_name: 'near-' + identity.workerName }] : [{ script_name: identity.workerName }], number, 2));
+      return response(page(number === 1 ? [{ script_name: 'near-' + identity.workerName }] : [{ script_name: identity.workerName }], number, 2, 1, 2));
     }
     throw new Error('unexpected');
   } };
@@ -291,14 +316,14 @@ for (const target of ['objects', 'legacy', 'versions']) {
       const fetchImpl = async (url) => {
         if (url.endsWith('/versions/deployed-v1')) return response(versionDetail(identity));
         reads++;
-        const items = bad === 'duplicate exact' ? [item] : [];
+        const items = ['duplicate exact', 'inconsistent pages', 'non-advancing page'].includes(bad) ? [item] : [];
         let metadata;
         if (bad === 'malformed cursor') metadata = { cursor: 123 };
         else if (bad === 'repeated cursor') metadata = { cursor: 'same' };
         else if (bad === 'cyclic cursor') metadata = { cursor: reads % 2 ? 'a' : 'b' };
-        else if (bad === 'inconsistent pages') metadata = { page: reads, per_page: 100, total_pages: reads === 1 ? 2 : 3 };
-        else if (bad === 'non-advancing page') metadata = { page: 1, per_page: 100, total_pages: 2 };
-        else if (bad === 'duplicate exact') metadata = { page: reads, per_page: 100, total_pages: 2 };
+        else if (bad === 'inconsistent pages') metadata = { page: reads, per_page: 1, total_pages: reads === 1 ? 2 : 3, count: 1, total_count: reads === 1 ? 2 : 3 };
+        else if (bad === 'non-advancing page') metadata = { page: 1, per_page: 1, total_pages: 2, count: 1, total_count: 2 };
+        else if (bad === 'duplicate exact') metadata = { page: reads, per_page: 1, total_pages: 2, count: 1, total_count: 2 };
         const payload = { success: true, result: target === 'versions' ? { items } : items };
         if (metadata) payload.result_info = metadata;
         return response(payload);
@@ -311,13 +336,94 @@ for (const target of ['objects', 'legacy', 'versions']) {
   }
 }
 
+function listingItem(target, index) {
+  return target === 'objects' ? { id: (index + 1).toString(16).padStart(32, '0'), name: 'other-' + index }
+    : target === 'legacy' ? { script_name: 'other-' + index } : { id: 'other-v' + index };
+}
+function listingPayload(target, items, ...args) { return target === 'versions' ? versionPage(items, ...args) : page(items, ...args); }
+function listingMethod(api, target) { return target === 'objects' ? api.findExactWorker : target === 'legacy' ? api.listLegacyExactScript : api.readWorkerVersions; }
+
+for (const target of ['objects', 'legacy', 'versions']) {
+  test(target + ' complete listing rejects duplicate non-target identities on different pages', async () => {
+    const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity();
+    const options = { accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName, fetchImpl: async (url) => {
+      const parsed = new URL(url);
+      if (parsed.pathname.includes('/versions/')) {
+        const detail = versionDetail(identity); detail.result.id = 'other-v0'; return response(detail);
+      }
+      return response(listingPayload(target, [listingItem(target, 0)], Number(parsed.searchParams.get('page')), 2, 1, 2));
+    } };
+    await assert.rejects(() => listingMethod(api, target)(options), /duplicate|identity|pagination/i);
+  });
+
+  for (const bad of ['missing count', 'missing total count', 'count mismatch', 'total count exceeds capacity', 'total pages mismatch', 'total count drift', 'short nonfinal page', 'short final page']) {
+    test(target + ' pagination refuses ' + bad, async () => {
+      const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity();
+      const options = { accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName, fetchImpl: async (url) => {
+        const parsed = new URL(url);
+        if (parsed.pathname.includes('/versions/')) {
+          const detail = versionDetail(identity); detail.result.id = decodeURIComponent(parsed.pathname.split('/').at(-1)); return response(detail);
+        }
+        const number = Number(parsed.searchParams.get('page'));
+        const count = number === 1 ? (bad === 'short nonfinal page' ? 1 : 100) : bad === 'short final page' ? 0 : 1;
+        const items = Array.from({ length: count }, (_, i) => listingItem(target, (number - 1) * 100 + i));
+        const payload = listingPayload(target, items, number, 2, 100, 101);
+        if (bad === 'missing count') delete payload.result_info.count;
+        if (bad === 'missing total count') delete payload.result_info.total_count;
+        if (bad === 'count mismatch') payload.result_info.count++;
+        if (bad === 'total count exceeds capacity') payload.result_info.total_count = 201;
+        if (bad === 'total pages mismatch') payload.result_info.total_pages = 3;
+        if (bad === 'total count drift' && number === 2) payload.result_info.total_count = 102;
+        return response(payload);
+      } };
+      await assert.rejects(() => listingMethod(api, target)(options), /pagination|count|page/i);
+    });
+  }
+
+  test(target + ' pagination accepts a full first page and smaller final page with consistent totals', async () => {
+    const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity(); let pages = 0;
+    const options = { accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName, fetchImpl: async (url) => {
+      const parsed = new URL(url);
+      if (parsed.pathname.includes('/versions/')) {
+        const detail = versionDetail(identity); detail.result.id = decodeURIComponent(parsed.pathname.split('/').at(-1)); return response(detail);
+      }
+      pages++; const number = Number(parsed.searchParams.get('page'));
+      return response(listingPayload(target, Array.from({ length: number === 1 ? 100 : 1 }, (_, i) => listingItem(target, (number - 1) * 100 + i)), number, 2, 100, 101));
+    } };
+    const result = await listingMethod(api, target)(options);
+    assert.equal(pages, 2);
+    if (target === 'versions') assert.equal(result.versions.length, 101);
+    else assert.equal(result, null);
+  });
+}
+
+test('current Worker list refuses one immutable ID associated with conflicting names', async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity();
+  await assert.rejects(() => api.findExactWorker({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
+    fetchImpl: async () => response(page([{ id: WORKER_ID, name: 'other' }, { id: WORKER_ID, name: 'changed' }])),
+  }), /duplicate|identity|conflict|pagination/i);
+});
+
+for (const bad of ['duplicate non-target Worker', 'total_count 201 on two pages']) test('absence confirmation refuses ' + bad, async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity();
+  await assert.rejects(() => api.confirmExactAbsence({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
+    fetchImpl: async (url) => {
+      const parsed = new URL(url), number = Number(parsed.searchParams.get('page'));
+      if (parsed.pathname.endsWith('/workers/scripts/' + identity.workerName)) return notFound();
+      if (parsed.pathname.endsWith('/workers/scripts-search')) return response(page([]));
+      const items = Array.from({ length: number === 1 ? 100 : 1 }, (_, i) => listingItem('objects', number === 2 && bad === 'duplicate non-target Worker' ? 0 : (number - 1) * 100 + i));
+      return response(page(items, number, 2, 100, bad === 'total_count 201 on two pages' ? 201 : 101));
+    },
+  }), /duplicate|identity|pagination|count|page/i);
+});
+
 test('shared API normalizes every immutable version with script ETag and canonical config fingerprint without credentials', async () => {
   const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity();
   const { canonicalJson } = await import('../scripts/remote-dds-soak-state.mjs'); const crypto = require('node:crypto');
   const detail = versionDetail(identity);
   const result = await api.readWorkerVersions({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName, fetchImpl: async (url) => {
     if (url.endsWith('/versions/deployed-v1')) return response(detail);
-    return response({ ...page([]), result: { items: [{ id: 'deployed-v1' }] } });
+    return response(versionPage([{ id: 'deployed-v1' }]));
   } });
   assert.equal(result.status, 'PRESENT'); const records = result.versions;
   assert.equal(records.length, 1); assert.equal(records[0].id, 'deployed-v1'); assert.equal(records[0].ownershipTag, identity.ownershipTag);
@@ -329,11 +435,66 @@ test('shared API normalizes every immutable version with script ETag and canonic
 test('a missing versions endpoint returns typed absence, while missing immutable detail and permission failures refuse', async () => {
   const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity();
   const options = { accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName };
-  for (const payload of [response({}, 404), response({ success: false, errors: [{ code: 10007, message: 'Worker not found' }] }, 400)]) {
+  for (const payload of [notFound(), notFound(400)]) {
     assert.deepEqual(await api.readWorkerVersions({ ...options, fetchImpl: async () => payload }), { status: 'ABSENT_ENDPOINT', versions: [] });
   }
   for (const status of [401, 403, 500]) await assert.rejects(() => api.readWorkerVersions({ ...options, fetchImpl: async () => response({ success: false }, status) }), /failed|Cloudflare/i);
   await assert.rejects(() => api.readWorkerVersions({ ...options, versionId: 'missing', fetchImpl: async () => response({}, 404) }), /failed|immutable|Cloudflare/i);
+});
+
+const unsafeAbsenceCases = [
+  ['HTTP 401 with not-found code', 401, [{ code: 10007 }]],
+  ['HTTP 403 with not-found code', 403, [{ code: 10007 }]],
+  ['HTTP 500 with not-found code', 500, [{ code: 10007 }]],
+  ['HTTP 503 with not-found code', 503, [{ code: 10007 }]],
+  ['HTTP 429 with not-found code', 429, [{ code: 10007 }]],
+  ['HTTP 200 with failure envelope', 200, [{ code: 10007 }]],
+  ['HTTP 404 without errors', 404, undefined],
+  ['HTTP 404 with empty errors', 404, []],
+  ['HTTP 404 with mixed errors', 404, [{ code: 10007 }, { code: 10000, message: 'Authentication error' }]],
+  ['HTTP 400 with mixed errors', 400, [{ code: 10007 }, { code: 10000, message: 'Authentication error' }]],
+  ['HTTP 404 with permission error', 404, [{ code: 10007, message: 'Permission denied' }]],
+  ['HTTP 400 with service error', 400, [{ code: 10007, message: 'Internal service error' }]],
+  ['HTTP 404 with an unknown code', 404, [{ code: 10000 }]],
+];
+
+for (const [label, status, errors] of unsafeAbsenceCases) {
+  const failedResponse = () => response({ success: false, ...(errors === undefined ? {} : { errors }) }, status);
+  test('typed versions absence refuses ' + label, async () => {
+    const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity();
+    await assert.rejects(() => api.readWorkerVersions({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
+      fetchImpl: async () => failedResponse(),
+    }), /Cloudflare|failed|absence/i);
+  });
+
+  test('placeholder cleanup is never authorized by ' + label, async () => {
+    const f = await deploymentFixture(); let attempts = 0, deletes = 0, secrets = 0;
+    try {
+      await assert.rejects(() => f.mod.deployAndVerifyWorkers({ ...f.options,
+        execFile: (command, args) => {
+          if (args[1] === 'secret') secrets++;
+          attempts++; f.setDeployed(true); throw new Error('Worker does not exist [code: 10007]');
+        },
+        fetchImpl: async (url, options = {}) => {
+          if (options.method === 'DELETE') deletes++;
+          const path = new URL(url).pathname;
+          if (path.endsWith('/versions')) return failedResponse();
+          if (path.endsWith('/workers/scripts/' + f.identity.workerName)) return notFound();
+          if (path.endsWith('/workers/scripts-search')) return response(page([]));
+          return f.fetchImpl(url, options);
+        },
+      }), /ownership|refus|Cloudflare/i);
+      assert.equal(attempts, 1); assert.equal(secrets, 0); assert.equal(deletes, 0);
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  });
+}
+
+for (const method of ['confirmExactAbsence', 'listLegacyExactScript']) test(method + ' refuses an exact HTTP 404 carrying mixed not-found and permission errors', async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity();
+  await assert.rejects(() => api[method]({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName, includeExact: true,
+    fetchImpl: async (url) => new URL(url).pathname.endsWith('/workers/scripts/' + identity.workerName)
+      ? response({ success: false, errors: [{ code: 10007 }, { code: 10000 }] }, 404) : response(page([])),
+  }), /Cloudflare|failed|absence/i);
 });
 
 test('an absent versions endpoint permits cleanup only for a current exact placeholder with both legacy readers absent', async () => {
@@ -345,8 +506,8 @@ test('an absent versions endpoint permits cleanup only for a current exact place
         fetchImpl: async (url, options = {}) => {
           if (options.method === 'DELETE') deletes++;
           const path = new URL(url).pathname;
-          if (path.endsWith('/versions')) return response({}, 404);
-          if (!legacyExists && path.endsWith('/workers/scripts/' + f.identity.workerName)) return response({}, 404);
+          if (path.endsWith('/versions')) return notFound();
+          if (!legacyExists && path.endsWith('/workers/scripts/' + f.identity.workerName)) return notFound();
           if (!legacyExists && path.endsWith('/workers/scripts-search')) return response(page([]));
           return f.fetchImpl(url, options);
         },
@@ -428,7 +589,7 @@ test('partial cleanup refuses a replacement immutable object after a code-10007 
           currentReads++;
           if (currentReads >= 3) return response(page([{ id: 'c'.repeat(32), name: f.identity.workerName }]));
         }
-        if (path.endsWith('/versions')) return response({ ...page([]), result: { items: [] } });
+        if (path.endsWith('/versions')) return response(versionPage([]));
         return f.fetchImpl(url, options);
       },
     }), /immutable.*(changed|mismatch)|replacement|refus/i);
@@ -578,7 +739,7 @@ test('a secret-created immutable version is reverified and supplies the final id
       execFile: (command, args, options) => { if (args[1] === 'secret') uploaded = true; return f.execFile(command, args, options); },
       fetchImpl: async (url, options = {}) => {
         const path = new URL(url).pathname;
-        if (uploaded && path.endsWith('/versions')) return response({ ...page([]), result: { items: [{ id: 'deployed-v2' }, { id: 'deployed-v1' }] } });
+        if (uploaded && path.endsWith('/versions')) return response(versionPage([{ id: 'deployed-v2' }, { id: 'deployed-v1' }]));
         if (uploaded && path.endsWith('/versions/deployed-v2')) return response(finalDetail);
         if (new URL(url).hostname.endsWith('.workers.dev')) {
           const payload = await (await f.fetchImpl(url, options)).json(); payload.operationResult.workerVersionId = 'deployed-v2'; return response(payload);
@@ -591,6 +752,48 @@ test('a secret-created immutable version is reverified and supplies the final id
     assert.equal(verified.versionConfigurationSha256, require('node:crypto').createHash('sha256').update(canonicalJson({ bindings: finalDetail.result.resources.bindings, script_runtime: finalDetail.result.resources.script_runtime })).digest('hex'));
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
+
+for (const boundary of ['after secret', 'final detail', 'partial cleanup']) {
+  for (const drift of ['ownership tag', 'script ETag', 'version config']) test('observed immutable metadata refuses ' + drift + ' drift at ' + boundary, async () => {
+    const f = await deploymentFixture(); let detailReads = 0, attempts = 0, secrets = 0, deletes = 0, driftSeen = false, laterMutations = 0;
+    try {
+      await assert.rejects(() => f.mod.deployAndVerifyWorkers({ ...f.options,
+        execFile: (command, args, options) => {
+          if (driftSeen && (args[0] === 'deploy' || args[1] === 'secret')) laterMutations++;
+          if (args[0] === 'deploy') {
+            attempts++;
+            if (boundary === 'partial cleanup') {
+              f.execFile(command, args, options);
+              throw new Error(attempts === 1 ? 'Worker does not exist [code: 10007]' : 'Second deployment failed');
+            }
+          }
+          if (args[1] === 'secret') secrets++;
+          return f.execFile(command, args, options);
+        },
+        fetchImpl: async (url, options = {}) => {
+          if (options.method === 'DELETE') { deletes++; if (driftSeen) laterMutations++; }
+          if (new URL(url).pathname.endsWith('/versions/deployed-v1')) {
+            detailReads++;
+            if ((boundary === 'after secret' && detailReads >= 2) || (boundary !== 'after secret' && detailReads === 3)) {
+              driftSeen = true;
+              const detail = versionDetail(f.identity, drift === 'ownership tag' ? 'b'.repeat(43) : f.identity.ownershipTag);
+              if (drift === 'script ETag') detail.result.resources.script.etag = 'changed-etag';
+              if (drift === 'version config') detail.result.resources.script_runtime.compatibility_date = '2026-09-30';
+              return response(detail);
+            }
+          }
+          return f.fetchImpl(url, options);
+        },
+      }), /ownership|immutable|metadata|refus|changed/i);
+      assert.equal(driftSeen, true);
+      assert.equal(detailReads, boundary === 'after secret' ? 2 : 3);
+      assert.equal(attempts, boundary === 'partial cleanup' ? 2 : 1);
+      assert.equal(secrets, boundary === 'partial cleanup' ? 0 : 1);
+      assert.equal(laterMutations, 0);
+      assert.equal(deletes, 0);
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  });
+}
 
 for (const drift of ['missing tag', 'foreign tag', 'script ETag', 'version config']) test('final exact-version detail refuses ' + drift + ' drift without cleanup', async () => {
   const f = await deploymentFixture(); let detailReads = 0, deletes = 0;

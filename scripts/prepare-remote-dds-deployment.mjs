@@ -84,6 +84,13 @@ export async function verifyWorkersDeployment({ fetchImpl = fetch, accountId, sc
   return { versionId: version.id, ownershipTag, scriptETag: version.scriptETag, versionConfigurationSha256: version.versionConfigurationSha256, apiVerified: true, wranglerVersion: String(wranglerVersion).trim() };
 }
 class OwnershipRefusal extends Error {}
+function observeImmutableVersions(versions, observedVersions) {
+  for (const version of versions) {
+    const metadata = canonicalJson(version);
+    if (observedVersions.has(version.id) && observedVersions.get(version.id) !== metadata) throw new OwnershipRefusal('Refusing mutation: previously observed immutable version metadata changed');
+    observedVersions.set(version.id, metadata);
+  }
+}
 async function readOwnershipSnapshot(options) {
   try {
     const worker = await findExactWorker(options);
@@ -92,6 +99,7 @@ async function readOwnershipSnapshot(options) {
     if (!worker) throw new OwnershipRefusal('Refusing mutation: legacy-only Worker identity is inconsistent');
     if (options.expectedWorkerId !== undefined && worker.id !== options.expectedWorkerId) throw new OwnershipRefusal('Refusing mutation: immutable Worker object changed after deployment');
     const versionEvidence = await readWorkerVersions(options);
+    observeImmutableVersions(versionEvidence.versions, options.observedVersions);
     if (versionEvidence.status === 'ABSENT_ENDPOINT' && legacy) throw new OwnershipRefusal('Refusing mutation: absent versions endpoint does not prove an undeployed placeholder');
     if (versionEvidence.versions.some((version) => version.ownershipTag !== options.ownershipTag)) throw new OwnershipRefusal('Refusing mutation: immutable Worker version ownership tag is missing or mismatched');
     return { worker, legacy, versionEvidence };
@@ -126,7 +134,7 @@ export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImp
   const identity = assertPreDeploymentIdentity(preDeploymentIdentity, { trustedIdentity: trusted, context });
   if (!/^[A-Za-z0-9_-]{43}$/.test(remoteTestKey ?? '')) throw new Error('Remote test key must be a 32-byte base64url value');
   const temporaryWorkerName = assertTemporaryWorkerName(trusted.workerName), ownershipTag = trusted.ownershipTag;
-  const apiOptions = { fetchImpl, accountId, apiToken, temporaryWorkerName, ownershipTag };
+  const apiOptions = { fetchImpl, accountId, apiToken, temporaryWorkerName, ownershipTag, observedVersions: new Map() };
   // A persisted no-collision record is evidence, not authority to choose a name.
   await confirmExactAbsence(apiOptions);
   const assets = deploymentAssets(root);
@@ -140,7 +148,7 @@ export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImp
     writeFileSync(configPath, configurationBytes, 'utf8');
     const childEnvironment = { ...process.env, CLOUDFLARE_ACCOUNT_ID: accountId, CLOUDFLARE_API_TOKEN: apiToken };
     const childOptions = { encoding: 'utf8', cwd: root, env: childEnvironment, ...(process.platform === 'win32' ? { shell: true } : {}), stdio: ['pipe', 'pipe', 'pipe'] };
-    const deployArgs = ['deploy', '--config', configPath, '--tag', ownershipTag,
+    const deployArgs = ['deploy', '--config', configPath, '--tag=' + ownershipTag,
       '--var', 'DDS_REMOTE_TEST:true', '--var', 'DDS_DEPLOYMENT_BUILD_ID:' + buildId];
     try { execFile(wrangler, deployArgs, childOptions); }
     catch (firstError) {
@@ -167,7 +175,7 @@ export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImp
     try {
       verified = await verifyWorkersDeployment({ fetchImpl, accountId, scriptName: temporaryWorkerName, apiToken, expectedVersionId: versions[0].id, ownershipTag, wranglerVersion });
       const currentMetadata = { id: verified.versionId, ownershipTag: verified.ownershipTag, scriptETag: verified.scriptETag, versionConfigurationSha256: verified.versionConfigurationSha256 };
-      if (canonicalJson(currentMetadata) !== canonicalJson(versions[0])) throw new OwnershipRefusal('Refusing mutation: immutable version metadata changed after ownership verification');
+      observeImmutableVersions([currentMetadata], apiOptions.observedVersions);
     } catch (error) {
       if (error instanceof OwnershipRefusal) throw error;
       throw new OwnershipRefusal('Refusing mutation: final immutable version ownership metadata could not be verified', { cause: error });
