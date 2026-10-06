@@ -1,0 +1,211 @@
+name: Remote DDS Soak Cleanup Backstop
+run-name: 'Cleanup primary ${{ github.event.workflow_run.id }} attempt ${{ github.event.workflow_run.run_attempt }}'
+
+on:
+  workflow_run:
+    workflows: [Remote DDS Soak]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: windows-latest
+    steps:
+      - name: Inventory exact triggering-run artifacts without Cloudflare credentials
+        id: inventory
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: '${{ github.token }}'
+        run: |
+          $headers = @{ Authorization = "Bearer $env:GITHUB_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' }
+          $runId = '${{ github.event.workflow_run.id }}'
+          $runAttempt = '${{ github.event.workflow_run.run_attempt }}'
+          $identityName = "remote-dds-identity-$runId-$runAttempt"
+          $deploymentName = "remote-dds-deployment-$runId-$runAttempt"
+          $artifacts = @()
+          $page = 1
+          do {
+            $response = Invoke-RestMethod -Headers $headers -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/actions/runs/$runId/artifacts?per_page=100&page=$page"
+            $batch = @($response.artifacts)
+            $artifacts += $batch
+            $page++
+          } while ($batch.Count -eq 100)
+          $identities = @($artifacts | Where-Object { $_.name -ceq $identityName })
+          $deployments = @($artifacts | Where-Object { $_.name -ceq $deploymentName })
+          $unexpected = @($artifacts | Where-Object {
+            ($_.name.StartsWith('remote-dds-identity-', [System.StringComparison]::Ordinal) -or
+             $_.name.StartsWith('remote-dds-deployment-', [System.StringComparison]::Ordinal)) -and
+            $_.name -cne $identityName -and $_.name -cne $deploymentName
+          })
+          "identity-count=$($identities.Count)" >> $env:GITHUB_OUTPUT
+          "deployment-count=$($deployments.Count)" >> $env:GITHUB_OUTPUT
+          "unexpected-count=$($unexpected.Count)" >> $env:GITHUB_OUTPUT
+
+      - name: Authorize only one exact current-attempt identity
+        id: authorize
+        if: '${{ always() }}'
+        continue-on-error: true
+        run: |
+          if ('${{ steps.inventory.outcome }}' -ne 'success') { throw 'Artifact inventory failed closed.' }
+          $identityCount = [int]'${{ steps.inventory.outputs.identity-count }}'
+          $deploymentCount = [int]'${{ steps.inventory.outputs.deployment-count }}'
+          $unexpectedCount = [int]'${{ steps.inventory.outputs.unexpected-count }}'
+          if ($identityCount -gt 1) { throw 'More than one exact identity artifact exists.' }
+          if ($deploymentCount -gt 1) { throw 'More than one exact deployment artifact exists.' }
+          if ($unexpectedCount -ne 0) { throw 'Malformed or wrong-attempt cleanup authorization artifacts exist.' }
+          if ($identityCount -eq 0 -and $deploymentCount -gt 0) { throw 'A deployment artifact exists without its exact identity artifact.' }
+
+      - name: Record no-deployment-authorized backstop result
+        id: no_deployment
+        if: "${{ steps.inventory.outcome == 'success' && steps.authorize.outcome == 'success' && steps.inventory.outputs.identity-count == '0' && steps.inventory.outputs.deployment-count == '0' && steps.inventory.outputs.unexpected-count == '0' }}"
+        continue-on-error: true
+        run: |
+          $directory = "$env:RUNNER_TEMP\remote-dds-cleanup-result"
+          New-Item -ItemType Directory -Force $directory | Out-Null
+          [ordered]@{
+            version = 1; status = 'no-deployment-authorized'; repository = '${{ github.repository }}'; workflow = 'Remote DDS Soak'
+            runId = '${{ github.event.workflow_run.id }}'; runAttempt = '${{ github.event.workflow_run.run_attempt }}'; commitSha = '${{ github.event.workflow_run.head_sha }}'
+            workerName = $null; subdomainDisabled = $false; objectDeleted = $false; currentAbsent = $true; legacyAbsent = $true
+          } | ConvertTo-Json | Set-Content -Encoding utf8 "$directory\cleanup-result.json"
+
+      - name: Check out trusted default-branch cleanup code
+        id: checkout
+        if: "${{ steps.inventory.outcome == 'success' && steps.authorize.outcome == 'success' && steps.inventory.outputs.identity-count == '1' && steps.inventory.outputs.deployment-count <= '1' && steps.inventory.outputs.unexpected-count == '0' }}"
+        continue-on-error: true
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: '${{ github.event.workflow_run.repository.default_branch }}'
+          path: remote-dds-trusted-staging
+          persist-credentials: false
+
+      - name: Move trusted cleanup code outside the artifact workspace
+        id: move_checkout
+        if: "${{ steps.checkout.outcome == 'success' }}"
+        continue-on-error: true
+        run: |
+          $source = "$env:GITHUB_WORKSPACE\remote-dds-trusted-staging"
+          $destination = "$env:RUNNER_TEMP\remote-dds-trusted"
+          if (Test-Path -LiteralPath $destination) { throw 'Trusted cleanup destination already exists.' }
+          Move-Item -LiteralPath $source -Destination $destination
+
+      - name: Set up trusted Node.js runtime
+        id: setup_node
+        if: "${{ steps.move_checkout.outcome == 'success' }}"
+        continue-on-error: true
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 20
+
+      - name: Install trusted cleanup dependencies
+        id: install
+        if: "${{ steps.setup_node.outcome == 'success' }}"
+        continue-on-error: true
+        working-directory: '${{ runner.temp }}/remote-dds-trusted'
+        run: npm ci
+
+      - name: Download exact cleanup identity
+        id: download_identity
+        if: "${{ steps.install.outcome == 'success' && steps.inventory.outputs.identity-count == '1' }}"
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: 'remote-dds-identity-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}'
+          path: '${{ runner.temp }}/remote-dds-untrusted/${{ github.event.workflow_run.id }}/${{ github.event.workflow_run.run_attempt }}/identity'
+          run-id: '${{ github.event.workflow_run.id }}'
+          github-token: '${{ github.token }}'
+
+      - name: Download exact optional deployment record
+        id: download_deployment
+        if: "${{ steps.install.outcome == 'success' && steps.inventory.outputs.identity-count == '1' && steps.inventory.outputs.deployment-count == '1' }}"
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: 'remote-dds-deployment-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}'
+          path: '${{ runner.temp }}/remote-dds-untrusted/${{ github.event.workflow_run.id }}/${{ github.event.workflow_run.run_attempt }}/deployment'
+          run-id: '${{ github.event.workflow_run.id }}'
+          github-token: '${{ github.token }}'
+
+      - name: Derive trusted cleanup ownership
+        id: derive
+        if: "${{ steps.download_identity.outcome == 'success' && (steps.inventory.outputs.deployment-count == '0' || steps.download_deployment.outcome == 'success') && steps.inventory.outputs.identity-count == '1' }}"
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: '${{ secrets.CLOUDFLARE_API_TOKEN }}'
+        run: '& node "$env:RUNNER_TEMP\remote-dds-trusted\scripts\remote-dds-ci-identity.mjs" --derive --repository "${{ github.repository }}" --workflow "Remote DDS Soak" --run-id "${{ github.event.workflow_run.id }}" --run-attempt "${{ github.event.workflow_run.run_attempt }}" --commit-sha "${{ github.event.workflow_run.head_sha }}" --github-env "$env:GITHUB_ENV" --identity-out "$env:RUNNER_TEMP\remote-dds-trusted-identity.json"'
+
+      - name: Clean exact authorized temporary Worker
+        id: cleanup_worker
+        if: "${{ steps.derive.outcome == 'success' && steps.inventory.outputs.identity-count == '1' && (steps.inventory.outputs.deployment-count == '0' || steps.download_deployment.outcome == 'success') }}"
+        continue-on-error: true
+        env:
+          CLOUDFLARE_ACCOUNT_ID: '${{ secrets.CLOUDFLARE_ACCOUNT_ID }}'
+          CLOUDFLARE_API_TOKEN: '${{ secrets.CLOUDFLARE_API_TOKEN }}'
+          DDS_REMOTE_TEST_KEY: ''
+        run: |
+          $directory = "$env:RUNNER_TEMP\remote-dds-cleanup-result"
+          New-Item -ItemType Directory -Force $directory | Out-Null
+          $arguments = @("$env:RUNNER_TEMP\remote-dds-trusted\scripts\cleanup-remote-dds-deployment.mjs", '--identity', "$env:RUNNER_TEMP\remote-dds-untrusted\${{ github.event.workflow_run.id }}\${{ github.event.workflow_run.run_attempt }}\identity\predeployment-identity.json", '--repository', '${{ github.repository }}', '--workflow', 'Remote DDS Soak', '--run-id', '${{ github.event.workflow_run.id }}', '--run-attempt', '${{ github.event.workflow_run.run_attempt }}', '--commit-sha', '${{ github.event.workflow_run.head_sha }}', '--out', "$directory\cleanup-result.json")
+          if ('${{ steps.inventory.outputs.deployment-count }}' -eq '1') { $arguments += @('--deployment-record', "$env:RUNNER_TEMP\remote-dds-untrusted\${{ github.event.workflow_run.id }}\${{ github.event.workflow_run.run_attempt }}\deployment\deployment.json") }
+          & node @arguments
+          exit $LASTEXITCODE
+
+      - name: Ensure exact cleanup result schema or write failed fallback
+        id: result
+        if: '${{ always() }}'
+        continue-on-error: true
+        env:
+          DDS_REMOTE_TEST_KEY: ''
+        run: |
+          $directory = "$env:RUNNER_TEMP\remote-dds-cleanup-result"
+          $path = "$directory\cleanup-result.json"
+          $fields = @('version', 'status', 'repository', 'workflow', 'runId', 'runAttempt', 'commitSha', 'workerName', 'subdomainDisabled', 'objectDeleted', 'currentAbsent', 'legacyAbsent')
+          function Write-FailedResult {
+            New-Item -ItemType Directory -Force $directory | Out-Null
+            [ordered]@{
+              version = 1; status = 'failed'; repository = '${{ github.repository }}'; workflow = 'Remote DDS Soak'
+              runId = '${{ github.event.workflow_run.id }}'; runAttempt = '${{ github.event.workflow_run.run_attempt }}'; commitSha = '${{ github.event.workflow_run.head_sha }}'
+              workerName = $null; subdomainDisabled = $false; objectDeleted = $false; currentAbsent = $false; legacyAbsent = $false
+            } | ConvertTo-Json | Set-Content -Encoding utf8 $path
+          }
+          if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { Write-FailedResult; return }
+          try {
+            $result = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
+            $actualFields = @($result.PSObject.Properties.Name | Sort-Object)
+            $expectedFields = @($fields | Sort-Object)
+            if (Compare-Object $actualFields $expectedFields) { throw 'Cleanup result fields are not exact.' }
+            if ($result.version -ne 1 -or $result.status -notin @('no-deployment-authorized', 'failed', 'deleted', 'already-absent')) { throw 'Cleanup result version or status is invalid.' }
+            if ($result.repository -cne '${{ github.repository }}' -or $result.workflow -cne 'Remote DDS Soak' -or
+                [string]$result.runId -cne '${{ github.event.workflow_run.id }}' -or [string]$result.runAttempt -cne '${{ github.event.workflow_run.run_attempt }}' -or
+                $result.commitSha -cne '${{ github.event.workflow_run.head_sha }}') { throw 'Cleanup result context is not the triggering event.' }
+            foreach ($field in @('subdomainDisabled', 'objectDeleted', 'currentAbsent', 'legacyAbsent')) {
+              if ($result.$field -isnot [bool]) { throw "Cleanup result $field is not boolean." }
+            }
+            if ($null -ne $result.workerName -and $result.workerName -isnot [string]) { throw 'Cleanup result workerName is invalid.' }
+            if ($result.status -eq 'no-deployment-authorized' -and ($null -ne $result.workerName -or $result.subdomainDisabled -or $result.objectDeleted -or -not $result.currentAbsent -or -not $result.legacyAbsent)) { throw 'No-deployment result has unsafe values.' }
+          } catch {
+            Write-FailedResult
+            throw 'Cleanup result validation failed; uploaded a failed fallback.'
+          }
+
+      - name: Upload backstop cleanup result
+        id: upload_cleanup
+        if: '${{ always() }}'
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        env:
+          DDS_REMOTE_TEST_KEY: ''
+        with:
+          name: 'remote-dds-backstop-cleanup-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}'
+          path: '${{ runner.temp }}/remote-dds-cleanup-result/cleanup-result.json'
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Re-propagate inventory, authorization, or cleanup failure
+        id: repropagate
+        if: "${{ always() && (steps.inventory.outcome == 'failure' || steps.authorize.outcome == 'failure' || steps.no_deployment.outcome == 'failure' || steps.checkout.outcome == 'failure' || steps.move_checkout.outcome == 'failure' || steps.setup_node.outcome == 'failure' || steps.install.outcome == 'failure' || steps.download_identity.outcome == 'failure' || steps.download_deployment.outcome == 'failure' || steps.derive.outcome == 'failure' || steps.cleanup_worker.outcome == 'failure' || steps.result.outcome == 'failure' || steps.upload_cleanup.outcome == 'failure') }}"
+        env:
+          DDS_REMOTE_TEST_KEY: ''
+        run: throw 'Remote DDS backstop cleanup failed after result publication.'

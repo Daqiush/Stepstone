@@ -10,6 +10,7 @@ const YAML = require('yaml');
 
 const ROOT = resolve(__dirname, '..');
 const WORKFLOW_PATH = resolve(ROOT, '.github/workflows/remote-dds-soak.yml');
+const CLEANUP_WORKFLOW_PATH = resolve(ROOT, '.github/workflows/remote-dds-soak-cleanup.yml');
 const APPROVED_ACTIONS = new Set([
   'actions/checkout@11d5960a326750d5838078e36cf38b85af677262',
   'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
@@ -25,6 +26,12 @@ function loadWorkflow() {
   const source = readFileSync(WORKFLOW_PATH, 'utf8');
   const workflow = YAML.parse(source);
   assert.ok(workflow && typeof workflow === 'object' && !Array.isArray(workflow), 'workflow must parse as a mapping');
+  return { source, workflow };
+}
+function loadCleanupWorkflow() {
+  const source = readFileSync(CLEANUP_WORKFLOW_PATH, 'utf8');
+  const workflow = YAML.parse(source);
+  assert.ok(workflow && typeof workflow === 'object' && !Array.isArray(workflow), 'cleanup workflow must parse as a mapping');
   return { source, workflow };
 }
 function steps(job) {
@@ -304,4 +311,204 @@ test('the exported remote key is masked from every later step that does not cons
       }
     }
   }
+});
+
+const cleanupExpression = (body) => '${{ ' + body + ' }}';
+const cleanupArtifact = (kind) => `remote-dds-${kind}-${cleanupExpression('github.event.workflow_run.id')}-${cleanupExpression('github.event.workflow_run.run_attempt')}`;
+const CLEANUP_TRUSTED = cleanupExpression('runner.temp') + '/remote-dds-trusted';
+const CLEANUP_UNTRUSTED = cleanupExpression('runner.temp') + '/remote-dds-untrusted/'
+  + cleanupExpression('github.event.workflow_run.id') + '/' + cleanupExpression('github.event.workflow_run.run_attempt');
+
+function cleanupJob(workflow) {
+  assert.deepEqual(Object.keys(workflow.jobs), ['cleanup'], 'backstop must have one cleanup job');
+  return workflow.jobs.cleanup;
+}
+
+function cleanupStep(job, id) {
+  const step = steps(job).find((candidate) => candidate.id === id);
+  assert.ok(step, `missing cleanup step ${id}`);
+  return step;
+}
+
+function exactCleanupContext(command) {
+  for (const [flag, value] of [
+    ['--repository', cleanupExpression('github.repository')],
+    ['--workflow', 'Remote DDS Soak'],
+    ['--run-id', cleanupExpression('github.event.workflow_run.id')],
+    ['--run-attempt', cleanupExpression('github.event.workflow_run.run_attempt')],
+    ['--commit-sha', cleanupExpression('github.event.workflow_run.head_sha')],
+  ]) {
+    const escapedFlag = flag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const escapedValue = value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    assert.match(command, new RegExp(`${escapedFlag}[^\\r\\n]{0,32}${escapedValue}`));
+  }
+}
+
+test('backstop is completed-workflow-only with minimum permissions and pinned actions', () => {
+  const { workflow } = loadCleanupWorkflow();
+  assert.equal(workflow['run-name'], `Cleanup primary ${cleanupExpression('github.event.workflow_run.id')} attempt ${cleanupExpression('github.event.workflow_run.run_attempt')}`);
+  assert.deepEqual(Object.keys(workflow.on), ['workflow_run']);
+  assert.deepEqual(workflow.on.workflow_run, { workflows: ['Remote DDS Soak'], types: ['completed'] });
+  for (const forbidden of ['push', 'pull_request', 'schedule', 'workflow_dispatch']) assert.equal(workflow.on[forbidden], undefined);
+  assert.deepEqual(workflow.permissions, { actions: 'read', contents: 'read' });
+  const job = cleanupJob(workflow);
+  assert.equal(job['runs-on'], 'windows-latest');
+  assert.equal(job.permissions, undefined, 'job may not broaden workflow permissions');
+  for (const step of steps(job)) {
+    if (step.uses !== undefined) assert.ok(APPROVED_ACTIONS.has(step.uses), `unapproved action: ${step.uses}`);
+  }
+});
+
+test('backstop inventories first and isolates trusted code from untrusted artifacts', () => {
+  const { source, workflow } = loadCleanupWorkflow();
+  const job = cleanupJob(workflow);
+  const inventory = cleanupStep(job, 'inventory');
+  const checkoutIndex = steps(job).findIndex((step) => step.uses === 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262');
+  const moveIndex = steps(job).findIndex((step) => /Move-Item/.test(runText(step)) && /remote-dds-trusted/.test(runText(step)));
+  const downloadIndexes = steps(job).flatMap((step, index) => step.uses === DOWNLOAD ? [index] : []);
+  assert.equal(steps(job).indexOf(inventory), 0, 'token-free inventory must be the first step');
+  assert.ok(checkoutIndex > 0 && moveIndex > checkoutIndex);
+  assert.ok(downloadIndexes.length >= 1 && downloadIndexes.every((index) => index > moveIndex), 'trusted checkout must move before downloads');
+  const checkout = steps(job)[checkoutIndex];
+  assert.equal(checkout.with.ref, cleanupExpression('github.event.workflow_run.repository.default_branch'));
+  assert.equal(checkout.with.path, 'remote-dds-trusted-staging');
+  assert.equal(checkout.with['persist-credentials'], false);
+  assert.doesNotMatch(JSON.stringify(checkout), /head_sha|workflow_run\.head_repository|github\.sha/);
+  assert.match(runText(steps(job)[moveIndex]), /GITHUB_WORKSPACE[\\/]remote-dds-trusted-staging/i);
+  assert.match(runText(steps(job)[moveIndex]), /RUNNER_TEMP[\\/]remote-dds-trusted/i);
+  const install = cleanupStep(job, 'install');
+  assert.equal(install['working-directory'], CLEANUP_TRUSTED);
+  const setup = steps(job).find((step) => step.uses === 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020');
+  assert.equal(setup.with['node-version'], 20);
+  for (const download of steps(job).filter((step) => step.uses === DOWNLOAD)) {
+    assert.ok(download.with.path.startsWith(CLEANUP_UNTRUSTED + '/'), `download escaped untrusted root: ${download.with.path}`);
+    assert.equal(download.with.path.includes('remote-dds-trusted'), false);
+  }
+  assert.equal(source.includes(CLEANUP_UNTRUSTED + '/../'), false);
+});
+
+test('backstop inventory derives exact current-attempt authorization and no-deployment evidence from the event', () => {
+  const { workflow } = loadCleanupWorkflow();
+  const job = cleanupJob(workflow);
+  const inventory = cleanupStep(job, 'inventory');
+  assert.equal(inventory.env.CLOUDFLARE_API_TOKEN, undefined);
+  assert.equal(inventory.env.CLOUDFLARE_ACCOUNT_ID, undefined);
+  assert.equal(inventory.env.GITHUB_TOKEN, cleanupExpression('github.token'));
+  assert.match(runText(inventory), /github\.event\.workflow_run\.id/);
+  assert.match(runText(inventory), /github\.event\.workflow_run\.run_attempt/);
+  assert.match(runText(inventory), /actions\/runs\/.+\/artifacts\?per_page=100&page=\$page/);
+  assert.match(runText(inventory), /do\s*\{/i);
+  assert.match(runText(inventory), /while\s*\(\$batch\.Count\s*-eq\s*100\)/i);
+  assert.match(runText(inventory), /remote-dds-identity-\$runId-\$runAttempt/);
+  assert.match(runText(inventory), /remote-dds-deployment-\$runId-\$runAttempt/);
+  for (const output of ['identity-count', 'deployment-count', 'unexpected-count']) assert.match(runText(inventory), new RegExp(`['"]?${output}=`));
+  const authorize = cleanupStep(job, 'authorize');
+  assert.equal(authorize['continue-on-error'], true);
+  assert.match(runText(authorize), /identity-count/);
+  assert.match(runText(authorize), /deployment-count/);
+  assert.match(runText(authorize), /unexpected-count/);
+  assert.match(runText(authorize), /\$identityCount\s+-gt\s+1/i);
+  assert.match(runText(authorize), /\$deploymentCount\s+-gt\s+1/i);
+  assert.match(runText(authorize), /\$identityCount\s+-eq\s+0[^\r\n]*\$deploymentCount\s+-gt\s+0/i);
+  const absent = cleanupStep(job, 'no_deployment');
+  assert.match(absent.if, /steps\.inventory\.outcome == 'success'/);
+  assert.match(absent.if, /steps\.authorize\.outcome == 'success'/);
+  assert.match(absent.if, /identity-count == '0'/);
+  assert.match(absent.if, /deployment-count == '0'/);
+  assert.match(absent.if, /unexpected-count == '0'/);
+  assert.equal(absent.env?.CLOUDFLARE_API_TOKEN, undefined);
+  assert.equal(absent.env?.CLOUDFLARE_ACCOUNT_ID, undefined);
+  for (const [field, value] of [
+    ['version', '1'], ['status', "'no-deployment-authorized'"], ['repository', `'${cleanupExpression('github.repository')}'`],
+    ['workflow', "'Remote DDS Soak'"], ['runId', `'${cleanupExpression('github.event.workflow_run.id')}'`],
+    ['runAttempt', `'${cleanupExpression('github.event.workflow_run.run_attempt')}'`],
+    ['commitSha', `'${cleanupExpression('github.event.workflow_run.head_sha')}'`], ['workerName', '$null'],
+    ['subdomainDisabled', '$false'], ['objectDeleted', '$false'], ['currentAbsent', '$true'], ['legacyAbsent', '$true'],
+  ]) assert.ok(runText(absent).includes(`${field} = ${value}`), `no-deployment result has wrong ${field}`);
+});
+
+test('backstop downloads only exact triggering-run artifacts into the untrusted root', () => {
+  const { workflow } = loadCleanupWorkflow();
+  const job = cleanupJob(workflow);
+  const identity = cleanupStep(job, 'download_identity');
+  const deployment = cleanupStep(job, 'download_deployment');
+  assert.deepEqual(identity.with, {
+    name: cleanupArtifact('identity'),
+    path: CLEANUP_UNTRUSTED + '/identity',
+    'run-id': cleanupExpression('github.event.workflow_run.id'),
+    'github-token': cleanupExpression('github.token'),
+  });
+  assert.deepEqual(deployment.with, {
+    name: cleanupArtifact('deployment'),
+    path: CLEANUP_UNTRUSTED + '/deployment',
+    'run-id': cleanupExpression('github.event.workflow_run.id'),
+    'github-token': cleanupExpression('github.token'),
+  });
+  assert.match(identity.if, /identity-count == '1'/);
+  assert.match(deployment.if, /deployment-count == '1'/);
+  assert.doesNotMatch(JSON.stringify([identity.with, deployment.with]), /steps\.inventory\.outputs\.(?:identity|deployment)-name|newest|pattern|merge-multiple/i);
+});
+
+test('backstop recomputes ownership with trusted code and scopes Cloudflare secrets to authorized steps', () => {
+  const { source, workflow } = loadCleanupWorkflow();
+  const job = cleanupJob(workflow);
+  const derive = cleanupStep(job, 'derive');
+  const cleanup = cleanupStep(job, 'cleanup_worker');
+  assert.equal(derive.env.CLOUDFLARE_API_TOKEN, cleanupExpression('secrets.CLOUDFLARE_API_TOKEN'));
+  assert.equal(derive.env.CLOUDFLARE_ACCOUNT_ID, undefined);
+  assert.match(derive.if, /identity-count == '1'/);
+  assert.match(runText(derive), /RUNNER_TEMP[\\/]remote-dds-trusted[\\/]scripts[\\/]remote-dds-ci-identity\.mjs/i);
+  exactCleanupContext(runText(derive));
+  assert.match(runText(derive), /--identity-out\s+"?\$env:RUNNER_TEMP[\\/]remote-dds-trusted-identity\.json"?/i);
+  assert.equal(cleanup['continue-on-error'], true);
+  assert.equal(cleanup.env.CLOUDFLARE_API_TOKEN, cleanupExpression('secrets.CLOUDFLARE_API_TOKEN'));
+  assert.equal(cleanup.env.CLOUDFLARE_ACCOUNT_ID, cleanupExpression('secrets.CLOUDFLARE_ACCOUNT_ID'));
+  assert.equal(cleanup.env.DDS_REMOTE_TEST_KEY, '');
+  assert.match(cleanup.if, /identity-count == '1'/);
+  assert.match(runText(cleanup), /RUNNER_TEMP[\\/]remote-dds-trusted[\\/]scripts[\\/]cleanup-remote-dds-deployment\.mjs/i);
+  assert.match(runText(cleanup), /--identity[^\r\n]*RUNNER_TEMP[\\/]remote-dds-untrusted/i);
+  assert.match(runText(cleanup), /--deployment-record[^\r\n]*RUNNER_TEMP[\\/]remote-dds-untrusted/i);
+  exactCleanupContext(runText(cleanup));
+  assert.doesNotMatch(runText(cleanup), /Invoke-Expression|Import-Module|\.\s+[^\r\n]*\.json|&\s+[^\r\n]*\.json|Get-Content|ConvertFrom-Json/i);
+  const secretSteps = steps(job).filter((step) => step.env?.CLOUDFLARE_API_TOKEN !== undefined);
+  assert.deepEqual(secretSteps.map((step) => step.id), ['derive', 'cleanup_worker']);
+  assert.equal((source.match(/secrets\.CLOUDFLARE_API_TOKEN/g) ?? []).length, 2);
+  assert.equal((source.match(/secrets\.CLOUDFLARE_ACCOUNT_ID/g) ?? []).length, 1);
+  const deriveIndex = steps(job).indexOf(derive);
+  for (const step of steps(job).slice(deriveIndex + 1)) {
+    if (step.run !== undefined || step.uses !== undefined) assert.equal(step.env?.DDS_REMOTE_TEST_KEY, '', `${step.id ?? step.name} must mask DDS_REMOTE_TEST_KEY`);
+  }
+});
+
+test('backstop always publishes a validated result and re-propagates every operational failure', () => {
+  const { workflow } = loadCleanupWorkflow();
+  const job = cleanupJob(workflow);
+  const result = cleanupStep(job, 'result');
+  const upload = cleanupStep(job, 'upload_cleanup');
+  const reprop = cleanupStep(job, 'repropagate');
+  assert.equal(result.if, cleanupExpression('always()'));
+  assert.equal(result['continue-on-error'], true);
+  assert.equal(result.env.DDS_REMOTE_TEST_KEY, '');
+  assert.match(runText(result), /status\s*=\s*'failed'/);
+  for (const field of ['version', 'status', 'repository', 'workflow', 'runId', 'runAttempt', 'commitSha', 'workerName', 'subdomainDisabled', 'objectDeleted', 'currentAbsent', 'legacyAbsent']) {
+    assert.match(runText(result), new RegExp(`['"]?${field}['"]?`));
+  }
+  assert.match(runText(result), /github\.event\.workflow_run\.head_sha/);
+  assert.match(runText(result), /ConvertFrom-Json/);
+  assert.equal(upload.if, cleanupExpression('always()'));
+  assert.equal(upload['continue-on-error'], true);
+  assert.equal(upload.env.DDS_REMOTE_TEST_KEY, '');
+  assert.deepEqual(upload.with, {
+    name: cleanupArtifact('backstop-cleanup'),
+    path: cleanupExpression('runner.temp') + '/remote-dds-cleanup-result/cleanup-result.json',
+    'if-no-files-found': 'error',
+    'retention-days': 30,
+  });
+  assert.equal(reprop, steps(job).at(-1), 'failure propagation must be final');
+  assert.equal(reprop.env.DDS_REMOTE_TEST_KEY, '');
+  assert.match(reprop.if, /always\(\)/);
+  for (const id of ['inventory', 'authorize', 'checkout', 'install', 'download_identity', 'download_deployment', 'derive', 'cleanup_worker', 'result', 'upload_cleanup']) {
+    assert.match(reprop.if, new RegExp(`steps\\.${id}\\.outcome == 'failure'`), `missing ${id} failure propagation`);
+  }
+  assert.match(runText(reprop), /throw/);
 });
