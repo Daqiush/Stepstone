@@ -1,8 +1,10 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const { readFileSync } = require('node:fs');
-const { resolve } = require('node:path');
+const { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require('node:fs');
+const { tmpdir } = require('node:os');
+const { dirname, join, resolve } = require('node:path');
+const { spawnSync } = require('node:child_process');
 const { test } = require('node:test');
 const YAML = require('yaml');
 
@@ -164,6 +166,31 @@ test('gate consumes only state-6 and publishes fixed failure-safe evidence', () 
   assert.match(steps(gate).at(-1).if, /steps\.(checker|evidence|upload_evidence)\.outcome == 'failure'/);
 });
 
+test('final-evidence builder preserves every available file before reporting missing evidence', () => {
+  const { workflow } = loadWorkflow();
+  const build = findRun(workflow.jobs.gate, /final-evidence/);
+  const root = mkdtempSync(join(tmpdir(), 'remote-dds-final-evidence-'));
+  const available = [
+    'deployment/deployment.json', 'state-6/state-manifest.json', 'state-6/run/manifest.json',
+    'state-6/run/journal.jsonl', 'state-6/run/report.json', 'state-6/run/evidence.json',
+    'state-6/run/segment-result.json', 'gate/simulator-report.json', 'gate/stdout.log', 'gate/stderr.log',
+  ];
+  try {
+    for (const path of available) {
+      const absolute = join(root, ...path.split('/'));
+      mkdirSync(dirname(absolute), { recursive: true });
+      writeFileSync(absolute, `evidence:${path}`);
+    }
+    const shell = process.platform === 'win32' ? 'powershell.exe' : 'pwsh';
+    const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-Command', build.run], { cwd: root, encoding: 'utf8' });
+    assert.notEqual(result.status, 0, result.stdout + result.stderr);
+    for (const path of available) {
+      const copied = join(root, 'final-evidence', ...path.split('/'));
+      assert.equal(existsSync(copied), true, `available evidence was not preserved: ${path}`);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('artifact names, retention, and download cardinality are exact', () => {
   const { workflow } = loadWorkflow();
   const expected = [artifact('identity'), artifact('deployment'), ...Array.from({ length: 7 }, (_, index) => artifact('state', `-${index}`)), artifact('final-evidence'), artifact('primary-cleanup')];
@@ -206,6 +233,31 @@ test('cleanup lists artifacts before secret use and covers authorized and absent
   assert.deepEqual(upload.with, { name: artifact('primary-cleanup'), path: 'cleanup/cleanup-result.json', 'if-no-files-found': 'error', 'retention-days': 30 });
 });
 
+test('cleanup inventories every attempt and fails closed when a prior attempt authorized deployment', () => {
+  const { workflow } = loadWorkflow();
+  const cleanup = workflow.jobs.cleanup;
+  const inventory = steps(cleanup)[0];
+  assert.match(runText(inventory), /do\s*\{/i, 'artifact inventory must paginate');
+  assert.match(runText(inventory), /[?&]per_page=100&page=\$page/i);
+  assert.match(runText(inventory), /remote-dds-identity-\$env:GITHUB_RUN_ID-\(\?<attempt>\\d\+\)/);
+  assert.match(runText(inventory), /remote-dds-deployment-\$env:GITHUB_RUN_ID-\(\?<attempt>\\d\+\)/);
+  for (const output of ['identity-count', 'deployment-count', 'prior-identity-count', 'prior-deployment-count']) {
+    assert.match(runText(inventory), new RegExp(`['"]?${output}=`));
+  }
+  const reject = findRun(cleanup, /Reject ambiguous cleanup authorization/);
+  assert.match(runText(reject), /prior-(?:identity|deployment)-count/);
+  assert.match(runText(reject), /restore|rollback|backstop/i, 'failure must explain how cleanup can be recovered');
+  const absent = findRun(cleanup, /no-deployment-authorized/);
+  assert.match(absent.if, /identity-count == '0'/);
+  assert.match(absent.if, /prior-identity-count == '0'/);
+  assert.match(absent.if, /prior-deployment-count == '0'/);
+  const result = findRun(cleanup, /Ensure cleanup result/);
+  const upload = steps(cleanup).find((step) => step.uses === UPLOAD);
+  assert.equal(result.if, expression('always()'));
+  assert.equal(upload.if, expression('always()'));
+  assert.match(steps(cleanup).at(-1).if, /steps\.reject\.outcome == 'failure'/);
+});
+
 test('Cloudflare token is step-scoped to derivation, deployment, and cleanup only', () => {
   const { source, workflow } = loadWorkflow();
   assert.equal(workflow.env?.CLOUDFLARE_API_TOKEN, undefined);
@@ -223,4 +275,22 @@ test('Cloudflare token is step-scoped to derivation, deployment, and cleanup onl
     }
   }
   assert.equal((source.match(/secrets\.CLOUDFLARE_API_TOKEN/g) ?? []).length, tokenSteps.length, 'secret references must only occur in step env maps');
+});
+
+test('the exported remote key is masked from every later step that does not consume it', () => {
+  const { workflow } = loadWorkflow();
+  for (const [jobName, job] of Object.entries(workflow.jobs)) {
+    const deriveIndex = steps(job).findIndex((step) => /remote-dds-ci-identity\.mjs[^\r\n]*--derive/.test(runText(step)));
+    if (deriveIndex === -1) continue;
+    for (const step of steps(job).slice(deriveIndex + 1)) {
+      const consumesKey = jobName === 'prepare'
+        ? /prepare-remote-dds-deployment\.mjs[^\r\n]*--deploy-from-identity/.test(runText(step))
+        : /^segment-\d+$/.test(jobName) && /remote-worker-dds-soak\.mjs/.test(runText(step));
+      if (consumesKey) {
+        assert.notEqual(step.env?.DDS_REMOTE_TEST_KEY, '', `${jobName}/${step.name} must receive the derived key`);
+      } else if (step.run !== undefined || step.uses !== undefined) {
+        assert.equal(step.env?.DDS_REMOTE_TEST_KEY, '', `${jobName}/${step.name} must mask the exported key`);
+      }
+    }
+  }
 });

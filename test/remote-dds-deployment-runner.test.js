@@ -133,6 +133,27 @@ test('preflight is read-only, queries exact name and both complete listings, and
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 
+test('Wrangler child processes do not inherit the exported remote test key', async () => {
+  const previous = process.env.DDS_REMOTE_TEST_KEY;
+  process.env.DDS_REMOTE_TEST_KEY = 'job-exported-key';
+  const f = await deploymentFixture(); const children = [];
+  try {
+    await f.mod.deployAndVerifyWorkers({ ...f.options,
+      execFile: (command, args, options) => {
+        children.push({ args: [...args], env: options.env, input: options.input });
+        return f.execFile(command, args, options);
+      },
+    });
+    assert.ok(children.length >= 3);
+    for (const child of children) assert.equal(Object.hasOwn(child.env, 'DDS_REMOTE_TEST_KEY'), false, `key leaked to ${child.args.join(' ')}`);
+    assert.equal(children.find((child) => child.args[1] === 'secret').input, KEY + '\n');
+  } finally {
+    if (previous === undefined) delete process.env.DDS_REMOTE_TEST_KEY;
+    else process.env.DDS_REMOTE_TEST_KEY = previous;
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
 test('an exact-name collision rejects immediately with zero deployment or deletion', async () => {
   const mod = await deployment(); const identity = await ciIdentity(); let reads = 0, mutations = 0;
   await assert.rejects(() => mod.preflightTemporaryWorkerIdentity({ accountId: 'acct', apiToken: TOKEN, identity, context: CONTEXT,

@@ -158,6 +158,17 @@ test('gate checker writes failed gates before preserving its nonzero exit', asyn
   assert.equal(result.gateResult.runAttempt, '2');
 });
 
+test('gate checker preserves fixed nullable identity fields for a malformed deployment', async () => {
+  const run = await validRun();
+  delete run.deployment.identity;
+  const result = check(run, { output: true });
+  assert.notEqual(result.status, 0, result.stdout);
+  assert.deepEqual(Object.keys(result.gateResult), ['version', 'runId', 'runAttempt', 'gates']);
+  assert.equal(result.gateResult.runId, null);
+  assert.equal(result.gateResult.runAttempt, null);
+  assert.deepEqual(result.gateResult.gates.find((gate) => gate.name === 'deployment'), { name: 'deployment', passed: false });
+});
+
 test('gate checker fails if its requested result cannot be atomically written', async () => {
   const result = check(await validRun(), { outputDirectory: true });
   assert.notEqual(result.status, 0, result.stdout);

@@ -216,8 +216,8 @@ function runCli() {
   for (const gate of gates) console.log(`${gate.passed ? 'PASS' : 'FAIL'} ${gate.name}`);
   if (outputPath) writeReportCheckpoint(resolve(process.cwd(), outputPath), {
     version: 1,
-    runId: deployment?.identity?.runId,
-    runAttempt: deployment?.identity?.runAttempt,
+    runId: deployment?.identity?.runId ?? null,
+    runAttempt: deployment?.identity?.runAttempt ?? null,
     gates,
   });
   if (gates.some((gate) => !gate.passed)) process.exitCode = 1;

@@ -110,6 +110,7 @@ export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImp
   try {
     writeFileSync(configPath, configurationBytes, 'utf8');
     const childEnvironment = { ...process.env, CLOUDFLARE_ACCOUNT_ID: accountId, CLOUDFLARE_API_TOKEN: apiToken };
+    delete childEnvironment.DDS_REMOTE_TEST_KEY;
     const childOptions = { encoding: 'utf8', cwd: root, env: childEnvironment, ...(process.platform === 'win32' ? { shell: true } : {}), stdio: ['pipe', 'pipe', 'pipe'] };
     const deployArgs = ['deploy', '--config', configPath, '--tag=' + ownershipTag,
       '--var', 'DDS_REMOTE_TEST:true', '--var', 'DDS_DEPLOYMENT_BUILD_ID:' + buildId];
