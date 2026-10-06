@@ -332,7 +332,7 @@ function cleanupStep(job, id) {
 
 function exactCleanupContext(command) {
   for (const [flag, value] of [
-    ['--repository', cleanupExpression('github.repository')],
+    ['--repository', cleanupExpression('github.event.repository.full_name')],
     ['--workflow', 'Remote DDS Soak'],
     ['--run-id', cleanupExpression('github.event.workflow_run.id')],
     ['--run-attempt', cleanupExpression('github.event.workflow_run.run_attempt')],
@@ -370,10 +370,10 @@ test('backstop inventories first and isolates trusted code from untrusted artifa
   assert.ok(checkoutIndex > 0 && moveIndex > checkoutIndex);
   assert.ok(downloadIndexes.length >= 1 && downloadIndexes.every((index) => index > moveIndex), 'trusted checkout must move before downloads');
   const checkout = steps(job)[checkoutIndex];
-  assert.equal(checkout.with.ref, cleanupExpression('github.event.workflow_run.repository.default_branch'));
+  assert.equal(checkout.with.ref, cleanupExpression('github.event.repository.default_branch'));
   assert.equal(checkout.with.path, 'remote-dds-trusted-staging');
   assert.equal(checkout.with['persist-credentials'], false);
-  assert.doesNotMatch(JSON.stringify(checkout), /head_sha|workflow_run\.head_repository|github\.sha/);
+  assert.doesNotMatch(JSON.stringify(checkout), /head_sha|workflow_run\.head_repository|workflow_run\.repository|github\.sha/);
   assert.match(runText(steps(job)[moveIndex]), /GITHUB_WORKSPACE[\\/]remote-dds-trusted-staging/i);
   assert.match(runText(steps(job)[moveIndex]), /RUNNER_TEMP[\\/]remote-dds-trusted/i);
   const install = cleanupStep(job, 'install');
@@ -385,6 +385,7 @@ test('backstop inventories first and isolates trusted code from untrusted artifa
     assert.equal(download.with.path.includes('remote-dds-trusted'), false);
   }
   assert.equal(source.includes(CLEANUP_UNTRUSTED + '/../'), false);
+  assert.doesNotMatch(source, /github\.event\.workflow_run\.repository\.default_branch|github\.repository|GITHUB_REPOSITORY/);
 });
 
 test('backstop inventory derives exact current-attempt authorization and no-deployment evidence from the event', () => {
@@ -394,6 +395,8 @@ test('backstop inventory derives exact current-attempt authorization and no-depl
   assert.equal(inventory.env.CLOUDFLARE_API_TOKEN, undefined);
   assert.equal(inventory.env.CLOUDFLARE_ACCOUNT_ID, undefined);
   assert.equal(inventory.env.GITHUB_TOKEN, cleanupExpression('github.token'));
+  assert.equal(inventory.env.PRIMARY_REPOSITORY, cleanupExpression('github.event.repository.full_name'));
+  assert.match(runText(inventory), /repos\/\$env:PRIMARY_REPOSITORY\/actions\/runs/);
   assert.match(runText(inventory), /github\.event\.workflow_run\.id/);
   assert.match(runText(inventory), /github\.event\.workflow_run\.run_attempt/);
   assert.match(runText(inventory), /actions\/runs\/.+\/artifacts\?per_page=100&page=\$page/);
@@ -419,7 +422,7 @@ test('backstop inventory derives exact current-attempt authorization and no-depl
   assert.equal(absent.env?.CLOUDFLARE_API_TOKEN, undefined);
   assert.equal(absent.env?.CLOUDFLARE_ACCOUNT_ID, undefined);
   for (const [field, value] of [
-    ['version', '1'], ['status', "'no-deployment-authorized'"], ['repository', `'${cleanupExpression('github.repository')}'`],
+    ['version', '1'], ['status', "'no-deployment-authorized'"], ['repository', `'${cleanupExpression('github.event.repository.full_name')}'`],
     ['workflow', "'Remote DDS Soak'"], ['runId', `'${cleanupExpression('github.event.workflow_run.id')}'`],
     ['runAttempt', `'${cleanupExpression('github.event.workflow_run.run_attempt')}'`],
     ['commitSha', `'${cleanupExpression('github.event.workflow_run.head_sha')}'`], ['workerName', '$null'],

@@ -19,6 +19,7 @@ jobs:
         continue-on-error: true
         env:
           GITHUB_TOKEN: '${{ github.token }}'
+          PRIMARY_REPOSITORY: '${{ github.event.repository.full_name }}'
         run: |
           $headers = @{ Authorization = "Bearer $env:GITHUB_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' }
           $runId = '${{ github.event.workflow_run.id }}'
@@ -28,7 +29,7 @@ jobs:
           $artifacts = @()
           $page = 1
           do {
-            $response = Invoke-RestMethod -Headers $headers -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/actions/runs/$runId/artifacts?per_page=100&page=$page"
+            $response = Invoke-RestMethod -Headers $headers -Uri "https://api.github.com/repos/$env:PRIMARY_REPOSITORY/actions/runs/$runId/artifacts?per_page=100&page=$page"
             $batch = @($response.artifacts)
             $artifacts += $batch
             $page++
@@ -66,7 +67,7 @@ jobs:
           $directory = "$env:RUNNER_TEMP\remote-dds-cleanup-result"
           New-Item -ItemType Directory -Force $directory | Out-Null
           [ordered]@{
-            version = 1; status = 'no-deployment-authorized'; repository = '${{ github.repository }}'; workflow = 'Remote DDS Soak'
+            version = 1; status = 'no-deployment-authorized'; repository = '${{ github.event.repository.full_name }}'; workflow = 'Remote DDS Soak'
             runId = '${{ github.event.workflow_run.id }}'; runAttempt = '${{ github.event.workflow_run.run_attempt }}'; commitSha = '${{ github.event.workflow_run.head_sha }}'
             workerName = $null; subdomainDisabled = $false; objectDeleted = $false; currentAbsent = $true; legacyAbsent = $true
           } | ConvertTo-Json | Set-Content -Encoding utf8 "$directory\cleanup-result.json"
@@ -77,7 +78,7 @@ jobs:
         continue-on-error: true
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: '${{ github.event.workflow_run.repository.default_branch }}'
+          ref: '${{ github.event.repository.default_branch }}'
           path: remote-dds-trusted-staging
           persist-credentials: false
 
@@ -134,7 +135,7 @@ jobs:
         continue-on-error: true
         env:
           CLOUDFLARE_API_TOKEN: '${{ secrets.CLOUDFLARE_API_TOKEN }}'
-        run: '& node "$env:RUNNER_TEMP\remote-dds-trusted\scripts\remote-dds-ci-identity.mjs" --derive --repository "${{ github.repository }}" --workflow "Remote DDS Soak" --run-id "${{ github.event.workflow_run.id }}" --run-attempt "${{ github.event.workflow_run.run_attempt }}" --commit-sha "${{ github.event.workflow_run.head_sha }}" --github-env "$env:GITHUB_ENV" --identity-out "$env:RUNNER_TEMP\remote-dds-trusted-identity.json"'
+        run: '& node "$env:RUNNER_TEMP\remote-dds-trusted\scripts\remote-dds-ci-identity.mjs" --derive --repository "${{ github.event.repository.full_name }}" --workflow "Remote DDS Soak" --run-id "${{ github.event.workflow_run.id }}" --run-attempt "${{ github.event.workflow_run.run_attempt }}" --commit-sha "${{ github.event.workflow_run.head_sha }}" --github-env "$env:GITHUB_ENV" --identity-out "$env:RUNNER_TEMP\remote-dds-trusted-identity.json"'
 
       - name: Clean exact authorized temporary Worker
         id: cleanup_worker
@@ -147,7 +148,7 @@ jobs:
         run: |
           $directory = "$env:RUNNER_TEMP\remote-dds-cleanup-result"
           New-Item -ItemType Directory -Force $directory | Out-Null
-          $arguments = @("$env:RUNNER_TEMP\remote-dds-trusted\scripts\cleanup-remote-dds-deployment.mjs", '--identity', "$env:RUNNER_TEMP\remote-dds-untrusted\${{ github.event.workflow_run.id }}\${{ github.event.workflow_run.run_attempt }}\identity\predeployment-identity.json", '--repository', '${{ github.repository }}', '--workflow', 'Remote DDS Soak', '--run-id', '${{ github.event.workflow_run.id }}', '--run-attempt', '${{ github.event.workflow_run.run_attempt }}', '--commit-sha', '${{ github.event.workflow_run.head_sha }}', '--out', "$directory\cleanup-result.json")
+          $arguments = @("$env:RUNNER_TEMP\remote-dds-trusted\scripts\cleanup-remote-dds-deployment.mjs", '--identity', "$env:RUNNER_TEMP\remote-dds-untrusted\${{ github.event.workflow_run.id }}\${{ github.event.workflow_run.run_attempt }}\identity\predeployment-identity.json", '--repository', '${{ github.event.repository.full_name }}', '--workflow', 'Remote DDS Soak', '--run-id', '${{ github.event.workflow_run.id }}', '--run-attempt', '${{ github.event.workflow_run.run_attempt }}', '--commit-sha', '${{ github.event.workflow_run.head_sha }}', '--out', "$directory\cleanup-result.json")
           if ('${{ steps.inventory.outputs.deployment-count }}' -eq '1') { $arguments += @('--deployment-record', "$env:RUNNER_TEMP\remote-dds-untrusted\${{ github.event.workflow_run.id }}\${{ github.event.workflow_run.run_attempt }}\deployment\deployment.json") }
           & node @arguments
           exit $LASTEXITCODE
@@ -165,7 +166,7 @@ jobs:
           function Write-FailedResult {
             New-Item -ItemType Directory -Force $directory | Out-Null
             [ordered]@{
-              version = 1; status = 'failed'; repository = '${{ github.repository }}'; workflow = 'Remote DDS Soak'
+              version = 1; status = 'failed'; repository = '${{ github.event.repository.full_name }}'; workflow = 'Remote DDS Soak'
               runId = '${{ github.event.workflow_run.id }}'; runAttempt = '${{ github.event.workflow_run.run_attempt }}'; commitSha = '${{ github.event.workflow_run.head_sha }}'
               workerName = $null; subdomainDisabled = $false; objectDeleted = $false; currentAbsent = $false; legacyAbsent = $false
             } | ConvertTo-Json | Set-Content -Encoding utf8 $path
@@ -177,7 +178,7 @@ jobs:
             $expectedFields = @($fields | Sort-Object)
             if (Compare-Object $actualFields $expectedFields) { throw 'Cleanup result fields are not exact.' }
             if ($result.version -ne 1 -or $result.status -notin @('no-deployment-authorized', 'failed', 'deleted', 'already-absent')) { throw 'Cleanup result version or status is invalid.' }
-            if ($result.repository -cne '${{ github.repository }}' -or $result.workflow -cne 'Remote DDS Soak' -or
+            if ($result.repository -cne '${{ github.event.repository.full_name }}' -or $result.workflow -cne 'Remote DDS Soak' -or
                 [string]$result.runId -cne '${{ github.event.workflow_run.id }}' -or [string]$result.runAttempt -cne '${{ github.event.workflow_run.run_attempt }}' -or
                 $result.commitSha -cne '${{ github.event.workflow_run.head_sha }}') { throw 'Cleanup result context is not the triggering event.' }
             foreach ($field in @('subdomainDisabled', 'objectDeleted', 'currentAbsent', 'legacyAbsent')) {
