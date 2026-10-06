@@ -2,7 +2,7 @@
 
 const assert = require('node:assert/strict');
 const { createHash } = require('node:crypto');
-const { mkdtempSync, readFileSync, rmSync, writeFileSync } = require('node:fs');
+const { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { join, resolve } = require('node:path');
 const { spawnSync } = require('node:child_process');
@@ -112,7 +112,7 @@ async function validRun() {
     journal, simulator: { budget: { rooms: 50, writesPerDay: 70000, readsPerDay: 250000 } } };
 }
 
-function check(run) {
+function check(run, { output = false, outputDirectory = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'remote-dds-gates-'));
   try {
     const runDir = join(dir, 'run');
@@ -123,7 +123,11 @@ function check(run) {
     writeFileSync(join(runDir, 'journal.jsonl'), `${run.journal.map(JSON.stringify).join('\n')}\n`);
     const deployment = join(dir, 'deployment.json'); const simulator = join(dir, 'simulator.json');
     writeFileSync(deployment, JSON.stringify(run.deployment)); writeFileSync(simulator, JSON.stringify(run.simulator));
-    return spawnSync(process.execPath, [checker, '--run-dir', runDir, '--deployment-manifest', deployment, '--simulator-report', simulator], { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 });
+    const out = join(dir, 'gate-result.json');
+    if (outputDirectory) mkdirSync(out);
+    const result = spawnSync(process.execPath, [checker, '--run-dir', runDir, '--deployment-manifest', deployment, '--simulator-report', simulator,
+      ...(output || outputDirectory ? ['--out', out] : [])], { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 });
+    return { ...result, gateResult: output && result.status !== null ? JSON.parse(readFileSync(out, 'utf8')) : null };
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }
 
@@ -131,6 +135,32 @@ test('a complete, version-bound remote soak report passes every gate', async () 
   const result = check(await validRun());
   assert.equal(result.status, 0, result.stderr + result.stdout);
   for (const name of ['corpus', 'journal', 'deployment', 'wasm-bundle', 'heap', 'p99-wasm-elapsed', 'max-wasm-elapsed', 'queue-delay', 'worker-inbound', 'queued-do-commands', 'sqlite', 'room-simulator']) assert.match(result.stdout, new RegExp(`PASS ${name}`));
+});
+
+test('gate checker atomically writes a complete versioned passing result', async () => {
+  const result = check(await validRun(), { output: true });
+  assert.equal(result.status, 0, result.stderr + result.stdout);
+  assert.deepEqual(Object.keys(result.gateResult), ['version', 'runId', 'runAttempt', 'gates']);
+  assert.equal(result.gateResult.version, 1);
+  assert.equal(result.gateResult.runId, '12345');
+  assert.equal(result.gateResult.runAttempt, '2');
+  assert.ok(result.gateResult.gates.length > 0);
+  assert.ok(result.gateResult.gates.every((gate) => Object.keys(gate).join(',') === 'name,passed' && gate.passed === true));
+});
+
+test('gate checker writes failed gates before preserving its nonzero exit', async () => {
+  const run = await validRun();
+  run.simulator.budget.writesPerDay = 70001;
+  const result = check(run, { output: true });
+  assert.notEqual(result.status, 0, result.stdout);
+  assert.deepEqual(result.gateResult.gates.find((gate) => gate.name === 'room-simulator'), { name: 'room-simulator', passed: false });
+  assert.equal(result.gateResult.runId, '12345');
+  assert.equal(result.gateResult.runAttempt, '2');
+});
+
+test('gate checker fails if its requested result cannot be atomically written', async () => {
+  const result = check(await validRun(), { outputDirectory: true });
+  assert.notEqual(result.status, 0, result.stdout);
 });
 
 test('activation gate accepts a documented Cloudflare restart inside a shard', async () => {

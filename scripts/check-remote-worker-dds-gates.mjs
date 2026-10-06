@@ -6,6 +6,7 @@ import { ACCOUNTING_SCHEMA_VERSION, JOURNAL_SCHEMA_VERSION, SOAK_SEED, canonical
 import { assertDeploymentManifest } from './prepare-remote-dds-deployment.mjs';
 import { createRandomCaseGenerator } from './worker-dds-random-cases.mjs';
 import { compareDdsResults, validateWorkerSolveCandidates } from './worker-dds-benchmark-validation.mjs';
+import { writeReportCheckpoint } from './worker-dds-checkpoint.mjs';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const COUNT = 22000;
@@ -204,12 +205,21 @@ function runCli() {
   const runDir = option(args, '--run-dir');
   const deploymentPath = option(args, '--deployment-manifest');
   const simulatorPath = option(args, '--simulator-report');
+  const outputPath = option(args, '--out');
   if (!runDir || !deploymentPath || !simulatorPath) throw new Error('--run-dir, --deployment-manifest, and --simulator-report are required');
+  if (args.includes('--out') && !outputPath) throw new Error('--out requires a path');
   const dir = resolve(process.cwd(), runDir);
+  const deployment = readJson(resolve(process.cwd(), deploymentPath), 'deployment manifest');
   const gates = evaluateRemoteSoak({ manifest: readJson(resolve(dir, 'manifest.json'), 'run manifest'), report: readJson(resolve(dir, 'report.json'), 'run report'),
     evidence: readJson(resolve(dir, 'evidence.json'), 'run evidence'), journal: readJournal(resolve(dir, 'journal.jsonl')),
-    deployment: readJson(resolve(process.cwd(), deploymentPath), 'deployment manifest'), simulator: readJson(resolve(process.cwd(), simulatorPath), 'simulator report') });
+    deployment, simulator: readJson(resolve(process.cwd(), simulatorPath), 'simulator report') });
   for (const gate of gates) console.log(`${gate.passed ? 'PASS' : 'FAIL'} ${gate.name}`);
+  if (outputPath) writeReportCheckpoint(resolve(process.cwd(), outputPath), {
+    version: 1,
+    runId: deployment?.identity?.runId,
+    runAttempt: deployment?.identity?.runAttempt,
+    gates,
+  });
   if (gates.some((gate) => !gate.passed)) process.exitCode = 1;
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) runCli();
