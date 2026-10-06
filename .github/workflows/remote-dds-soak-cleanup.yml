@@ -199,7 +199,7 @@ jobs:
         env:
           DDS_REMOTE_TEST_KEY: ''
         with:
-          name: 'remote-dds-backstop-cleanup-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}'
+          name: 'remote-dds-backstop-cleanup-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}-${{ github.run_attempt }}'
           path: '${{ runner.temp }}/remote-dds-cleanup-result/cleanup-result.json'
           if-no-files-found: error
           retention-days: 30

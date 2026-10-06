@@ -315,6 +315,7 @@ test('the exported remote key is masked from every later step that does not cons
 
 const cleanupExpression = (body) => '${{ ' + body + ' }}';
 const cleanupArtifact = (kind) => `remote-dds-${kind}-${cleanupExpression('github.event.workflow_run.id')}-${cleanupExpression('github.event.workflow_run.run_attempt')}`;
+const cleanupBackstopArtifact = () => `${cleanupArtifact('backstop-cleanup')}-${cleanupExpression('github.run_attempt')}`;
 const CLEANUP_TRUSTED = cleanupExpression('runner.temp') + '/remote-dds-trusted';
 const CLEANUP_UNTRUSTED = cleanupExpression('runner.temp') + '/remote-dds-untrusted/'
   + cleanupExpression('github.event.workflow_run.id') + '/' + cleanupExpression('github.event.workflow_run.run_attempt');
@@ -502,11 +503,12 @@ test('backstop always publishes a validated result and re-propagates every opera
   assert.equal(upload['continue-on-error'], true);
   assert.equal(upload.env.DDS_REMOTE_TEST_KEY, '');
   assert.deepEqual(upload.with, {
-    name: cleanupArtifact('backstop-cleanup'),
+    name: cleanupBackstopArtifact(),
     path: cleanupExpression('runner.temp') + '/remote-dds-cleanup-result/cleanup-result.json',
     'if-no-files-found': 'error',
     'retention-days': 30,
   });
+  assert.notEqual(upload.with.name, cleanupArtifact('backstop-cleanup'), 'backstop reruns may not reuse the immutable first-attempt artifact name');
   assert.equal(reprop, steps(job).at(-1), 'failure propagation must be final');
   assert.equal(reprop.env.DDS_REMOTE_TEST_KEY, '');
   assert.match(reprop.if, /always\(\)/);
