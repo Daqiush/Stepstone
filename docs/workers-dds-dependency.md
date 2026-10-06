@@ -153,3 +153,80 @@ is represented. All 54 operations recorded `heapBytes: 18939904`, yielding
 benchmark-completeness gate remains failed because the required 100,000 random
 cases have not been rerun. The older `dds-feasibility.json` remains an
 unaltered historical partial report with `maxMemoryBytes: null`.
+
+## Running the hosted remote soak
+
+`Remote DDS Soak` is a manually dispatched GitHub Actions workflow. Before
+dispatching it, configure these repository GitHub Secrets (names only):
+
+- `CLOUDFLARE_API_TOKEN`
+- `CLOUDFLARE_ACCOUNT_ID`
+
+Use a temporary, appropriately scoped Cloudflare token. Never paste either
+value into this document, a workflow input, an issue, an artifact, or a log.
+In the Actions page, select **Remote DDS Soak**, choose **Run workflow**, and
+enter a unique, recognizable `request_id` so the run can be found later. The
+hosted runners own the run after dispatch, so the operator's computer may
+disconnect without interrupting it.
+
+Do not cancel a normally progressing run. It has one preparation job followed
+by six serial segment job slots. Each segment accepts at most 6,000 new
+operations, uses a 17,100,000 ms soft deadline, and has a 355-minute job
+timeout. Together the segments target 22,000 completed operations; later
+segments resume the state published by the preceding segment. The six slots
+provide deadline headroom; they do not raise the 22,000-operation target.
+
+This workflow is only a temporary DDS feasibility test. It does not deploy or
+modify `stepstone.hogetsu.uk`, DNS, any production Worker, or any other
+production resource. It creates only the randomly named, run-attested
+temporary Worker whose name begins `ss-dds-soak-`.
+
+### Evidence and cleanup
+
+Keep the temporary Cloudflare credentials valid until both cleanup paths have
+finished and their machine-readable results have been inspected. The primary
+workflow is configured to attempt its `cleanup` job even after an earlier job
+fails, and the separate **Remote DDS Soak Cleanup Backstop** workflow is
+triggered by `workflow_run`. Do not revoke the token merely because the soak or
+primary cleanup job is red. A cleanup failure must retain its evidence and be
+investigated while the credentials are still usable.
+
+Download the following artifacts before their 30-day retention expires and
+retain them together as the acceptance record:
+
+- `remote-dds-final-evidence-<primary-run-id>-<primary-attempt>`
+- `remote-dds-primary-cleanup-<primary-run-id>-<primary-attempt>`
+- `remote-dds-backstop-cleanup-<primary-run-id>-<primary-attempt>-<backstop-run-attempt>`
+
+The last suffix is the attempt number of the backstop workflow itself. It makes
+each backstop rerun publish a distinct artifact. Find it from the backstop run
+whose title is `Cleanup primary <primary-run-id> attempt <primary-attempt>`,
+then select the artifact with that backstop run's current attempt suffix. The
+`remote-dds-identity-*`, `remote-dds-deployment-*`, and `remote-dds-state-*`
+intermediate artifacts are retained for 7 days, so preserve them too when
+diagnosing a failed or interrupted run.
+
+Treat the run as successful only when all of the following are true for the
+same primary run ID and attempt:
+
+- `final-evidence/state-6/run/report.json` has `completedCursor` equal to
+  `22000` and `terminalFailure` equal to `null`.
+- `final-evidence/gate/gate-result.json` contains a non-empty `gates` array and
+  every gate has `passed` equal to `true`.
+- Both primary and backstop `cleanup-result.json` records have
+  `currentAbsent: true` and `legacyAbsent: true`.
+
+A primary cleanup can deliberately remain red when deployment evidence from a
+prior attempt exists. In that case, use the backstop result bound to the
+relevant primary attempt. A green cleanup result for the current attempt does
+not prove that an older attempt was cleaned. Match `runId` and `runAttempt` in
+every evidence record rather than inferring cleanup from a run's overall color.
+
+If either cleanup result is missing, malformed, or reports either absence field
+as false, retain all evidence and recover only the exact temporary Worker
+authorized by the attested identity/deployment records. Never delete Workers by
+the `ss-dds-soak-` prefix or by any other bulk-name match. This document does
+not prescribe a manual deletion command; use the attested cleanup workflow and
+its machine-readable result. Once both cleanup results confirm
+`currentAbsent: true` and `legacyAbsent: true`, revoke the temporary Cloudflare
+token immediately.
