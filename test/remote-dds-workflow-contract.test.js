@@ -246,16 +246,27 @@ test('cleanup inventories every attempt and fails closed when a prior attempt au
   }
   const reject = findRun(cleanup, /Reject ambiguous cleanup authorization/);
   assert.match(runText(reject), /prior-(?:identity|deployment)-count/);
+  assert.match(runText(reject), /identity-count[^\r\n]*-eq 0/, 'prior-attempt evidence must only reject early when the current identity is absent');
   assert.match(runText(reject), /restore|rollback|backstop/i, 'failure must explain how cleanup can be recovered');
   const absent = findRun(cleanup, /no-deployment-authorized/);
   assert.match(absent.if, /identity-count == '0'/);
   assert.match(absent.if, /prior-identity-count == '0'/);
   assert.match(absent.if, /prior-deployment-count == '0'/);
   const result = findRun(cleanup, /Ensure cleanup result/);
+  const cleanupWorker = findRun(cleanup, /Clean exact authorized temporary Worker/);
   const upload = steps(cleanup).find((step) => step.uses === UPLOAD);
+  const finalFailure = steps(cleanup).at(-1);
   assert.equal(result.if, expression('always()'));
   assert.equal(upload.if, expression('always()'));
-  assert.match(steps(cleanup).at(-1).if, /steps\.reject\.outcome == 'failure'/);
+  assert.match(cleanupWorker.if, /identity-count == '1'/);
+  assert.doesNotMatch(cleanupWorker.if, /prior-/, 'prior evidence must not suppress cleanup of the current exact Worker');
+  assert.ok(steps(cleanup).indexOf(cleanupWorker) < steps(cleanup).indexOf(upload), 'current cleanup result must upload before prior-attempt failure propagation');
+  assert.match(finalFailure.if, /steps\.reject\.outcome == 'failure'/);
+  assert.match(finalFailure.if, /identity-count == '1'/, 'a present current identity must still fail finally when prior evidence remains');
+  assert.match(finalFailure.if, /prior-identity-count != '0'/);
+  assert.match(finalFailure.if, /prior-deployment-count != '0'/);
+  assert.match(runText(finalFailure), /prior-attempt/i);
+  assert.match(runText(finalFailure), /recover|backstop/i, 'final failure must direct operators to prior-attempt recovery');
 });
 
 test('Cloudflare token is step-scoped to derivation, deployment, and cleanup only', () => {
