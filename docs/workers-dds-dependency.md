@@ -178,18 +178,20 @@ provide deadline headroom; they do not raise the 22,000-operation target.
 
 This workflow is only a temporary DDS feasibility test. It does not deploy or
 modify `stepstone.hogetsu.uk`, DNS, any production Worker, or any other
-production resource. It creates only the randomly named, run-attested
-temporary Worker whose name begins `ss-dds-soak-`.
+production resource. It creates only the uniquely generated, deterministically
+run-attested temporary Worker whose name begins `ss-dds-soak-`.
 
 ### Evidence and cleanup
 
-Keep the temporary Cloudflare credentials valid until both cleanup paths have
-finished and their machine-readable results have been inspected. The primary
-workflow is configured to attempt its `cleanup` job even after an earlier job
-fails, and the separate **Remote DDS Soak Cleanup Backstop** workflow is
-triggered by `workflow_run`. Do not revoke the token merely because the soak or
-primary cleanup job is red. A cleanup failure must retain its evidence and be
-investigated while the credentials are still usable.
+Keep the temporary Cloudflare credentials valid until every relevant primary
+attempt has final machine-readable proof that its exact temporary resource is
+absent. A relevant attempt is any primary attempt that produced identity or
+deployment evidence. The primary workflow is configured to attempt its
+`cleanup` job even after an earlier job fails, and the separate **Remote DDS
+Soak Cleanup Backstop** workflow is triggered by `workflow_run`. Do not revoke
+the token merely because the soak or primary cleanup job is red. An unproved
+attempt must retain its evidence and be investigated while the credentials are
+still usable.
 
 Download the following artifacts before their 30-day retention expires and
 retain them together as the acceptance record:
@@ -206,27 +208,43 @@ then select the artifact with that backstop run's current attempt suffix. The
 intermediate artifacts are retained for 7 days, so preserve them too when
 diagnosing a failed or interrupted run.
 
-Treat the run as successful only when all of the following are true for the
-same primary run ID and attempt:
+### Soak acceptance
+
+Accept the test workload only when both of the following are true for the same
+primary run ID and attempt:
 
 - `final-evidence/state-6/run/report.json` has `completedCursor` equal to
   `22000` and `terminalFailure` equal to `null`.
 - `final-evidence/gate/gate-result.json` contains a non-empty `gates` array and
   every gate has `passed` equal to `true`.
-- Both primary and backstop `cleanup-result.json` records have
-  `currentAbsent: true` and `legacyAbsent: true`.
+
+These checks accept the soak evidence; they do not prove resource cleanup. A
+primary cleanup failure can leave the GitHub workflow run red, in which case
+the workflow run itself is not accepted even when its report and gates pass.
+Later backstop cleanup can prove that the resource is absent, but it does not
+rewrite the immutable primary cleanup artifact or turn the primary run green.
+
+### Cleanup proof and token revocation
+
+For each relevant primary attempt, require at least one trustworthy
+`cleanup-result.json` whose repository, workflow, `runId`, `runAttempt`, and
+`commitSha` match that exact attempt and whose `currentAbsent` and
+`legacyAbsent` fields are both `true`. That final absence proof may come from
+either the primary cleanup artifact or the `workflow_run` backstop artifact; it
+does not require both to report success. If primary cleanup fails but the
+matching backstop later supplies this proof, the attempt's temporary resource
+is clean even though the primary result remains unchanged.
 
 A primary cleanup can deliberately remain red when deployment evidence from a
-prior attempt exists. In that case, use the backstop result bound to the
-relevant primary attempt. A green cleanup result for the current attempt does
-not prove that an older attempt was cleaned. Match `runId` and `runAttempt` in
-every evidence record rather than inferring cleanup from a run's overall color.
+prior attempt exists. A green cleanup result for the current attempt does not
+prove that an older attempt was cleaned. Evaluate the final primary or backstop
+absence proof separately for every relevant attempt, matching its full context
+rather than inferring cleanup from any run's overall color.
 
-If either cleanup result is missing, malformed, or reports either absence field
-as false, retain all evidence and recover only the exact temporary Worker
-authorized by the attested identity/deployment records. Never delete Workers by
-the `ss-dds-soak-` prefix or by any other bulk-name match. This document does
-not prescribe a manual deletion command; use the attested cleanup workflow and
-its machine-readable result. Once both cleanup results confirm
-`currentAbsent: true` and `legacyAbsent: true`, revoke the temporary Cloudflare
-token immediately.
+If any relevant attempt lacks final absence proof, retain all evidence and
+recover only the exact temporary Worker authorized by that attempt's attested
+identity/deployment records. Never delete Workers by the `ss-dds-soak-` prefix
+or by any other bulk-name match. This document does not prescribe a manual
+deletion command; use the attested cleanup workflow and its machine-readable
+result. Once every relevant attempt has final proof of `currentAbsent: true`
+and `legacyAbsent: true`, revoke the temporary Cloudflare token immediately.
