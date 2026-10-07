@@ -7,7 +7,7 @@
     "start": "node server.js",
     "dev": "node server.js",
     "postinstall": "node scripts/install-dds.js",
-    "test": "node --test test/*.test.js",
+    "test": "node --test test",
     "test:workers": "node --test workers/test/*.test.mjs",
     "dev:workers": "wrangler dev --config workers/wrangler.jsonc --local --var DDS_LOCAL_TEST:true",
     "test:dds:smoke": "node scripts/smoke-dds.js",
