@@ -12,9 +12,10 @@ const ROOT = resolve(__dirname, '..');
 const WORKFLOW_PATH = resolve(ROOT, '.github/workflows/remote-dds-soak.yml');
 const CLEANUP_WORKFLOW_PATH = resolve(ROOT, '.github/workflows/remote-dds-soak-cleanup.yml');
 const WINDOWS_DDS_BUILD_PATH = resolve(ROOT, 'scripts/build-windows-dds.ps1');
+const SETUP_NODE = 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020';
 const APPROVED_ACTIONS = new Set([
   'actions/checkout@11d5960a326750d5838078e36cf38b85af677262',
-  'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
+  SETUP_NODE,
   'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02',
   'actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093',
 ]);
@@ -82,6 +83,23 @@ test('manual entry point, permissions, concurrency, and action pins are locked d
     assert.equal(job['runs-on'], 'windows-2022');
     assert.equal(job.permissions, undefined, 'jobs may not broaden workflow permissions');
     for (const step of steps(job)) if (step.uses !== undefined) assert.ok(APPROVED_ACTIONS.has(step.uses), `unapproved action: ${step.uses}`);
+  }
+});
+
+test('all remote soak jobs use the Wrangler-supported Node.js 22 runtime', () => {
+  for (const [workflowName, workflow, expectedSetupCount] of [
+    ['primary', loadWorkflow().workflow, 9],
+    ['cleanup backstop', loadCleanupWorkflow().workflow, 1],
+  ]) {
+    const setups = Object.entries(workflow.jobs).flatMap(([jobName, job]) =>
+      steps(job)
+        .filter((step) => step.uses === SETUP_NODE)
+        .map((step) => ({ jobName, step })),
+    );
+    assert.equal(setups.length, expectedSetupCount, `${workflowName} setup-node coverage changed`);
+    for (const { jobName, step } of setups) {
+      assert.equal(step.with?.['node-version'], 22, `${workflowName} ${jobName} must use Node.js 22`);
+    }
   }
 });
 
@@ -455,8 +473,8 @@ test('backstop inventories first and isolates trusted code from untrusted artifa
   assert.match(runText(steps(job)[moveIndex]), /RUNNER_TEMP[\\/]remote-dds-trusted/i);
   const install = cleanupStep(job, 'install');
   assert.equal(install['working-directory'], CLEANUP_TRUSTED);
-  const setup = steps(job).find((step) => step.uses === 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020');
-  assert.equal(setup.with['node-version'], 20);
+  const setup = steps(job).find((step) => step.uses === SETUP_NODE);
+  assert.equal(setup.with['node-version'], 22);
   for (const download of steps(job).filter((step) => step.uses === DOWNLOAD)) {
     assert.ok(download.with.path.startsWith(CLEANUP_UNTRUSTED + '/'), `download escaped untrusted root: ${download.with.path}`);
     assert.equal(download.with.path.includes('remote-dds-trusted'), false);
