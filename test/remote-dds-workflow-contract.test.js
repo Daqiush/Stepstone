@@ -124,6 +124,7 @@ test('prepare proves the repository before authorizing and recording deployment'
   const prepare = workflow.jobs.prepare;
   assert.ok(prepare);
   const install = stepIndex(prepare, /^npm ci$/m);
+  const commandPreflight = stepIndex(prepare, /^npm run test:commands$/m);
   const build = stepIndex(prepare, /scripts[\\/]build-windows-dds\.ps1/);
   const unit = stepIndex(prepare, /^npm test$/m);
   const workers = stepIndex(prepare, /^npm run test:workers$/m);
@@ -132,7 +133,7 @@ test('prepare proves the repository before authorizing and recording deployment'
   const identityUpload = steps(prepare).findIndex((step) => step.uses === UPLOAD && step.with?.name === artifact('identity'));
   const deploy = stepIndex(prepare, /--deploy-from-identity/);
   const ready = stepIndex(prepare, /--create-ready/);
-  assert.ok(install < build && build < smoke && smoke < unit && unit < workers && workers < preflight && preflight < identityUpload && identityUpload < deploy && deploy < ready);
+  assert.ok(install < commandPreflight && commandPreflight < build && build < smoke && smoke < unit && unit < workers && workers < preflight && preflight < identityUpload && identityUpload < deploy && deploy < ready);
   const derive = findRun(prepare, /remote-dds-ci-identity\.mjs/);
   exactContext(derive.run);
   assert.match(derive.run, /--identity-out\s+"?\$env:RUNNER_TEMP[\\/]remote-dds-trusted-identity\.json"?/i);
