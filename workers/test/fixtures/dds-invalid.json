@@ -1,0 +1,9 @@
+[
+  { "id": "invalid-suit", "deal": { "hands": { "N": [{"suit":"X","rank":14}], "E": [], "S": [], "W": [] } }, "expected": { "code": "INVALID_DEAL" } },
+  { "id": "invalid-rank", "deal": { "hands": { "N": [{"suit":"S","rank":15}], "E": [], "S": [], "W": [] } }, "expected": { "code": "INVALID_DEAL" } },
+  { "id": "duplicate-card", "deal": { "hands": { "N": [{"suit":"S","rank":14}], "E": [{"suit":"S","rank":14}], "S": [], "W": [] } }, "expected": { "code": "INVALID_DEAL" } },
+  { "id": "missing-seat", "deal": { "hands": { "N": [], "E": [], "S": [] } }, "expected": { "code": "INVALID_DEAL" } },
+  { "id": "trick-too-long", "deal": { "trump":"NT", "trickLeader":"N", "trickPlayed":[{"suit":"S","rank":2},{"suit":"S","rank":3},{"suit":"S","rank":4},{"suit":"S","rank":5}], "hands": { "N": [], "E": [], "S": [], "W": [] } }, "expected": { "code": "INVALID_DEAL" } },
+  { "id": "invalid-trump", "deal": { "trump":"X", "trickLeader":"N", "trickPlayed":[], "hands": { "N": [], "E": [], "S": [], "W": [] } }, "expected": { "code": "INVALID_DEAL" } },
+  { "id": "card-in-hand-and-trick", "deal": { "trump":"NT", "trickLeader":"N", "trickPlayed":[{"suit":"S","rank":14}], "hands": { "N": [{"suit":"S","rank":14}], "E": [], "S": [], "W": [] } }, "expected": { "code": "INVALID_DEAL" } }
+]

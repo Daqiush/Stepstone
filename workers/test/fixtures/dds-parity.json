@@ -1,0 +1,7156 @@
+[
+  {
+    "id": "problem.A1.opening",
+    "kind": "table",
+    "sourceLabel": "problem:A1:opening",
+    "hands": {
+      "N": [
+        {
+          "suit": "S",
+          "rank": 8
+        },
+        {
+          "suit": "S",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 14
+        },
+        {
+          "suit": "H",
+          "rank": 13
+        },
+        {
+          "suit": "H",
+          "rank": 5
+        },
+        {
+          "suit": "D",
+          "rank": 7
+        },
+        {
+          "suit": "D",
+          "rank": 5
+        },
+        {
+          "suit": "D",
+          "rank": 4
+        },
+        {
+          "suit": "D",
+          "rank": 2
+        },
+        {
+          "suit": "C",
+          "rank": 14
+        },
+        {
+          "suit": "C",
+          "rank": 13
+        },
+        {
+          "suit": "C",
+          "rank": 12
+        },
+        {
+          "suit": "C",
+          "rank": 2
+        }
+      ],
+      "S": [
+        {
+          "suit": "S",
+          "rank": 14
+        },
+        {
+          "suit": "S",
+          "rank": 13
+        },
+        {
+          "suit": "S",
+          "rank": 12
+        },
+        {
+          "suit": "S",
+          "rank": 7
+        },
+        {
+          "suit": "H",
+          "rank": 8
+        },
+        {
+          "suit": "H",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 3
+        },
+        {
+          "suit": "H",
+          "rank": 2
+        },
+        {
+          "suit": "D",
+          "rank": 14
+        },
+        {
+          "suit": "D",
+          "rank": 13
+        },
+        {
+          "suit": "C",
+          "rank": 9
+        },
+        {
+          "suit": "C",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 5
+        }
+      ],
+      "E": [
+        {
+          "suit": "S",
+          "rank": 5
+        },
+        {
+          "suit": "S",
+          "rank": 2
+        },
+        {
+          "suit": "H",
+          "rank": 12
+        },
+        {
+          "suit": "H",
+          "rank": 11
+        },
+        {
+          "suit": "H",
+          "rank": 10
+        },
+        {
+          "suit": "H",
+          "rank": 9
+        },
+        {
+          "suit": "H",
+          "rank": 7
+        },
+        {
+          "suit": "D",
+          "rank": 11
+        },
+        {
+          "suit": "D",
+          "rank": 9
+        },
+        {
+          "suit": "D",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 6
+        },
+        {
+          "suit": "C",
+          "rank": 3
+        }
+      ],
+      "W": [
+        {
+          "suit": "S",
+          "rank": 11
+        },
+        {
+          "suit": "S",
+          "rank": 10
+        },
+        {
+          "suit": "S",
+          "rank": 9
+        },
+        {
+          "suit": "S",
+          "rank": 6
+        },
+        {
+          "suit": "S",
+          "rank": 3
+        },
+        {
+          "suit": "H",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 12
+        },
+        {
+          "suit": "D",
+          "rank": 10
+        },
+        {
+          "suit": "D",
+          "rank": 6
+        },
+        {
+          "suit": "C",
+          "rank": 11
+        },
+        {
+          "suit": "C",
+          "rank": 10
+        },
+        {
+          "suit": "C",
+          "rank": 8
+        },
+        {
+          "suit": "C",
+          "rank": 4
+        }
+      ]
+    },
+    "expected": {
+      "table": [
+        [
+          10,
+          3,
+          10,
+          3
+        ],
+        [
+          10,
+          3,
+          10,
+          3
+        ],
+        [
+          10,
+          3,
+          10,
+          3
+        ],
+        [
+          12,
+          1,
+          12,
+          1
+        ],
+        [
+          10,
+          3,
+          10,
+          3
+        ]
+      ]
+    }
+  },
+  {
+    "id": "problem.A1.test-0",
+    "kind": "table",
+    "sourceLabel": "problem:A1:testCases[0]",
+    "hands": {
+      "N": [
+        {
+          "suit": "S",
+          "rank": 8
+        },
+        {
+          "suit": "S",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 14
+        },
+        {
+          "suit": "H",
+          "rank": 13
+        },
+        {
+          "suit": "H",
+          "rank": 5
+        },
+        {
+          "suit": "D",
+          "rank": 7
+        },
+        {
+          "suit": "D",
+          "rank": 5
+        },
+        {
+          "suit": "D",
+          "rank": 4
+        },
+        {
+          "suit": "D",
+          "rank": 2
+        },
+        {
+          "suit": "C",
+          "rank": 14
+        },
+        {
+          "suit": "C",
+          "rank": 13
+        },
+        {
+          "suit": "C",
+          "rank": 12
+        },
+        {
+          "suit": "C",
+          "rank": 2
+        }
+      ],
+      "S": [
+        {
+          "suit": "S",
+          "rank": 14
+        },
+        {
+          "suit": "S",
+          "rank": 13
+        },
+        {
+          "suit": "S",
+          "rank": 12
+        },
+        {
+          "suit": "S",
+          "rank": 7
+        },
+        {
+          "suit": "H",
+          "rank": 8
+        },
+        {
+          "suit": "H",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 3
+        },
+        {
+          "suit": "H",
+          "rank": 2
+        },
+        {
+          "suit": "D",
+          "rank": 14
+        },
+        {
+          "suit": "D",
+          "rank": 13
+        },
+        {
+          "suit": "C",
+          "rank": 9
+        },
+        {
+          "suit": "C",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 5
+        }
+      ],
+      "E": [
+        {
+          "suit": "S",
+          "rank": 5
+        },
+        {
+          "suit": "S",
+          "rank": 2
+        },
+        {
+          "suit": "H",
+          "rank": 12
+        },
+        {
+          "suit": "H",
+          "rank": 11
+        },
+        {
+          "suit": "H",
+          "rank": 10
+        },
+        {
+          "suit": "H",
+          "rank": 9
+        },
+        {
+          "suit": "H",
+          "rank": 7
+        },
+        {
+          "suit": "D",
+          "rank": 11
+        },
+        {
+          "suit": "D",
+          "rank": 9
+        },
+        {
+          "suit": "D",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 6
+        },
+        {
+          "suit": "C",
+          "rank": 3
+        }
+      ],
+      "W": [
+        {
+          "suit": "S",
+          "rank": 11
+        },
+        {
+          "suit": "S",
+          "rank": 10
+        },
+        {
+          "suit": "S",
+          "rank": 9
+        },
+        {
+          "suit": "S",
+          "rank": 6
+        },
+        {
+          "suit": "S",
+          "rank": 3
+        },
+        {
+          "suit": "H",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 12
+        },
+        {
+          "suit": "D",
+          "rank": 10
+        },
+        {
+          "suit": "D",
+          "rank": 6
+        },
+        {
+          "suit": "C",
+          "rank": 11
+        },
+        {
+          "suit": "C",
+          "rank": 10
+        },
+        {
+          "suit": "C",
+          "rank": 8
+        },
+        {
+          "suit": "C",
+          "rank": 4
+        }
+      ]
+    },
+    "expected": {
+      "table": [
+        [
+          10,
+          3,
+          10,
+          3
+        ],
+        [
+          10,
+          3,
+          10,
+          3
+        ],
+        [
+          10,
+          3,
+          10,
+          3
+        ],
+        [
+          12,
+          1,
+          12,
+          1
+        ],
+        [
+          10,
+          3,
+          10,
+          3
+        ]
+      ]
+    }
+  },
+  {
+    "id": "problem.A2.opening",
+    "kind": "table",
+    "sourceLabel": "problem:A2:opening",
+    "hands": {
+      "N": [
+        {
+          "suit": "S",
+          "rank": 9
+        },
+        {
+          "suit": "S",
+          "rank": 6
+        },
+        {
+          "suit": "S",
+          "rank": 2
+        },
+        {
+          "suit": "H",
+          "rank": 10
+        },
+        {
+          "suit": "H",
+          "rank": 9
+        },
+        {
+          "suit": "H",
+          "rank": 3
+        },
+        {
+          "suit": "D",
+          "rank": 14
+        },
+        {
+          "suit": "D",
+          "rank": 13
+        },
+        {
+          "suit": "D",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 11
+        },
+        {
+          "suit": "C",
+          "rank": 9
+        },
+        {
+          "suit": "C",
+          "rank": 10
+        },
+        {
+          "suit": "C",
+          "rank": 5
+        }
+      ],
+      "S": [
+        {
+          "suit": "S",
+          "rank": 14
+        },
+        {
+          "suit": "S",
+          "rank": 13
+        },
+        {
+          "suit": "H",
+          "rank": 14
+        },
+        {
+          "suit": "H",
+          "rank": 7
+        },
+        {
+          "suit": "H",
+          "rank": 5
+        },
+        {
+          "suit": "D",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 5
+        },
+        {
+          "suit": "C",
+          "rank": 13
+        },
+        {
+          "suit": "C",
+          "rank": 12
+        },
+        {
+          "suit": "C",
+          "rank": 8
+        },
+        {
+          "suit": "C",
+          "rank": 4
+        },
+        {
+          "suit": "C",
+          "rank": 2
+        }
+      ],
+      "E": [
+        {
+          "suit": "S",
+          "rank": 7
+        },
+        {
+          "suit": "S",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 13
+        },
+        {
+          "suit": "H",
+          "rank": 12
+        },
+        {
+          "suit": "H",
+          "rank": 11
+        },
+        {
+          "suit": "H",
+          "rank": 6
+        },
+        {
+          "suit": "H",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 2
+        },
+        {
+          "suit": "D",
+          "rank": 12
+        },
+        {
+          "suit": "D",
+          "rank": 11
+        },
+        {
+          "suit": "D",
+          "rank": 10
+        },
+        {
+          "suit": "D",
+          "rank": 2
+        },
+        {
+          "suit": "C",
+          "rank": 14
+        }
+      ],
+      "W": [
+        {
+          "suit": "S",
+          "rank": 12
+        },
+        {
+          "suit": "S",
+          "rank": 11
+        },
+        {
+          "suit": "S",
+          "rank": 10
+        },
+        {
+          "suit": "S",
+          "rank": 8
+        },
+        {
+          "suit": "S",
+          "rank": 5
+        },
+        {
+          "suit": "S",
+          "rank": 3
+        },
+        {
+          "suit": "H",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 9
+        },
+        {
+          "suit": "D",
+          "rank": 4
+        },
+        {
+          "suit": "D",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 6
+        },
+        {
+          "suit": "C",
+          "rank": 3
+        }
+      ]
+    },
+    "expected": {
+      "table": [
+        [
+          5,
+          6,
+          5,
+          6
+        ],
+        [
+          6,
+          7,
+          6,
+          7
+        ],
+        [
+          6,
+          6,
+          6,
+          6
+        ],
+        [
+          9,
+          4,
+          9,
+          4
+        ],
+        [
+          7,
+          4,
+          7,
+          4
+        ]
+      ]
+    }
+  },
+  {
+    "id": "problem.A2.test-0",
+    "kind": "table",
+    "sourceLabel": "problem:A2:testCases[0]",
+    "hands": {
+      "N": [
+        {
+          "suit": "S",
+          "rank": 9
+        },
+        {
+          "suit": "S",
+          "rank": 6
+        },
+        {
+          "suit": "S",
+          "rank": 2
+        },
+        {
+          "suit": "H",
+          "rank": 10
+        },
+        {
+          "suit": "H",
+          "rank": 9
+        },
+        {
+          "suit": "H",
+          "rank": 3
+        },
+        {
+          "suit": "D",
+          "rank": 14
+        },
+        {
+          "suit": "D",
+          "rank": 13
+        },
+        {
+          "suit": "D",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 11
+        },
+        {
+          "suit": "C",
+          "rank": 9
+        },
+        {
+          "suit": "C",
+          "rank": 10
+        },
+        {
+          "suit": "C",
+          "rank": 5
+        }
+      ],
+      "S": [
+        {
+          "suit": "S",
+          "rank": 14
+        },
+        {
+          "suit": "S",
+          "rank": 13
+        },
+        {
+          "suit": "H",
+          "rank": 14
+        },
+        {
+          "suit": "H",
+          "rank": 7
+        },
+        {
+          "suit": "H",
+          "rank": 5
+        },
+        {
+          "suit": "D",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 5
+        },
+        {
+          "suit": "C",
+          "rank": 13
+        },
+        {
+          "suit": "C",
+          "rank": 12
+        },
+        {
+          "suit": "C",
+          "rank": 8
+        },
+        {
+          "suit": "C",
+          "rank": 4
+        },
+        {
+          "suit": "C",
+          "rank": 2
+        }
+      ],
+      "E": [
+        {
+          "suit": "S",
+          "rank": 7
+        },
+        {
+          "suit": "S",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 13
+        },
+        {
+          "suit": "H",
+          "rank": 12
+        },
+        {
+          "suit": "H",
+          "rank": 11
+        },
+        {
+          "suit": "H",
+          "rank": 6
+        },
+        {
+          "suit": "H",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 2
+        },
+        {
+          "suit": "D",
+          "rank": 12
+        },
+        {
+          "suit": "D",
+          "rank": 11
+        },
+        {
+          "suit": "D",
+          "rank": 10
+        },
+        {
+          "suit": "D",
+          "rank": 2
+        },
+        {
+          "suit": "C",
+          "rank": 14
+        }
+      ],
+      "W": [
+        {
+          "suit": "S",
+          "rank": 12
+        },
+        {
+          "suit": "S",
+          "rank": 11
+        },
+        {
+          "suit": "S",
+          "rank": 10
+        },
+        {
+          "suit": "S",
+          "rank": 8
+        },
+        {
+          "suit": "S",
+          "rank": 5
+        },
+        {
+          "suit": "S",
+          "rank": 3
+        },
+        {
+          "suit": "H",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 9
+        },
+        {
+          "suit": "D",
+          "rank": 4
+        },
+        {
+          "suit": "D",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 6
+        },
+        {
+          "suit": "C",
+          "rank": 3
+        }
+      ]
+    },
+    "expected": {
+      "table": [
+        [
+          5,
+          6,
+          5,
+          6
+        ],
+        [
+          6,
+          7,
+          6,
+          7
+        ],
+        [
+          6,
+          6,
+          6,
+          6
+        ],
+        [
+          9,
+          4,
+          9,
+          4
+        ],
+        [
+          7,
+          4,
+          7,
+          4
+        ]
+      ]
+    }
+  },
+  {
+    "id": "problem.A3.opening",
+    "kind": "table",
+    "sourceLabel": "problem:A3:opening",
+    "hands": {
+      "N": [
+        {
+          "suit": "S",
+          "rank": 14
+        },
+        {
+          "suit": "S",
+          "rank": 3
+        },
+        {
+          "suit": "H",
+          "rank": 14
+        },
+        {
+          "suit": "H",
+          "rank": 9
+        },
+        {
+          "suit": "H",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 5
+        },
+        {
+          "suit": "D",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 9
+        },
+        {
+          "suit": "C",
+          "rank": 8
+        },
+        {
+          "suit": "C",
+          "rank": 6
+        },
+        {
+          "suit": "C",
+          "rank": 4
+        },
+        {
+          "suit": "C",
+          "rank": 3
+        }
+      ],
+      "S": [
+        {
+          "suit": "S",
+          "rank": 5
+        },
+        {
+          "suit": "S",
+          "rank": 2
+        },
+        {
+          "suit": "H",
+          "rank": 6
+        },
+        {
+          "suit": "H",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 3
+        },
+        {
+          "suit": "D",
+          "rank": 14
+        },
+        {
+          "suit": "D",
+          "rank": 12
+        },
+        {
+          "suit": "D",
+          "rank": 6
+        },
+        {
+          "suit": "C",
+          "rank": 14
+        },
+        {
+          "suit": "C",
+          "rank": 13
+        },
+        {
+          "suit": "C",
+          "rank": 12
+        },
+        {
+          "suit": "C",
+          "rank": 11
+        },
+        {
+          "suit": "C",
+          "rank": 10
+        }
+      ],
+      "E": [
+        {
+          "suit": "S",
+          "rank": 13
+        },
+        {
+          "suit": "S",
+          "rank": 9
+        },
+        {
+          "suit": "S",
+          "rank": 7
+        },
+        {
+          "suit": "S",
+          "rank": 6
+        },
+        {
+          "suit": "S",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 12
+        },
+        {
+          "suit": "H",
+          "rank": 10
+        },
+        {
+          "suit": "H",
+          "rank": 2
+        },
+        {
+          "suit": "D",
+          "rank": 13
+        },
+        {
+          "suit": "D",
+          "rank": 11
+        },
+        {
+          "suit": "D",
+          "rank": 2
+        },
+        {
+          "suit": "C",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 2
+        }
+      ],
+      "W": [
+        {
+          "suit": "S",
+          "rank": 12
+        },
+        {
+          "suit": "S",
+          "rank": 11
+        },
+        {
+          "suit": "S",
+          "rank": 10
+        },
+        {
+          "suit": "S",
+          "rank": 8
+        },
+        {
+          "suit": "H",
+          "rank": 13
+        },
+        {
+          "suit": "H",
+          "rank": 11
+        },
+        {
+          "suit": "H",
+          "rank": 7
+        },
+        {
+          "suit": "H",
+          "rank": 5
+        },
+        {
+          "suit": "D",
+          "rank": 10
+        },
+        {
+          "suit": "D",
+          "rank": 9
+        },
+        {
+          "suit": "D",
+          "rank": 7
+        },
+        {
+          "suit": "D",
+          "rank": 4
+        },
+        {
+          "suit": "C",
+          "rank": 5
+        }
+      ]
+    },
+    "expected": {
+      "table": [
+        [
+          5,
+          8,
+          5,
+          8
+        ],
+        [
+          6,
+          7,
+          6,
+          7
+        ],
+        [
+          7,
+          6,
+          7,
+          6
+        ],
+        [
+          9,
+          4,
+          9,
+          4
+        ],
+        [
+          9,
+          4,
+          9,
+          4
+        ]
+      ]
+    }
+  },
+  {
+    "id": "problem.A3.test-0",
+    "kind": "table",
+    "sourceLabel": "problem:A3:testCases[0]",
+    "hands": {
+      "N": [
+        {
+          "suit": "S",
+          "rank": 14
+        },
+        {
+          "suit": "S",
+          "rank": 3
+        },
+        {
+          "suit": "H",
+          "rank": 14
+        },
+        {
+          "suit": "H",
+          "rank": 9
+        },
+        {
+          "suit": "H",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 5
+        },
+        {
+          "suit": "D",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 9
+        },
+        {
+          "suit": "C",
+          "rank": 8
+        },
+        {
+          "suit": "C",
+          "rank": 6
+        },
+        {
+          "suit": "C",
+          "rank": 4
+        },
+        {
+          "suit": "C",
+          "rank": 3
+        }
+      ],
+      "S": [
+        {
+          "suit": "S",
+          "rank": 5
+        },
+        {
+          "suit": "S",
+          "rank": 2
+        },
+        {
+          "suit": "H",
+          "rank": 6
+        },
+        {
+          "suit": "H",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 3
+        },
+        {
+          "suit": "D",
+          "rank": 14
+        },
+        {
+          "suit": "D",
+          "rank": 12
+        },
+        {
+          "suit": "D",
+          "rank": 6
+        },
+        {
+          "suit": "C",
+          "rank": 14
+        },
+        {
+          "suit": "C",
+          "rank": 13
+        },
+        {
+          "suit": "C",
+          "rank": 12
+        },
+        {
+          "suit": "C",
+          "rank": 11
+        },
+        {
+          "suit": "C",
+          "rank": 10
+        }
+      ],
+      "E": [
+        {
+          "suit": "S",
+          "rank": 13
+        },
+        {
+          "suit": "S",
+          "rank": 9
+        },
+        {
+          "suit": "S",
+          "rank": 7
+        },
+        {
+          "suit": "S",
+          "rank": 6
+        },
+        {
+          "suit": "S",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 12
+        },
+        {
+          "suit": "H",
+          "rank": 10
+        },
+        {
+          "suit": "H",
+          "rank": 2
+        },
+        {
+          "suit": "D",
+          "rank": 13
+        },
+        {
+          "suit": "D",
+          "rank": 11
+        },
+        {
+          "suit": "D",
+          "rank": 2
+        },
+        {
+          "suit": "C",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 2
+        }
+      ],
+      "W": [
+        {
+          "suit": "S",
+          "rank": 12
+        },
+        {
+          "suit": "S",
+          "rank": 11
+        },
+        {
+          "suit": "S",
+          "rank": 10
+        },
+        {
+          "suit": "S",
+          "rank": 8
+        },
+        {
+          "suit": "H",
+          "rank": 13
+        },
+        {
+          "suit": "H",
+          "rank": 11
+        },
+        {
+          "suit": "H",
+          "rank": 7
+        },
+        {
+          "suit": "H",
+          "rank": 5
+        },
+        {
+          "suit": "D",
+          "rank": 10
+        },
+        {
+          "suit": "D",
+          "rank": 9
+        },
+        {
+          "suit": "D",
+          "rank": 7
+        },
+        {
+          "suit": "D",
+          "rank": 4
+        },
+        {
+          "suit": "C",
+          "rank": 5
+        }
+      ]
+    },
+    "expected": {
+      "table": [
+        [
+          5,
+          8,
+          5,
+          8
+        ],
+        [
+          6,
+          7,
+          6,
+          7
+        ],
+        [
+          7,
+          6,
+          7,
+          6
+        ],
+        [
+          9,
+          4,
+          9,
+          4
+        ],
+        [
+          9,
+          4,
+          9,
+          4
+        ]
+      ]
+    }
+  },
+  {
+    "id": "problem.A3.test-1",
+    "kind": "table",
+    "sourceLabel": "problem:A3:testCases[1]",
+    "hands": {
+      "N": [
+        {
+          "suit": "S",
+          "rank": 14
+        },
+        {
+          "suit": "S",
+          "rank": 12
+        },
+        {
+          "suit": "S",
+          "rank": 11
+        },
+        {
+          "suit": "S",
+          "rank": 10
+        },
+        {
+          "suit": "H",
+          "rank": 11
+        },
+        {
+          "suit": "H",
+          "rank": 8
+        },
+        {
+          "suit": "H",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 12
+        },
+        {
+          "suit": "D",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 5
+        },
+        {
+          "suit": "C",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 6
+        },
+        {
+          "suit": "C",
+          "rank": 4
+        }
+      ],
+      "S": [
+        {
+          "suit": "S",
+          "rank": 8
+        },
+        {
+          "suit": "S",
+          "rank": 6
+        },
+        {
+          "suit": "S",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 14
+        },
+        {
+          "suit": "H",
+          "rank": 5
+        },
+        {
+          "suit": "H",
+          "rank": 4
+        },
+        {
+          "suit": "D",
+          "rank": 14
+        },
+        {
+          "suit": "D",
+          "rank": 13
+        },
+        {
+          "suit": "D",
+          "rank": 2
+        },
+        {
+          "suit": "C",
+          "rank": 14
+        },
+        {
+          "suit": "C",
+          "rank": 8
+        },
+        {
+          "suit": "C",
+          "rank": 5
+        },
+        {
+          "suit": "C",
+          "rank": 2
+        }
+      ],
+      "E": [
+        {
+          "suit": "S",
+          "rank": 3
+        },
+        {
+          "suit": "S",
+          "rank": 2
+        },
+        {
+          "suit": "H",
+          "rank": 13
+        },
+        {
+          "suit": "H",
+          "rank": 10
+        },
+        {
+          "suit": "H",
+          "rank": 2
+        },
+        {
+          "suit": "D",
+          "rank": 10
+        },
+        {
+          "suit": "D",
+          "rank": 9
+        },
+        {
+          "suit": "D",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 12
+        },
+        {
+          "suit": "C",
+          "rank": 11
+        },
+        {
+          "suit": "C",
+          "rank": 10
+        },
+        {
+          "suit": "C",
+          "rank": 9
+        }
+      ],
+      "W": [
+        {
+          "suit": "S",
+          "rank": 13
+        },
+        {
+          "suit": "S",
+          "rank": 9
+        },
+        {
+          "suit": "S",
+          "rank": 7
+        },
+        {
+          "suit": "S",
+          "rank": 5
+        },
+        {
+          "suit": "H",
+          "rank": 12
+        },
+        {
+          "suit": "H",
+          "rank": 9
+        },
+        {
+          "suit": "H",
+          "rank": 7
+        },
+        {
+          "suit": "H",
+          "rank": 3
+        },
+        {
+          "suit": "D",
+          "rank": 11
+        },
+        {
+          "suit": "D",
+          "rank": 7
+        },
+        {
+          "suit": "D",
+          "rank": 4
+        },
+        {
+          "suit": "C",
+          "rank": 13
+        },
+        {
+          "suit": "C",
+          "rank": 3
+        }
+      ]
+    },
+    "expected": {
+      "table": [
+        [
+          9,
+          4,
+          9,
+          4
+        ],
+        [
+          8,
+          5,
+          8,
+          5
+        ],
+        [
+          7,
+          5,
+          7,
+          6
+        ],
+        [
+          8,
+          4,
+          8,
+          5
+        ],
+        [
+          9,
+          4,
+          9,
+          4
+        ]
+      ]
+    }
+  },
+  {
+    "id": "problem.A3.test-2",
+    "kind": "table",
+    "sourceLabel": "problem:A3:testCases[2]",
+    "hands": {
+      "N": [
+        {
+          "suit": "S",
+          "rank": 14
+        },
+        {
+          "suit": "S",
+          "rank": 3
+        },
+        {
+          "suit": "H",
+          "rank": 14
+        },
+        {
+          "suit": "H",
+          "rank": 9
+        },
+        {
+          "suit": "H",
+          "rank": 8
+        },
+        {
+          "suit": "H",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 5
+        },
+        {
+          "suit": "D",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 9
+        },
+        {
+          "suit": "C",
+          "rank": 6
+        },
+        {
+          "suit": "C",
+          "rank": 4
+        },
+        {
+          "suit": "C",
+          "rank": 3
+        }
+      ],
+      "S": [
+        {
+          "suit": "S",
+          "rank": 5
+        },
+        {
+          "suit": "S",
+          "rank": 2
+        },
+        {
+          "suit": "H",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 3
+        },
+        {
+          "suit": "D",
+          "rank": 14
+        },
+        {
+          "suit": "D",
+          "rank": 12
+        },
+        {
+          "suit": "D",
+          "rank": 6
+        },
+        {
+          "suit": "C",
+          "rank": 14
+        },
+        {
+          "suit": "C",
+          "rank": 13
+        },
+        {
+          "suit": "C",
+          "rank": 12
+        },
+        {
+          "suit": "C",
+          "rank": 11
+        },
+        {
+          "suit": "C",
+          "rank": 10
+        },
+        {
+          "suit": "C",
+          "rank": 8
+        }
+      ],
+      "E": [
+        {
+          "suit": "S",
+          "rank": 8
+        },
+        {
+          "suit": "S",
+          "rank": 7
+        },
+        {
+          "suit": "S",
+          "rank": 6
+        },
+        {
+          "suit": "S",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 12
+        },
+        {
+          "suit": "H",
+          "rank": 10
+        },
+        {
+          "suit": "H",
+          "rank": 2
+        },
+        {
+          "suit": "D",
+          "rank": 11
+        },
+        {
+          "suit": "D",
+          "rank": 10
+        },
+        {
+          "suit": "D",
+          "rank": 9
+        },
+        {
+          "suit": "D",
+          "rank": 2
+        },
+        {
+          "suit": "C",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 2
+        }
+      ],
+      "W": [
+        {
+          "suit": "S",
+          "rank": 13
+        },
+        {
+          "suit": "S",
+          "rank": 12
+        },
+        {
+          "suit": "S",
+          "rank": 11
+        },
+        {
+          "suit": "S",
+          "rank": 10
+        },
+        {
+          "suit": "S",
+          "rank": 9
+        },
+        {
+          "suit": "H",
+          "rank": 13
+        },
+        {
+          "suit": "H",
+          "rank": 11
+        },
+        {
+          "suit": "H",
+          "rank": 7
+        },
+        {
+          "suit": "H",
+          "rank": 5
+        },
+        {
+          "suit": "D",
+          "rank": 13
+        },
+        {
+          "suit": "D",
+          "rank": 7
+        },
+        {
+          "suit": "D",
+          "rank": 4
+        },
+        {
+          "suit": "C",
+          "rank": 5
+        }
+      ]
+    },
+    "expected": {
+      "table": [
+        [
+          4,
+          8,
+          4,
+          8
+        ],
+        [
+          6,
+          6,
+          6,
+          6
+        ],
+        [
+          6,
+          7,
+          6,
+          7
+        ],
+        [
+          9,
+          3,
+          10,
+          3
+        ],
+        [
+          9,
+          3,
+          9,
+          3
+        ]
+      ]
+    }
+  },
+  {
+    "id": "problem.A3.test-3",
+    "kind": "table",
+    "sourceLabel": "problem:A3:testCases[3]",
+    "hands": {
+      "N": [
+        {
+          "suit": "S",
+          "rank": 14
+        },
+        {
+          "suit": "S",
+          "rank": 3
+        },
+        {
+          "suit": "H",
+          "rank": 9
+        },
+        {
+          "suit": "H",
+          "rank": 8
+        },
+        {
+          "suit": "H",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 12
+        },
+        {
+          "suit": "D",
+          "rank": 11
+        },
+        {
+          "suit": "D",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 12
+        },
+        {
+          "suit": "C",
+          "rank": 8
+        },
+        {
+          "suit": "C",
+          "rank": 6
+        },
+        {
+          "suit": "C",
+          "rank": 4
+        },
+        {
+          "suit": "C",
+          "rank": 3
+        }
+      ],
+      "S": [
+        {
+          "suit": "S",
+          "rank": 5
+        },
+        {
+          "suit": "S",
+          "rank": 2
+        },
+        {
+          "suit": "H",
+          "rank": 14
+        },
+        {
+          "suit": "H",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 3
+        },
+        {
+          "suit": "D",
+          "rank": 14
+        },
+        {
+          "suit": "D",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 6
+        },
+        {
+          "suit": "C",
+          "rank": 14
+        },
+        {
+          "suit": "C",
+          "rank": 13
+        },
+        {
+          "suit": "C",
+          "rank": 11
+        },
+        {
+          "suit": "C",
+          "rank": 10
+        },
+        {
+          "suit": "C",
+          "rank": 9
+        }
+      ],
+      "E": [
+        {
+          "suit": "S",
+          "rank": 13
+        },
+        {
+          "suit": "S",
+          "rank": 9
+        },
+        {
+          "suit": "S",
+          "rank": 7
+        },
+        {
+          "suit": "S",
+          "rank": 6
+        },
+        {
+          "suit": "S",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 12
+        },
+        {
+          "suit": "H",
+          "rank": 10
+        },
+        {
+          "suit": "H",
+          "rank": 2
+        },
+        {
+          "suit": "D",
+          "rank": 13
+        },
+        {
+          "suit": "D",
+          "rank": 5
+        },
+        {
+          "suit": "D",
+          "rank": 2
+        },
+        {
+          "suit": "C",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 2
+        }
+      ],
+      "W": [
+        {
+          "suit": "S",
+          "rank": 12
+        },
+        {
+          "suit": "S",
+          "rank": 11
+        },
+        {
+          "suit": "S",
+          "rank": 10
+        },
+        {
+          "suit": "S",
+          "rank": 8
+        },
+        {
+          "suit": "H",
+          "rank": 13
+        },
+        {
+          "suit": "H",
+          "rank": 11
+        },
+        {
+          "suit": "H",
+          "rank": 7
+        },
+        {
+          "suit": "H",
+          "rank": 5
+        },
+        {
+          "suit": "D",
+          "rank": 10
+        },
+        {
+          "suit": "D",
+          "rank": 9
+        },
+        {
+          "suit": "D",
+          "rank": 7
+        },
+        {
+          "suit": "D",
+          "rank": 4
+        },
+        {
+          "suit": "C",
+          "rank": 5
+        }
+      ]
+    },
+    "expected": {
+      "table": [
+        [
+          5,
+          8,
+          5,
+          8
+        ],
+        [
+          6,
+          6,
+          6,
+          6
+        ],
+        [
+          7,
+          6,
+          7,
+          6
+        ],
+        [
+          9,
+          4,
+          9,
+          4
+        ],
+        [
+          9,
+          4,
+          9,
+          4
+        ]
+      ]
+    }
+  },
+  {
+    "id": "problem.A4.opening",
+    "kind": "table",
+    "sourceLabel": "problem:A4:opening",
+    "hands": {
+      "N": [
+        {
+          "suit": "S",
+          "rank": 14
+        },
+        {
+          "suit": "S",
+          "rank": 8
+        },
+        {
+          "suit": "S",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 12
+        },
+        {
+          "suit": "H",
+          "rank": 10
+        },
+        {
+          "suit": "H",
+          "rank": 5
+        },
+        {
+          "suit": "H",
+          "rank": 3
+        },
+        {
+          "suit": "D",
+          "rank": 14
+        },
+        {
+          "suit": "D",
+          "rank": 11
+        },
+        {
+          "suit": "D",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 13
+        },
+        {
+          "suit": "C",
+          "rank": 10
+        }
+      ],
+      "S": [
+        {
+          "suit": "S",
+          "rank": 9
+        },
+        {
+          "suit": "H",
+          "rank": 13
+        },
+        {
+          "suit": "H",
+          "rank": 11
+        },
+        {
+          "suit": "H",
+          "rank": 9
+        },
+        {
+          "suit": "H",
+          "rank": 8
+        },
+        {
+          "suit": "H",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 12
+        },
+        {
+          "suit": "D",
+          "rank": 10
+        },
+        {
+          "suit": "D",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 14
+        },
+        {
+          "suit": "C",
+          "rank": 12
+        },
+        {
+          "suit": "C",
+          "rank": 8
+        }
+      ],
+      "E": [
+        {
+          "suit": "S",
+          "rank": 13
+        },
+        {
+          "suit": "S",
+          "rank": 12
+        },
+        {
+          "suit": "S",
+          "rank": 10
+        },
+        {
+          "suit": "S",
+          "rank": 7
+        },
+        {
+          "suit": "S",
+          "rank": 5
+        },
+        {
+          "suit": "H",
+          "rank": 14
+        },
+        {
+          "suit": "H",
+          "rank": 7
+        },
+        {
+          "suit": "D",
+          "rank": 5
+        },
+        {
+          "suit": "D",
+          "rank": 4
+        },
+        {
+          "suit": "C",
+          "rank": 11
+        },
+        {
+          "suit": "C",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 5
+        },
+        {
+          "suit": "C",
+          "rank": 4
+        }
+      ],
+      "W": [
+        {
+          "suit": "S",
+          "rank": 11
+        },
+        {
+          "suit": "S",
+          "rank": 6
+        },
+        {
+          "suit": "S",
+          "rank": 3
+        },
+        {
+          "suit": "S",
+          "rank": 2
+        },
+        {
+          "suit": "H",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 2
+        },
+        {
+          "suit": "D",
+          "rank": 13
+        },
+        {
+          "suit": "D",
+          "rank": 9
+        },
+        {
+          "suit": "D",
+          "rank": 2
+        },
+        {
+          "suit": "C",
+          "rank": 9
+        },
+        {
+          "suit": "C",
+          "rank": 6
+        },
+        {
+          "suit": "C",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 2
+        }
+      ]
+    },
+    "expected": {
+      "table": [
+        [
+          7,
+          6,
+          7,
+          6
+        ],
+        [
+          12,
+          1,
+          12,
+          1
+        ],
+        [
+          12,
+          1,
+          12,
+          1
+        ],
+        [
+          8,
+          5,
+          8,
+          5
+        ],
+        [
+          8,
+          1,
+          8,
+          1
+        ]
+      ]
+    }
+  },
+  {
+    "id": "problem.A4.test-0",
+    "kind": "table",
+    "sourceLabel": "problem:A4:testCases[0]",
+    "hands": {
+      "N": [
+        {
+          "suit": "S",
+          "rank": 14
+        },
+        {
+          "suit": "S",
+          "rank": 8
+        },
+        {
+          "suit": "S",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 12
+        },
+        {
+          "suit": "H",
+          "rank": 10
+        },
+        {
+          "suit": "H",
+          "rank": 5
+        },
+        {
+          "suit": "H",
+          "rank": 3
+        },
+        {
+          "suit": "D",
+          "rank": 14
+        },
+        {
+          "suit": "D",
+          "rank": 11
+        },
+        {
+          "suit": "D",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 13
+        },
+        {
+          "suit": "C",
+          "rank": 10
+        }
+      ],
+      "S": [
+        {
+          "suit": "S",
+          "rank": 9
+        },
+        {
+          "suit": "H",
+          "rank": 13
+        },
+        {
+          "suit": "H",
+          "rank": 11
+        },
+        {
+          "suit": "H",
+          "rank": 9
+        },
+        {
+          "suit": "H",
+          "rank": 8
+        },
+        {
+          "suit": "H",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 12
+        },
+        {
+          "suit": "D",
+          "rank": 10
+        },
+        {
+          "suit": "D",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 14
+        },
+        {
+          "suit": "C",
+          "rank": 12
+        },
+        {
+          "suit": "C",
+          "rank": 8
+        }
+      ],
+      "E": [
+        {
+          "suit": "S",
+          "rank": 13
+        },
+        {
+          "suit": "S",
+          "rank": 12
+        },
+        {
+          "suit": "S",
+          "rank": 10
+        },
+        {
+          "suit": "S",
+          "rank": 7
+        },
+        {
+          "suit": "S",
+          "rank": 5
+        },
+        {
+          "suit": "H",
+          "rank": 14
+        },
+        {
+          "suit": "H",
+          "rank": 7
+        },
+        {
+          "suit": "D",
+          "rank": 5
+        },
+        {
+          "suit": "D",
+          "rank": 4
+        },
+        {
+          "suit": "C",
+          "rank": 11
+        },
+        {
+          "suit": "C",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 5
+        },
+        {
+          "suit": "C",
+          "rank": 4
+        }
+      ],
+      "W": [
+        {
+          "suit": "S",
+          "rank": 11
+        },
+        {
+          "suit": "S",
+          "rank": 6
+        },
+        {
+          "suit": "S",
+          "rank": 3
+        },
+        {
+          "suit": "S",
+          "rank": 2
+        },
+        {
+          "suit": "H",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 2
+        },
+        {
+          "suit": "D",
+          "rank": 13
+        },
+        {
+          "suit": "D",
+          "rank": 9
+        },
+        {
+          "suit": "D",
+          "rank": 2
+        },
+        {
+          "suit": "C",
+          "rank": 9
+        },
+        {
+          "suit": "C",
+          "rank": 6
+        },
+        {
+          "suit": "C",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 2
+        }
+      ]
+    },
+    "expected": {
+      "table": [
+        [
+          7,
+          6,
+          7,
+          6
+        ],
+        [
+          12,
+          1,
+          12,
+          1
+        ],
+        [
+          12,
+          1,
+          12,
+          1
+        ],
+        [
+          8,
+          5,
+          8,
+          5
+        ],
+        [
+          8,
+          1,
+          8,
+          1
+        ]
+      ]
+    }
+  },
+  {
+    "id": "problem.A5.opening",
+    "kind": "table",
+    "sourceLabel": "problem:A5:opening",
+    "hands": {
+      "N": [
+        {
+          "suit": "S",
+          "rank": 12
+        },
+        {
+          "suit": "S",
+          "rank": 6
+        },
+        {
+          "suit": "H",
+          "rank": 13
+        },
+        {
+          "suit": "H",
+          "rank": 7
+        },
+        {
+          "suit": "H",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 14
+        },
+        {
+          "suit": "D",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 5
+        },
+        {
+          "suit": "D",
+          "rank": 4
+        },
+        {
+          "suit": "C",
+          "rank": 13
+        },
+        {
+          "suit": "C",
+          "rank": 11
+        },
+        {
+          "suit": "C",
+          "rank": 5
+        },
+        {
+          "suit": "C",
+          "rank": 4
+        }
+      ],
+      "S": [
+        {
+          "suit": "S",
+          "rank": 11
+        },
+        {
+          "suit": "S",
+          "rank": 7
+        },
+        {
+          "suit": "S",
+          "rank": 2
+        },
+        {
+          "suit": "H",
+          "rank": 14
+        },
+        {
+          "suit": "H",
+          "rank": 3
+        },
+        {
+          "suit": "H",
+          "rank": 2
+        },
+        {
+          "suit": "D",
+          "rank": 13
+        },
+        {
+          "suit": "D",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 14
+        },
+        {
+          "suit": "C",
+          "rank": 12
+        },
+        {
+          "suit": "C",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 2
+        }
+      ],
+      "E": [
+        {
+          "suit": "S",
+          "rank": 14
+        },
+        {
+          "suit": "S",
+          "rank": 5
+        },
+        {
+          "suit": "S",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 12
+        },
+        {
+          "suit": "H",
+          "rank": 11
+        },
+        {
+          "suit": "H",
+          "rank": 10
+        },
+        {
+          "suit": "D",
+          "rank": 9
+        },
+        {
+          "suit": "D",
+          "rank": 3
+        },
+        {
+          "suit": "D",
+          "rank": 2
+        },
+        {
+          "suit": "C",
+          "rank": 9
+        },
+        {
+          "suit": "C",
+          "rank": 8
+        },
+        {
+          "suit": "C",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 6
+        }
+      ],
+      "W": [
+        {
+          "suit": "S",
+          "rank": 13
+        },
+        {
+          "suit": "S",
+          "rank": 10
+        },
+        {
+          "suit": "S",
+          "rank": 9
+        },
+        {
+          "suit": "S",
+          "rank": 8
+        },
+        {
+          "suit": "S",
+          "rank": 3
+        },
+        {
+          "suit": "H",
+          "rank": 9
+        },
+        {
+          "suit": "H",
+          "rank": 8
+        },
+        {
+          "suit": "H",
+          "rank": 5
+        },
+        {
+          "suit": "H",
+          "rank": 4
+        },
+        {
+          "suit": "D",
+          "rank": 12
+        },
+        {
+          "suit": "D",
+          "rank": 11
+        },
+        {
+          "suit": "D",
+          "rank": 10
+        },
+        {
+          "suit": "C",
+          "rank": 10
+        }
+      ]
+    },
+    "expected": {
+      "table": [
+        [
+          6,
+          7,
+          6,
+          7
+        ],
+        [
+          7,
+          5,
+          7,
+          5
+        ],
+        [
+          9,
+          4,
+          9,
+          4
+        ],
+        [
+          9,
+          4,
+          9,
+          4
+        ],
+        [
+          9,
+          4,
+          9,
+          4
+        ]
+      ]
+    }
+  },
+  {
+    "id": "problem.A5.test-0",
+    "kind": "table",
+    "sourceLabel": "problem:A5:testCases[0]",
+    "hands": {
+      "N": [
+        {
+          "suit": "S",
+          "rank": 12
+        },
+        {
+          "suit": "S",
+          "rank": 6
+        },
+        {
+          "suit": "H",
+          "rank": 13
+        },
+        {
+          "suit": "H",
+          "rank": 7
+        },
+        {
+          "suit": "H",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 14
+        },
+        {
+          "suit": "D",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 5
+        },
+        {
+          "suit": "D",
+          "rank": 4
+        },
+        {
+          "suit": "C",
+          "rank": 13
+        },
+        {
+          "suit": "C",
+          "rank": 11
+        },
+        {
+          "suit": "C",
+          "rank": 5
+        },
+        {
+          "suit": "C",
+          "rank": 4
+        }
+      ],
+      "S": [
+        {
+          "suit": "S",
+          "rank": 11
+        },
+        {
+          "suit": "S",
+          "rank": 7
+        },
+        {
+          "suit": "S",
+          "rank": 2
+        },
+        {
+          "suit": "H",
+          "rank": 14
+        },
+        {
+          "suit": "H",
+          "rank": 3
+        },
+        {
+          "suit": "H",
+          "rank": 2
+        },
+        {
+          "suit": "D",
+          "rank": 13
+        },
+        {
+          "suit": "D",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 14
+        },
+        {
+          "suit": "C",
+          "rank": 12
+        },
+        {
+          "suit": "C",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 2
+        }
+      ],
+      "E": [
+        {
+          "suit": "S",
+          "rank": 14
+        },
+        {
+          "suit": "S",
+          "rank": 5
+        },
+        {
+          "suit": "S",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 12
+        },
+        {
+          "suit": "H",
+          "rank": 11
+        },
+        {
+          "suit": "H",
+          "rank": 10
+        },
+        {
+          "suit": "D",
+          "rank": 9
+        },
+        {
+          "suit": "D",
+          "rank": 3
+        },
+        {
+          "suit": "D",
+          "rank": 2
+        },
+        {
+          "suit": "C",
+          "rank": 9
+        },
+        {
+          "suit": "C",
+          "rank": 8
+        },
+        {
+          "suit": "C",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 6
+        }
+      ],
+      "W": [
+        {
+          "suit": "S",
+          "rank": 13
+        },
+        {
+          "suit": "S",
+          "rank": 10
+        },
+        {
+          "suit": "S",
+          "rank": 9
+        },
+        {
+          "suit": "S",
+          "rank": 8
+        },
+        {
+          "suit": "S",
+          "rank": 3
+        },
+        {
+          "suit": "H",
+          "rank": 9
+        },
+        {
+          "suit": "H",
+          "rank": 8
+        },
+        {
+          "suit": "H",
+          "rank": 5
+        },
+        {
+          "suit": "H",
+          "rank": 4
+        },
+        {
+          "suit": "D",
+          "rank": 12
+        },
+        {
+          "suit": "D",
+          "rank": 11
+        },
+        {
+          "suit": "D",
+          "rank": 10
+        },
+        {
+          "suit": "C",
+          "rank": 10
+        }
+      ]
+    },
+    "expected": {
+      "table": [
+        [
+          6,
+          7,
+          6,
+          7
+        ],
+        [
+          7,
+          5,
+          7,
+          5
+        ],
+        [
+          9,
+          4,
+          9,
+          4
+        ],
+        [
+          9,
+          4,
+          9,
+          4
+        ],
+        [
+          9,
+          4,
+          9,
+          4
+        ]
+      ]
+    }
+  },
+  {
+    "id": "problem.A5.test-0.branch-0",
+    "kind": "solve",
+    "sourceLabel": "problem:A5:testCases[0].deviationBranches[0]",
+    "trump": "NT",
+    "trickLeader": "W",
+    "trickPlayed": [
+      {
+        "suit": "S",
+        "rank": 10
+      },
+      {
+        "suit": "S",
+        "rank": 12
+      }
+    ],
+    "hands": {
+      "N": [
+        {
+          "suit": "S",
+          "rank": 6
+        },
+        {
+          "suit": "H",
+          "rank": 13
+        },
+        {
+          "suit": "H",
+          "rank": 7
+        },
+        {
+          "suit": "H",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 14
+        },
+        {
+          "suit": "D",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 5
+        },
+        {
+          "suit": "D",
+          "rank": 4
+        },
+        {
+          "suit": "C",
+          "rank": 13
+        },
+        {
+          "suit": "C",
+          "rank": 11
+        },
+        {
+          "suit": "C",
+          "rank": 5
+        },
+        {
+          "suit": "C",
+          "rank": 4
+        }
+      ],
+      "S": [
+        {
+          "suit": "S",
+          "rank": 11
+        },
+        {
+          "suit": "S",
+          "rank": 7
+        },
+        {
+          "suit": "S",
+          "rank": 2
+        },
+        {
+          "suit": "H",
+          "rank": 14
+        },
+        {
+          "suit": "H",
+          "rank": 3
+        },
+        {
+          "suit": "H",
+          "rank": 2
+        },
+        {
+          "suit": "D",
+          "rank": 13
+        },
+        {
+          "suit": "D",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 14
+        },
+        {
+          "suit": "C",
+          "rank": 12
+        },
+        {
+          "suit": "C",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 2
+        }
+      ],
+      "E": [
+        {
+          "suit": "S",
+          "rank": 14
+        },
+        {
+          "suit": "S",
+          "rank": 5
+        },
+        {
+          "suit": "S",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 12
+        },
+        {
+          "suit": "H",
+          "rank": 11
+        },
+        {
+          "suit": "H",
+          "rank": 10
+        },
+        {
+          "suit": "D",
+          "rank": 9
+        },
+        {
+          "suit": "D",
+          "rank": 3
+        },
+        {
+          "suit": "D",
+          "rank": 2
+        },
+        {
+          "suit": "C",
+          "rank": 9
+        },
+        {
+          "suit": "C",
+          "rank": 8
+        },
+        {
+          "suit": "C",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 6
+        }
+      ],
+      "W": [
+        {
+          "suit": "S",
+          "rank": 13
+        },
+        {
+          "suit": "S",
+          "rank": 9
+        },
+        {
+          "suit": "S",
+          "rank": 8
+        },
+        {
+          "suit": "S",
+          "rank": 3
+        },
+        {
+          "suit": "H",
+          "rank": 9
+        },
+        {
+          "suit": "H",
+          "rank": 8
+        },
+        {
+          "suit": "H",
+          "rank": 5
+        },
+        {
+          "suit": "H",
+          "rank": 4
+        },
+        {
+          "suit": "D",
+          "rank": 12
+        },
+        {
+          "suit": "D",
+          "rank": 11
+        },
+        {
+          "suit": "D",
+          "rank": 10
+        },
+        {
+          "suit": "C",
+          "rank": 10
+        }
+      ]
+    },
+    "expected": {
+      "score": 5,
+      "cards": [
+        {
+          "suit": "S",
+          "rank": 14
+        }
+      ]
+    }
+  },
+  {
+    "id": "problem.A6.opening",
+    "kind": "table",
+    "sourceLabel": "problem:A6:opening",
+    "hands": {
+      "N": [
+        {
+          "suit": "S",
+          "rank": 14
+        },
+        {
+          "suit": "S",
+          "rank": 13
+        },
+        {
+          "suit": "S",
+          "rank": 9
+        },
+        {
+          "suit": "S",
+          "rank": 6
+        },
+        {
+          "suit": "H",
+          "rank": 9
+        },
+        {
+          "suit": "H",
+          "rank": 5
+        },
+        {
+          "suit": "D",
+          "rank": 10
+        },
+        {
+          "suit": "D",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 7
+        },
+        {
+          "suit": "D",
+          "rank": 4
+        },
+        {
+          "suit": "C",
+          "rank": 14
+        },
+        {
+          "suit": "C",
+          "rank": 9
+        },
+        {
+          "suit": "C",
+          "rank": 4
+        }
+      ],
+      "S": [
+        {
+          "suit": "S",
+          "rank": 12
+        },
+        {
+          "suit": "S",
+          "rank": 11
+        },
+        {
+          "suit": "S",
+          "rank": 8
+        },
+        {
+          "suit": "S",
+          "rank": 7
+        },
+        {
+          "suit": "S",
+          "rank": 4
+        },
+        {
+          "suit": "S",
+          "rank": 3
+        },
+        {
+          "suit": "H",
+          "rank": 14
+        },
+        {
+          "suit": "H",
+          "rank": 13
+        },
+        {
+          "suit": "H",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 14
+        },
+        {
+          "suit": "D",
+          "rank": 13
+        },
+        {
+          "suit": "D",
+          "rank": 9
+        },
+        {
+          "suit": "C",
+          "rank": 8
+        }
+      ],
+      "E": [
+        {
+          "suit": "S",
+          "rank": 10
+        },
+        {
+          "suit": "S",
+          "rank": 2
+        },
+        {
+          "suit": "H",
+          "rank": 12
+        },
+        {
+          "suit": "H",
+          "rank": 11
+        },
+        {
+          "suit": "H",
+          "rank": 3
+        },
+        {
+          "suit": "D",
+          "rank": 12
+        },
+        {
+          "suit": "D",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 5
+        },
+        {
+          "suit": "D",
+          "rank": 2
+        },
+        {
+          "suit": "C",
+          "rank": 11
+        },
+        {
+          "suit": "C",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 6
+        },
+        {
+          "suit": "C",
+          "rank": 5
+        }
+      ],
+      "W": [
+        {
+          "suit": "S",
+          "rank": 5
+        },
+        {
+          "suit": "H",
+          "rank": 10
+        },
+        {
+          "suit": "H",
+          "rank": 7
+        },
+        {
+          "suit": "H",
+          "rank": 6
+        },
+        {
+          "suit": "H",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 2
+        },
+        {
+          "suit": "D",
+          "rank": 11
+        },
+        {
+          "suit": "D",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 13
+        },
+        {
+          "suit": "C",
+          "rank": 12
+        },
+        {
+          "suit": "C",
+          "rank": 10
+        },
+        {
+          "suit": "C",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 2
+        }
+      ]
+    },
+    "expected": {
+      "table": [
+        [
+          12,
+          1,
+          12,
+          1
+        ],
+        [
+          7,
+          6,
+          7,
+          6
+        ],
+        [
+          11,
+          1,
+          11,
+          1
+        ],
+        [
+          7,
+          6,
+          7,
+          6
+        ],
+        [
+          11,
+          1,
+          11,
+          1
+        ]
+      ]
+    }
+  },
+  {
+    "id": "problem.A6.test-0",
+    "kind": "table",
+    "sourceLabel": "problem:A6:testCases[0]",
+    "hands": {
+      "N": [
+        {
+          "suit": "S",
+          "rank": 14
+        },
+        {
+          "suit": "S",
+          "rank": 13
+        },
+        {
+          "suit": "S",
+          "rank": 9
+        },
+        {
+          "suit": "S",
+          "rank": 6
+        },
+        {
+          "suit": "H",
+          "rank": 9
+        },
+        {
+          "suit": "H",
+          "rank": 5
+        },
+        {
+          "suit": "D",
+          "rank": 10
+        },
+        {
+          "suit": "D",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 7
+        },
+        {
+          "suit": "D",
+          "rank": 4
+        },
+        {
+          "suit": "C",
+          "rank": 14
+        },
+        {
+          "suit": "C",
+          "rank": 9
+        },
+        {
+          "suit": "C",
+          "rank": 4
+        }
+      ],
+      "S": [
+        {
+          "suit": "S",
+          "rank": 12
+        },
+        {
+          "suit": "S",
+          "rank": 11
+        },
+        {
+          "suit": "S",
+          "rank": 8
+        },
+        {
+          "suit": "S",
+          "rank": 7
+        },
+        {
+          "suit": "S",
+          "rank": 4
+        },
+        {
+          "suit": "S",
+          "rank": 3
+        },
+        {
+          "suit": "H",
+          "rank": 14
+        },
+        {
+          "suit": "H",
+          "rank": 13
+        },
+        {
+          "suit": "H",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 14
+        },
+        {
+          "suit": "D",
+          "rank": 13
+        },
+        {
+          "suit": "D",
+          "rank": 9
+        },
+        {
+          "suit": "C",
+          "rank": 8
+        }
+      ],
+      "E": [
+        {
+          "suit": "S",
+          "rank": 10
+        },
+        {
+          "suit": "S",
+          "rank": 2
+        },
+        {
+          "suit": "H",
+          "rank": 12
+        },
+        {
+          "suit": "H",
+          "rank": 11
+        },
+        {
+          "suit": "H",
+          "rank": 3
+        },
+        {
+          "suit": "D",
+          "rank": 12
+        },
+        {
+          "suit": "D",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 5
+        },
+        {
+          "suit": "D",
+          "rank": 2
+        },
+        {
+          "suit": "C",
+          "rank": 11
+        },
+        {
+          "suit": "C",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 6
+        },
+        {
+          "suit": "C",
+          "rank": 5
+        }
+      ],
+      "W": [
+        {
+          "suit": "S",
+          "rank": 5
+        },
+        {
+          "suit": "H",
+          "rank": 10
+        },
+        {
+          "suit": "H",
+          "rank": 7
+        },
+        {
+          "suit": "H",
+          "rank": 6
+        },
+        {
+          "suit": "H",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 2
+        },
+        {
+          "suit": "D",
+          "rank": 11
+        },
+        {
+          "suit": "D",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 13
+        },
+        {
+          "suit": "C",
+          "rank": 12
+        },
+        {
+          "suit": "C",
+          "rank": 10
+        },
+        {
+          "suit": "C",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 2
+        }
+      ]
+    },
+    "expected": {
+      "table": [
+        [
+          12,
+          1,
+          12,
+          1
+        ],
+        [
+          7,
+          6,
+          7,
+          6
+        ],
+        [
+          11,
+          1,
+          11,
+          1
+        ],
+        [
+          7,
+          6,
+          7,
+          6
+        ],
+        [
+          11,
+          1,
+          11,
+          1
+        ]
+      ]
+    }
+  },
+  {
+    "id": "problem.A7.opening",
+    "kind": "table",
+    "sourceLabel": "problem:A7:opening",
+    "hands": {
+      "N": [
+        {
+          "suit": "S",
+          "rank": 8
+        },
+        {
+          "suit": "S",
+          "rank": 7
+        },
+        {
+          "suit": "S",
+          "rank": 5
+        },
+        {
+          "suit": "H",
+          "rank": 11
+        },
+        {
+          "suit": "H",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 14
+        },
+        {
+          "suit": "D",
+          "rank": 7
+        },
+        {
+          "suit": "D",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 4
+        },
+        {
+          "suit": "C",
+          "rank": 9
+        },
+        {
+          "suit": "C",
+          "rank": 8
+        },
+        {
+          "suit": "C",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 5
+        }
+      ],
+      "S": [
+        {
+          "suit": "S",
+          "rank": 14
+        },
+        {
+          "suit": "S",
+          "rank": 13
+        },
+        {
+          "suit": "S",
+          "rank": 12
+        },
+        {
+          "suit": "S",
+          "rank": 11
+        },
+        {
+          "suit": "S",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 14
+        },
+        {
+          "suit": "H",
+          "rank": 13
+        },
+        {
+          "suit": "H",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 13
+        },
+        {
+          "suit": "D",
+          "rank": 9
+        },
+        {
+          "suit": "D",
+          "rank": 8
+        },
+        {
+          "suit": "C",
+          "rank": 6
+        },
+        {
+          "suit": "C",
+          "rank": 4
+        }
+      ],
+      "E": [
+        {
+          "suit": "S",
+          "rank": 3
+        },
+        {
+          "suit": "S",
+          "rank": 2
+        },
+        {
+          "suit": "H",
+          "rank": 12
+        },
+        {
+          "suit": "H",
+          "rank": 10
+        },
+        {
+          "suit": "H",
+          "rank": 9
+        },
+        {
+          "suit": "H",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 2
+        },
+        {
+          "suit": "D",
+          "rank": 10
+        },
+        {
+          "suit": "D",
+          "rank": 5
+        },
+        {
+          "suit": "D",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 13
+        },
+        {
+          "suit": "C",
+          "rank": 11
+        },
+        {
+          "suit": "C",
+          "rank": 10
+        }
+      ],
+      "W": [
+        {
+          "suit": "S",
+          "rank": 10
+        },
+        {
+          "suit": "S",
+          "rank": 9
+        },
+        {
+          "suit": "S",
+          "rank": 6
+        },
+        {
+          "suit": "H",
+          "rank": 7
+        },
+        {
+          "suit": "H",
+          "rank": 5
+        },
+        {
+          "suit": "H",
+          "rank": 3
+        },
+        {
+          "suit": "D",
+          "rank": 12
+        },
+        {
+          "suit": "D",
+          "rank": 11
+        },
+        {
+          "suit": "D",
+          "rank": 2
+        },
+        {
+          "suit": "C",
+          "rank": 14
+        },
+        {
+          "suit": "C",
+          "rank": 12
+        },
+        {
+          "suit": "C",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 2
+        }
+      ]
+    },
+    "expected": {
+      "table": [
+        [
+          10,
+          3,
+          10,
+          3
+        ],
+        [
+          6,
+          6,
+          6,
+          6
+        ],
+        [
+          9,
+          3,
+          9,
+          3
+        ],
+        [
+          7,
+          5,
+          7,
+          5
+        ],
+        [
+          9,
+          4,
+          9,
+          4
+        ]
+      ]
+    }
+  },
+  {
+    "id": "problem.A7.test-0",
+    "kind": "table",
+    "sourceLabel": "problem:A7:testCases[0]",
+    "hands": {
+      "N": [
+        {
+          "suit": "S",
+          "rank": 8
+        },
+        {
+          "suit": "S",
+          "rank": 7
+        },
+        {
+          "suit": "S",
+          "rank": 5
+        },
+        {
+          "suit": "H",
+          "rank": 11
+        },
+        {
+          "suit": "H",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 14
+        },
+        {
+          "suit": "D",
+          "rank": 7
+        },
+        {
+          "suit": "D",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 4
+        },
+        {
+          "suit": "C",
+          "rank": 9
+        },
+        {
+          "suit": "C",
+          "rank": 8
+        },
+        {
+          "suit": "C",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 5
+        }
+      ],
+      "S": [
+        {
+          "suit": "S",
+          "rank": 14
+        },
+        {
+          "suit": "S",
+          "rank": 13
+        },
+        {
+          "suit": "S",
+          "rank": 12
+        },
+        {
+          "suit": "S",
+          "rank": 11
+        },
+        {
+          "suit": "S",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 14
+        },
+        {
+          "suit": "H",
+          "rank": 13
+        },
+        {
+          "suit": "H",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 13
+        },
+        {
+          "suit": "D",
+          "rank": 9
+        },
+        {
+          "suit": "D",
+          "rank": 8
+        },
+        {
+          "suit": "C",
+          "rank": 6
+        },
+        {
+          "suit": "C",
+          "rank": 4
+        }
+      ],
+      "E": [
+        {
+          "suit": "S",
+          "rank": 3
+        },
+        {
+          "suit": "S",
+          "rank": 2
+        },
+        {
+          "suit": "H",
+          "rank": 12
+        },
+        {
+          "suit": "H",
+          "rank": 10
+        },
+        {
+          "suit": "H",
+          "rank": 9
+        },
+        {
+          "suit": "H",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 2
+        },
+        {
+          "suit": "D",
+          "rank": 10
+        },
+        {
+          "suit": "D",
+          "rank": 5
+        },
+        {
+          "suit": "D",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 13
+        },
+        {
+          "suit": "C",
+          "rank": 11
+        },
+        {
+          "suit": "C",
+          "rank": 10
+        }
+      ],
+      "W": [
+        {
+          "suit": "S",
+          "rank": 10
+        },
+        {
+          "suit": "S",
+          "rank": 9
+        },
+        {
+          "suit": "S",
+          "rank": 6
+        },
+        {
+          "suit": "H",
+          "rank": 7
+        },
+        {
+          "suit": "H",
+          "rank": 5
+        },
+        {
+          "suit": "H",
+          "rank": 3
+        },
+        {
+          "suit": "D",
+          "rank": 12
+        },
+        {
+          "suit": "D",
+          "rank": 11
+        },
+        {
+          "suit": "D",
+          "rank": 2
+        },
+        {
+          "suit": "C",
+          "rank": 14
+        },
+        {
+          "suit": "C",
+          "rank": 12
+        },
+        {
+          "suit": "C",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 2
+        }
+      ]
+    },
+    "expected": {
+      "table": [
+        [
+          10,
+          3,
+          10,
+          3
+        ],
+        [
+          6,
+          6,
+          6,
+          6
+        ],
+        [
+          9,
+          3,
+          9,
+          3
+        ],
+        [
+          7,
+          5,
+          7,
+          5
+        ],
+        [
+          9,
+          4,
+          9,
+          4
+        ]
+      ]
+    }
+  },
+  {
+    "id": "problem.A7.test-1",
+    "kind": "table",
+    "sourceLabel": "problem:A7:testCases[1]",
+    "hands": {
+      "N": [
+        {
+          "suit": "S",
+          "rank": 8
+        },
+        {
+          "suit": "S",
+          "rank": 7
+        },
+        {
+          "suit": "S",
+          "rank": 5
+        },
+        {
+          "suit": "H",
+          "rank": 11
+        },
+        {
+          "suit": "H",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 14
+        },
+        {
+          "suit": "D",
+          "rank": 7
+        },
+        {
+          "suit": "D",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 4
+        },
+        {
+          "suit": "C",
+          "rank": 9
+        },
+        {
+          "suit": "C",
+          "rank": 8
+        },
+        {
+          "suit": "C",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 5
+        }
+      ],
+      "S": [
+        {
+          "suit": "S",
+          "rank": 14
+        },
+        {
+          "suit": "S",
+          "rank": 13
+        },
+        {
+          "suit": "S",
+          "rank": 12
+        },
+        {
+          "suit": "S",
+          "rank": 11
+        },
+        {
+          "suit": "S",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 14
+        },
+        {
+          "suit": "H",
+          "rank": 13
+        },
+        {
+          "suit": "H",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 13
+        },
+        {
+          "suit": "D",
+          "rank": 9
+        },
+        {
+          "suit": "D",
+          "rank": 8
+        },
+        {
+          "suit": "C",
+          "rank": 6
+        },
+        {
+          "suit": "C",
+          "rank": 4
+        }
+      ],
+      "E": [
+        {
+          "suit": "S",
+          "rank": 3
+        },
+        {
+          "suit": "H",
+          "rank": 12
+        },
+        {
+          "suit": "H",
+          "rank": 10
+        },
+        {
+          "suit": "H",
+          "rank": 9
+        },
+        {
+          "suit": "H",
+          "rank": 7
+        },
+        {
+          "suit": "H",
+          "rank": 5
+        },
+        {
+          "suit": "H",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 2
+        },
+        {
+          "suit": "D",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 12
+        },
+        {
+          "suit": "C",
+          "rank": 11
+        },
+        {
+          "suit": "C",
+          "rank": 10
+        },
+        {
+          "suit": "C",
+          "rank": 2
+        }
+      ],
+      "W": [
+        {
+          "suit": "S",
+          "rank": 10
+        },
+        {
+          "suit": "S",
+          "rank": 9
+        },
+        {
+          "suit": "S",
+          "rank": 6
+        },
+        {
+          "suit": "S",
+          "rank": 2
+        },
+        {
+          "suit": "H",
+          "rank": 3
+        },
+        {
+          "suit": "D",
+          "rank": 12
+        },
+        {
+          "suit": "D",
+          "rank": 11
+        },
+        {
+          "suit": "D",
+          "rank": 10
+        },
+        {
+          "suit": "D",
+          "rank": 5
+        },
+        {
+          "suit": "D",
+          "rank": 2
+        },
+        {
+          "suit": "C",
+          "rank": 14
+        },
+        {
+          "suit": "C",
+          "rank": 13
+        },
+        {
+          "suit": "C",
+          "rank": 3
+        }
+      ]
+    },
+    "expected": {
+      "table": [
+        [
+          9,
+          4,
+          9,
+          4
+        ],
+        [
+          4,
+          9,
+          4,
+          9
+        ],
+        [
+          9,
+          4,
+          9,
+          4
+        ],
+        [
+          7,
+          6,
+          7,
+          6
+        ],
+        [
+          9,
+          4,
+          9,
+          4
+        ]
+      ]
+    }
+  },
+  {
+    "id": "problem.A8.opening",
+    "kind": "table",
+    "sourceLabel": "problem:A8:opening",
+    "hands": {
+      "N": [
+        {
+          "suit": "S",
+          "rank": 5
+        },
+        {
+          "suit": "S",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 14
+        },
+        {
+          "suit": "H",
+          "rank": 13
+        },
+        {
+          "suit": "H",
+          "rank": 6
+        },
+        {
+          "suit": "H",
+          "rank": 3
+        },
+        {
+          "suit": "D",
+          "rank": 13
+        },
+        {
+          "suit": "D",
+          "rank": 12
+        },
+        {
+          "suit": "D",
+          "rank": 11
+        },
+        {
+          "suit": "C",
+          "rank": 9
+        },
+        {
+          "suit": "C",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 6
+        },
+        {
+          "suit": "C",
+          "rank": 3
+        }
+      ],
+      "S": [
+        {
+          "suit": "S",
+          "rank": 14
+        },
+        {
+          "suit": "S",
+          "rank": 3
+        },
+        {
+          "suit": "S",
+          "rank": 2
+        },
+        {
+          "suit": "H",
+          "rank": 5
+        },
+        {
+          "suit": "H",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 2
+        },
+        {
+          "suit": "D",
+          "rank": 14
+        },
+        {
+          "suit": "D",
+          "rank": 3
+        },
+        {
+          "suit": "D",
+          "rank": 2
+        },
+        {
+          "suit": "C",
+          "rank": 13
+        },
+        {
+          "suit": "C",
+          "rank": 12
+        },
+        {
+          "suit": "C",
+          "rank": 11
+        },
+        {
+          "suit": "C",
+          "rank": 10
+        }
+      ],
+      "E": [
+        {
+          "suit": "S",
+          "rank": 9
+        },
+        {
+          "suit": "S",
+          "rank": 8
+        },
+        {
+          "suit": "S",
+          "rank": 6
+        },
+        {
+          "suit": "H",
+          "rank": 12
+        },
+        {
+          "suit": "H",
+          "rank": 11
+        },
+        {
+          "suit": "H",
+          "rank": 9
+        },
+        {
+          "suit": "H",
+          "rank": 8
+        },
+        {
+          "suit": "H",
+          "rank": 7
+        },
+        {
+          "suit": "D",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 4
+        },
+        {
+          "suit": "C",
+          "rank": 14
+        },
+        {
+          "suit": "C",
+          "rank": 5
+        }
+      ],
+      "W": [
+        {
+          "suit": "S",
+          "rank": 13
+        },
+        {
+          "suit": "S",
+          "rank": 12
+        },
+        {
+          "suit": "S",
+          "rank": 11
+        },
+        {
+          "suit": "S",
+          "rank": 10
+        },
+        {
+          "suit": "S",
+          "rank": 7
+        },
+        {
+          "suit": "H",
+          "rank": 10
+        },
+        {
+          "suit": "D",
+          "rank": 10
+        },
+        {
+          "suit": "D",
+          "rank": 9
+        },
+        {
+          "suit": "D",
+          "rank": 7
+        },
+        {
+          "suit": "D",
+          "rank": 5
+        },
+        {
+          "suit": "C",
+          "rank": 8
+        },
+        {
+          "suit": "C",
+          "rank": 4
+        },
+        {
+          "suit": "C",
+          "rank": 2
+        }
+      ]
+    },
+    "expected": {
+      "table": [
+        [
+          7,
+          6,
+          7,
+          6
+        ],
+        [
+          8,
+          5,
+          8,
+          5
+        ],
+        [
+          8,
+          5,
+          8,
+          5
+        ],
+        [
+          10,
+          3,
+          10,
+          3
+        ],
+        [
+          9,
+          4,
+          9,
+          4
+        ]
+      ]
+    }
+  },
+  {
+    "id": "problem.A8.test-0",
+    "kind": "table",
+    "sourceLabel": "problem:A8:testCases[0]",
+    "hands": {
+      "N": [
+        {
+          "suit": "S",
+          "rank": 5
+        },
+        {
+          "suit": "S",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 14
+        },
+        {
+          "suit": "H",
+          "rank": 13
+        },
+        {
+          "suit": "H",
+          "rank": 6
+        },
+        {
+          "suit": "H",
+          "rank": 3
+        },
+        {
+          "suit": "D",
+          "rank": 13
+        },
+        {
+          "suit": "D",
+          "rank": 12
+        },
+        {
+          "suit": "D",
+          "rank": 11
+        },
+        {
+          "suit": "C",
+          "rank": 9
+        },
+        {
+          "suit": "C",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 6
+        },
+        {
+          "suit": "C",
+          "rank": 3
+        }
+      ],
+      "S": [
+        {
+          "suit": "S",
+          "rank": 14
+        },
+        {
+          "suit": "S",
+          "rank": 3
+        },
+        {
+          "suit": "S",
+          "rank": 2
+        },
+        {
+          "suit": "H",
+          "rank": 5
+        },
+        {
+          "suit": "H",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 2
+        },
+        {
+          "suit": "D",
+          "rank": 14
+        },
+        {
+          "suit": "D",
+          "rank": 3
+        },
+        {
+          "suit": "D",
+          "rank": 2
+        },
+        {
+          "suit": "C",
+          "rank": 13
+        },
+        {
+          "suit": "C",
+          "rank": 12
+        },
+        {
+          "suit": "C",
+          "rank": 11
+        },
+        {
+          "suit": "C",
+          "rank": 10
+        }
+      ],
+      "E": [
+        {
+          "suit": "S",
+          "rank": 9
+        },
+        {
+          "suit": "S",
+          "rank": 8
+        },
+        {
+          "suit": "S",
+          "rank": 6
+        },
+        {
+          "suit": "H",
+          "rank": 12
+        },
+        {
+          "suit": "H",
+          "rank": 11
+        },
+        {
+          "suit": "H",
+          "rank": 9
+        },
+        {
+          "suit": "H",
+          "rank": 8
+        },
+        {
+          "suit": "H",
+          "rank": 7
+        },
+        {
+          "suit": "D",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 4
+        },
+        {
+          "suit": "C",
+          "rank": 14
+        },
+        {
+          "suit": "C",
+          "rank": 5
+        }
+      ],
+      "W": [
+        {
+          "suit": "S",
+          "rank": 13
+        },
+        {
+          "suit": "S",
+          "rank": 12
+        },
+        {
+          "suit": "S",
+          "rank": 11
+        },
+        {
+          "suit": "S",
+          "rank": 10
+        },
+        {
+          "suit": "S",
+          "rank": 7
+        },
+        {
+          "suit": "H",
+          "rank": 10
+        },
+        {
+          "suit": "D",
+          "rank": 10
+        },
+        {
+          "suit": "D",
+          "rank": 9
+        },
+        {
+          "suit": "D",
+          "rank": 7
+        },
+        {
+          "suit": "D",
+          "rank": 5
+        },
+        {
+          "suit": "C",
+          "rank": 8
+        },
+        {
+          "suit": "C",
+          "rank": 4
+        },
+        {
+          "suit": "C",
+          "rank": 2
+        }
+      ]
+    },
+    "expected": {
+      "table": [
+        [
+          7,
+          6,
+          7,
+          6
+        ],
+        [
+          8,
+          5,
+          8,
+          5
+        ],
+        [
+          8,
+          5,
+          8,
+          5
+        ],
+        [
+          10,
+          3,
+          10,
+          3
+        ],
+        [
+          9,
+          4,
+          9,
+          4
+        ]
+      ]
+    }
+  },
+  {
+    "id": "problem.A9.opening",
+    "kind": "table",
+    "sourceLabel": "problem:A9:opening",
+    "hands": {
+      "N": [
+        {
+          "suit": "S",
+          "rank": 13
+        },
+        {
+          "suit": "S",
+          "rank": 12
+        },
+        {
+          "suit": "H",
+          "rank": 11
+        },
+        {
+          "suit": "H",
+          "rank": 10
+        },
+        {
+          "suit": "H",
+          "rank": 9
+        },
+        {
+          "suit": "H",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 13
+        },
+        {
+          "suit": "D",
+          "rank": 9
+        },
+        {
+          "suit": "D",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 14
+        },
+        {
+          "suit": "C",
+          "rank": 13
+        },
+        {
+          "suit": "C",
+          "rank": 11
+        }
+      ],
+      "S": [
+        {
+          "suit": "S",
+          "rank": 3
+        },
+        {
+          "suit": "S",
+          "rank": 2
+        },
+        {
+          "suit": "H",
+          "rank": 14
+        },
+        {
+          "suit": "H",
+          "rank": 13
+        },
+        {
+          "suit": "H",
+          "rank": 3
+        },
+        {
+          "suit": "H",
+          "rank": 2
+        },
+        {
+          "suit": "D",
+          "rank": 14
+        },
+        {
+          "suit": "D",
+          "rank": 12
+        },
+        {
+          "suit": "D",
+          "rank": 11
+        },
+        {
+          "suit": "D",
+          "rank": 10
+        },
+        {
+          "suit": "C",
+          "rank": 12
+        },
+        {
+          "suit": "C",
+          "rank": 10
+        },
+        {
+          "suit": "C",
+          "rank": 7
+        }
+      ],
+      "E": [
+        {
+          "suit": "S",
+          "rank": 14
+        },
+        {
+          "suit": "S",
+          "rank": 11
+        },
+        {
+          "suit": "S",
+          "rank": 9
+        },
+        {
+          "suit": "S",
+          "rank": 6
+        },
+        {
+          "suit": "S",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 12
+        },
+        {
+          "suit": "H",
+          "rank": 7
+        },
+        {
+          "suit": "H",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 4
+        },
+        {
+          "suit": "D",
+          "rank": 2
+        },
+        {
+          "suit": "C",
+          "rank": 4
+        },
+        {
+          "suit": "C",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 2
+        }
+      ],
+      "W": [
+        {
+          "suit": "S",
+          "rank": 10
+        },
+        {
+          "suit": "S",
+          "rank": 8
+        },
+        {
+          "suit": "S",
+          "rank": 7
+        },
+        {
+          "suit": "S",
+          "rank": 5
+        },
+        {
+          "suit": "H",
+          "rank": 5
+        },
+        {
+          "suit": "H",
+          "rank": 4
+        },
+        {
+          "suit": "D",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 5
+        },
+        {
+          "suit": "D",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 9
+        },
+        {
+          "suit": "C",
+          "rank": 8
+        },
+        {
+          "suit": "C",
+          "rank": 6
+        },
+        {
+          "suit": "C",
+          "rank": 5
+        }
+      ]
+    },
+    "expected": {
+      "table": [
+        [
+          8,
+          5,
+          8,
+          5
+        ],
+        [
+          12,
+          1,
+          12,
+          1
+        ],
+        [
+          12,
+          1,
+          12,
+          1
+        ],
+        [
+          10,
+          2,
+          10,
+          2
+        ],
+        [
+          12,
+          1,
+          12,
+          1
+        ]
+      ]
+    }
+  },
+  {
+    "id": "problem.A9.test-0",
+    "kind": "table",
+    "sourceLabel": "problem:A9:testCases[0]",
+    "hands": {
+      "N": [
+        {
+          "suit": "S",
+          "rank": 13
+        },
+        {
+          "suit": "S",
+          "rank": 12
+        },
+        {
+          "suit": "H",
+          "rank": 11
+        },
+        {
+          "suit": "H",
+          "rank": 10
+        },
+        {
+          "suit": "H",
+          "rank": 9
+        },
+        {
+          "suit": "H",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 13
+        },
+        {
+          "suit": "D",
+          "rank": 9
+        },
+        {
+          "suit": "D",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 14
+        },
+        {
+          "suit": "C",
+          "rank": 13
+        },
+        {
+          "suit": "C",
+          "rank": 11
+        }
+      ],
+      "S": [
+        {
+          "suit": "S",
+          "rank": 3
+        },
+        {
+          "suit": "S",
+          "rank": 2
+        },
+        {
+          "suit": "H",
+          "rank": 14
+        },
+        {
+          "suit": "H",
+          "rank": 13
+        },
+        {
+          "suit": "H",
+          "rank": 3
+        },
+        {
+          "suit": "H",
+          "rank": 2
+        },
+        {
+          "suit": "D",
+          "rank": 14
+        },
+        {
+          "suit": "D",
+          "rank": 12
+        },
+        {
+          "suit": "D",
+          "rank": 11
+        },
+        {
+          "suit": "D",
+          "rank": 10
+        },
+        {
+          "suit": "C",
+          "rank": 12
+        },
+        {
+          "suit": "C",
+          "rank": 10
+        },
+        {
+          "suit": "C",
+          "rank": 7
+        }
+      ],
+      "E": [
+        {
+          "suit": "S",
+          "rank": 14
+        },
+        {
+          "suit": "S",
+          "rank": 11
+        },
+        {
+          "suit": "S",
+          "rank": 9
+        },
+        {
+          "suit": "S",
+          "rank": 6
+        },
+        {
+          "suit": "S",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 12
+        },
+        {
+          "suit": "H",
+          "rank": 7
+        },
+        {
+          "suit": "H",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 4
+        },
+        {
+          "suit": "D",
+          "rank": 2
+        },
+        {
+          "suit": "C",
+          "rank": 4
+        },
+        {
+          "suit": "C",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 2
+        }
+      ],
+      "W": [
+        {
+          "suit": "S",
+          "rank": 10
+        },
+        {
+          "suit": "S",
+          "rank": 8
+        },
+        {
+          "suit": "S",
+          "rank": 7
+        },
+        {
+          "suit": "S",
+          "rank": 5
+        },
+        {
+          "suit": "H",
+          "rank": 5
+        },
+        {
+          "suit": "H",
+          "rank": 4
+        },
+        {
+          "suit": "D",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 5
+        },
+        {
+          "suit": "D",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 9
+        },
+        {
+          "suit": "C",
+          "rank": 8
+        },
+        {
+          "suit": "C",
+          "rank": 6
+        },
+        {
+          "suit": "C",
+          "rank": 5
+        }
+      ]
+    },
+    "expected": {
+      "table": [
+        [
+          8,
+          5,
+          8,
+          5
+        ],
+        [
+          12,
+          1,
+          12,
+          1
+        ],
+        [
+          12,
+          1,
+          12,
+          1
+        ],
+        [
+          10,
+          2,
+          10,
+          2
+        ],
+        [
+          12,
+          1,
+          12,
+          1
+        ]
+      ]
+    }
+  },
+  {
+    "id": "problem.A9.test-1",
+    "kind": "table",
+    "sourceLabel": "problem:A9:testCases[1]",
+    "hands": {
+      "N": [
+        {
+          "suit": "S",
+          "rank": 13
+        },
+        {
+          "suit": "S",
+          "rank": 12
+        },
+        {
+          "suit": "H",
+          "rank": 11
+        },
+        {
+          "suit": "H",
+          "rank": 10
+        },
+        {
+          "suit": "H",
+          "rank": 9
+        },
+        {
+          "suit": "H",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 13
+        },
+        {
+          "suit": "D",
+          "rank": 9
+        },
+        {
+          "suit": "D",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 14
+        },
+        {
+          "suit": "C",
+          "rank": 13
+        },
+        {
+          "suit": "C",
+          "rank": 12
+        }
+      ],
+      "S": [
+        {
+          "suit": "S",
+          "rank": 3
+        },
+        {
+          "suit": "S",
+          "rank": 2
+        },
+        {
+          "suit": "H",
+          "rank": 14
+        },
+        {
+          "suit": "H",
+          "rank": 13
+        },
+        {
+          "suit": "H",
+          "rank": 7
+        },
+        {
+          "suit": "H",
+          "rank": 3
+        },
+        {
+          "suit": "H",
+          "rank": 2
+        },
+        {
+          "suit": "D",
+          "rank": 14
+        },
+        {
+          "suit": "D",
+          "rank": 12
+        },
+        {
+          "suit": "D",
+          "rank": 11
+        },
+        {
+          "suit": "D",
+          "rank": 10
+        },
+        {
+          "suit": "C",
+          "rank": 10
+        },
+        {
+          "suit": "C",
+          "rank": 7
+        }
+      ],
+      "E": [
+        {
+          "suit": "S",
+          "rank": 14
+        },
+        {
+          "suit": "S",
+          "rank": 11
+        },
+        {
+          "suit": "S",
+          "rank": 9
+        },
+        {
+          "suit": "S",
+          "rank": 6
+        },
+        {
+          "suit": "S",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 6
+        },
+        {
+          "suit": "H",
+          "rank": 4
+        },
+        {
+          "suit": "D",
+          "rank": 4
+        },
+        {
+          "suit": "D",
+          "rank": 2
+        },
+        {
+          "suit": "C",
+          "rank": 11
+        },
+        {
+          "suit": "C",
+          "rank": 4
+        },
+        {
+          "suit": "C",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 2
+        }
+      ],
+      "W": [
+        {
+          "suit": "S",
+          "rank": 10
+        },
+        {
+          "suit": "S",
+          "rank": 8
+        },
+        {
+          "suit": "S",
+          "rank": 7
+        },
+        {
+          "suit": "S",
+          "rank": 5
+        },
+        {
+          "suit": "H",
+          "rank": 12
+        },
+        {
+          "suit": "H",
+          "rank": 5
+        },
+        {
+          "suit": "D",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 5
+        },
+        {
+          "suit": "D",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 9
+        },
+        {
+          "suit": "C",
+          "rank": 8
+        },
+        {
+          "suit": "C",
+          "rank": 6
+        },
+        {
+          "suit": "C",
+          "rank": 5
+        }
+      ]
+    },
+    "expected": {
+      "table": [
+        [
+          8,
+          5,
+          8,
+          5
+        ],
+        [
+          12,
+          1,
+          12,
+          1
+        ],
+        [
+          12,
+          1,
+          12,
+          1
+        ],
+        [
+          8,
+          4,
+          8,
+          4
+        ],
+        [
+          12,
+          1,
+          12,
+          1
+        ]
+      ]
+    }
+  },
+  {
+    "id": "problem.Ω.opening",
+    "kind": "table",
+    "sourceLabel": "problem:Ω:opening",
+    "hands": {
+      "N": [
+        {
+          "suit": "S",
+          "rank": 13
+        },
+        {
+          "suit": "S",
+          "rank": 4
+        },
+        {
+          "suit": "S",
+          "rank": 3
+        },
+        {
+          "suit": "S",
+          "rank": 2
+        },
+        {
+          "suit": "H",
+          "rank": 14
+        },
+        {
+          "suit": "H",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 3
+        },
+        {
+          "suit": "H",
+          "rank": 2
+        },
+        {
+          "suit": "D",
+          "rank": 13
+        },
+        {
+          "suit": "D",
+          "rank": 4
+        },
+        {
+          "suit": "D",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 2
+        }
+      ],
+      "S": [
+        {
+          "suit": "S",
+          "rank": 14
+        },
+        {
+          "suit": "S",
+          "rank": 12
+        },
+        {
+          "suit": "S",
+          "rank": 8
+        },
+        {
+          "suit": "S",
+          "rank": 7
+        },
+        {
+          "suit": "S",
+          "rank": 6
+        },
+        {
+          "suit": "S",
+          "rank": 5
+        },
+        {
+          "suit": "H",
+          "rank": 13
+        },
+        {
+          "suit": "H",
+          "rank": 9
+        },
+        {
+          "suit": "H",
+          "rank": 8
+        },
+        {
+          "suit": "H",
+          "rank": 7
+        },
+        {
+          "suit": "D",
+          "rank": 14
+        },
+        {
+          "suit": "D",
+          "rank": 2
+        },
+        {
+          "suit": "C",
+          "rank": 14
+        }
+      ],
+      "E": [
+        {
+          "suit": "H",
+          "rank": 12
+        },
+        {
+          "suit": "H",
+          "rank": 11
+        },
+        {
+          "suit": "H",
+          "rank": 10
+        },
+        {
+          "suit": "H",
+          "rank": 5
+        },
+        {
+          "suit": "D",
+          "rank": 12
+        },
+        {
+          "suit": "D",
+          "rank": 11
+        },
+        {
+          "suit": "D",
+          "rank": 10
+        },
+        {
+          "suit": "D",
+          "rank": 9
+        },
+        {
+          "suit": "C",
+          "rank": 8
+        },
+        {
+          "suit": "C",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 6
+        },
+        {
+          "suit": "C",
+          "rank": 5
+        },
+        {
+          "suit": "C",
+          "rank": 4
+        }
+      ],
+      "W": [
+        {
+          "suit": "S",
+          "rank": 11
+        },
+        {
+          "suit": "S",
+          "rank": 10
+        },
+        {
+          "suit": "S",
+          "rank": 9
+        },
+        {
+          "suit": "H",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 7
+        },
+        {
+          "suit": "D",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 5
+        },
+        {
+          "suit": "C",
+          "rank": 13
+        },
+        {
+          "suit": "C",
+          "rank": 12
+        },
+        {
+          "suit": "C",
+          "rank": 11
+        },
+        {
+          "suit": "C",
+          "rank": 10
+        },
+        {
+          "suit": "C",
+          "rank": 9
+        }
+      ]
+    },
+    "expected": {
+      "table": [
+        [
+          12,
+          1,
+          12,
+          1
+        ],
+        [
+          11,
+          2,
+          11,
+          2
+        ],
+        [
+          6,
+          7,
+          6,
+          7
+        ],
+        [
+          4,
+          9,
+          4,
+          9
+        ],
+        [
+          11,
+          1,
+          11,
+          1
+        ]
+      ]
+    }
+  },
+  {
+    "id": "problem.Ω.test-0",
+    "kind": "table",
+    "sourceLabel": "problem:Ω:testCases[0]",
+    "hands": {
+      "N": [
+        {
+          "suit": "S",
+          "rank": 13
+        },
+        {
+          "suit": "S",
+          "rank": 4
+        },
+        {
+          "suit": "S",
+          "rank": 3
+        },
+        {
+          "suit": "S",
+          "rank": 2
+        },
+        {
+          "suit": "H",
+          "rank": 14
+        },
+        {
+          "suit": "H",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 3
+        },
+        {
+          "suit": "H",
+          "rank": 2
+        },
+        {
+          "suit": "D",
+          "rank": 13
+        },
+        {
+          "suit": "D",
+          "rank": 4
+        },
+        {
+          "suit": "D",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 2
+        }
+      ],
+      "S": [
+        {
+          "suit": "S",
+          "rank": 14
+        },
+        {
+          "suit": "S",
+          "rank": 12
+        },
+        {
+          "suit": "S",
+          "rank": 8
+        },
+        {
+          "suit": "S",
+          "rank": 7
+        },
+        {
+          "suit": "S",
+          "rank": 6
+        },
+        {
+          "suit": "S",
+          "rank": 5
+        },
+        {
+          "suit": "H",
+          "rank": 13
+        },
+        {
+          "suit": "H",
+          "rank": 9
+        },
+        {
+          "suit": "H",
+          "rank": 8
+        },
+        {
+          "suit": "H",
+          "rank": 7
+        },
+        {
+          "suit": "D",
+          "rank": 14
+        },
+        {
+          "suit": "D",
+          "rank": 2
+        },
+        {
+          "suit": "C",
+          "rank": 14
+        }
+      ],
+      "E": [
+        {
+          "suit": "H",
+          "rank": 12
+        },
+        {
+          "suit": "H",
+          "rank": 11
+        },
+        {
+          "suit": "H",
+          "rank": 10
+        },
+        {
+          "suit": "H",
+          "rank": 5
+        },
+        {
+          "suit": "D",
+          "rank": 12
+        },
+        {
+          "suit": "D",
+          "rank": 11
+        },
+        {
+          "suit": "D",
+          "rank": 10
+        },
+        {
+          "suit": "D",
+          "rank": 9
+        },
+        {
+          "suit": "C",
+          "rank": 8
+        },
+        {
+          "suit": "C",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 6
+        },
+        {
+          "suit": "C",
+          "rank": 5
+        },
+        {
+          "suit": "C",
+          "rank": 4
+        }
+      ],
+      "W": [
+        {
+          "suit": "S",
+          "rank": 11
+        },
+        {
+          "suit": "S",
+          "rank": 10
+        },
+        {
+          "suit": "S",
+          "rank": 9
+        },
+        {
+          "suit": "H",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 7
+        },
+        {
+          "suit": "D",
+          "rank": 6
+        },
+        {
+          "suit": "D",
+          "rank": 5
+        },
+        {
+          "suit": "C",
+          "rank": 13
+        },
+        {
+          "suit": "C",
+          "rank": 12
+        },
+        {
+          "suit": "C",
+          "rank": 11
+        },
+        {
+          "suit": "C",
+          "rank": 10
+        },
+        {
+          "suit": "C",
+          "rank": 9
+        }
+      ]
+    },
+    "expected": {
+      "table": [
+        [
+          12,
+          1,
+          12,
+          1
+        ],
+        [
+          11,
+          2,
+          11,
+          2
+        ],
+        [
+          6,
+          7,
+          6,
+          7
+        ],
+        [
+          4,
+          9,
+          4,
+          9
+        ],
+        [
+          11,
+          1,
+          11,
+          1
+        ]
+      ]
+    }
+  },
+  {
+    "id": "synthetic.solve.seed-20260923-partial",
+    "kind": "solve",
+    "sourceLabel": "synthetic.solve.seed-20260923-partial",
+    "trump": "NT",
+    "trickLeader": "W",
+    "trickPlayed": [
+      {
+        "suit": "H",
+        "rank": 5
+      },
+      {
+        "suit": "H",
+        "rank": 13
+      }
+    ],
+    "hands": {
+      "N": [
+        {
+          "suit": "D",
+          "rank": 9
+        },
+        {
+          "suit": "C",
+          "rank": 9
+        },
+        {
+          "suit": "C",
+          "rank": 14
+        },
+        {
+          "suit": "H",
+          "rank": 7
+        },
+        {
+          "suit": "H",
+          "rank": 6
+        },
+        {
+          "suit": "S",
+          "rank": 13
+        },
+        {
+          "suit": "S",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 9
+        },
+        {
+          "suit": "C",
+          "rank": 13
+        },
+        {
+          "suit": "C",
+          "rank": 7
+        },
+        {
+          "suit": "H",
+          "rank": 14
+        },
+        {
+          "suit": "S",
+          "rank": 2
+        }
+      ],
+      "E": [
+        {
+          "suit": "S",
+          "rank": 14
+        },
+        {
+          "suit": "D",
+          "rank": 10
+        },
+        {
+          "suit": "S",
+          "rank": 3
+        },
+        {
+          "suit": "D",
+          "rank": 14
+        },
+        {
+          "suit": "S",
+          "rank": 10
+        },
+        {
+          "suit": "D",
+          "rank": 12
+        },
+        {
+          "suit": "H",
+          "rank": 10
+        },
+        {
+          "suit": "C",
+          "rank": 8
+        },
+        {
+          "suit": "C",
+          "rank": 2
+        },
+        {
+          "suit": "S",
+          "rank": 5
+        },
+        {
+          "suit": "D",
+          "rank": 3
+        },
+        {
+          "suit": "S",
+          "rank": 12
+        },
+        {
+          "suit": "D",
+          "rank": 4
+        }
+      ],
+      "S": [
+        {
+          "suit": "S",
+          "rank": 8
+        },
+        {
+          "suit": "C",
+          "rank": 10
+        },
+        {
+          "suit": "C",
+          "rank": 12
+        },
+        {
+          "suit": "S",
+          "rank": 6
+        },
+        {
+          "suit": "S",
+          "rank": 11
+        },
+        {
+          "suit": "C",
+          "rank": 5
+        },
+        {
+          "suit": "H",
+          "rank": 12
+        },
+        {
+          "suit": "S",
+          "rank": 9
+        },
+        {
+          "suit": "H",
+          "rank": 4
+        },
+        {
+          "suit": "D",
+          "rank": 5
+        },
+        {
+          "suit": "C",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 8
+        }
+      ],
+      "W": [
+        {
+          "suit": "C",
+          "rank": 11
+        },
+        {
+          "suit": "D",
+          "rank": 11
+        },
+        {
+          "suit": "D",
+          "rank": 13
+        },
+        {
+          "suit": "H",
+          "rank": 3
+        },
+        {
+          "suit": "C",
+          "rank": 6
+        },
+        {
+          "suit": "H",
+          "rank": 11
+        },
+        {
+          "suit": "D",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 3
+        },
+        {
+          "suit": "S",
+          "rank": 7
+        },
+        {
+          "suit": "D",
+          "rank": 6
+        },
+        {
+          "suit": "H",
+          "rank": 2
+        },
+        {
+          "suit": "D",
+          "rank": 2
+        }
+      ]
+    },
+    "expected": {
+      "score": 4,
+      "cards": [
+        {
+          "suit": "H",
+          "rank": 10
+        }
+      ]
+    }
+  },
+  {
+    "id": "synthetic.table.seed-20260923-table",
+    "kind": "table",
+    "sourceLabel": "synthetic.table.seed-20260923-table",
+    "hands": {
+      "N": [
+        {
+          "suit": "S",
+          "rank": 10
+        },
+        {
+          "suit": "D",
+          "rank": 14
+        },
+        {
+          "suit": "C",
+          "rank": 2
+        },
+        {
+          "suit": "C",
+          "rank": 12
+        },
+        {
+          "suit": "D",
+          "rank": 7
+        },
+        {
+          "suit": "H",
+          "rank": 6
+        },
+        {
+          "suit": "C",
+          "rank": 4
+        },
+        {
+          "suit": "H",
+          "rank": 5
+        },
+        {
+          "suit": "S",
+          "rank": 7
+        },
+        {
+          "suit": "C",
+          "rank": 9
+        },
+        {
+          "suit": "D",
+          "rank": 4
+        },
+        {
+          "suit": "C",
+          "rank": 10
+        },
+        {
+          "suit": "D",
+          "rank": 11
+        }
+      ],
+      "E": [
+        {
+          "suit": "S",
+          "rank": 11
+        },
+        {
+          "suit": "C",
+          "rank": 11
+        },
+        {
+          "suit": "D",
+          "rank": 5
+        },
+        {
+          "suit": "S",
+          "rank": 12
+        },
+        {
+          "suit": "C",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 13
+        },
+        {
+          "suit": "H",
+          "rank": 10
+        },
+        {
+          "suit": "H",
+          "rank": 9
+        },
+        {
+          "suit": "H",
+          "rank": 14
+        },
+        {
+          "suit": "S",
+          "rank": 13
+        },
+        {
+          "suit": "H",
+          "rank": 2
+        },
+        {
+          "suit": "H",
+          "rank": 7
+        },
+        {
+          "suit": "S",
+          "rank": 3
+        }
+      ],
+      "S": [
+        {
+          "suit": "C",
+          "rank": 7
+        },
+        {
+          "suit": "S",
+          "rank": 8
+        },
+        {
+          "suit": "D",
+          "rank": 9
+        },
+        {
+          "suit": "D",
+          "rank": 2
+        },
+        {
+          "suit": "S",
+          "rank": 2
+        },
+        {
+          "suit": "S",
+          "rank": 9
+        },
+        {
+          "suit": "C",
+          "rank": 6
+        },
+        {
+          "suit": "C",
+          "rank": 3
+        },
+        {
+          "suit": "D",
+          "rank": 10
+        },
+        {
+          "suit": "C",
+          "rank": 13
+        },
+        {
+          "suit": "S",
+          "rank": 5
+        },
+        {
+          "suit": "H",
+          "rank": 3
+        },
+        {
+          "suit": "H",
+          "rank": 12
+        }
+      ],
+      "W": [
+        {
+          "suit": "S",
+          "rank": 14
+        },
+        {
+          "suit": "S",
+          "rank": 6
+        },
+        {
+          "suit": "H",
+          "rank": 13
+        },
+        {
+          "suit": "D",
+          "rank": 6
+        },
+        {
+          "suit": "H",
+          "rank": 8
+        },
+        {
+          "suit": "C",
+          "rank": 14
+        },
+        {
+          "suit": "S",
+          "rank": 4
+        },
+        {
+          "suit": "C",
+          "rank": 5
+        },
+        {
+          "suit": "D",
+          "rank": 12
+        },
+        {
+          "suit": "H",
+          "rank": 11
+        },
+        {
+          "suit": "D",
+          "rank": 8
+        },
+        {
+          "suit": "H",
+          "rank": 4
+        },
+        {
+          "suit": "D",
+          "rank": 3
+        }
+      ]
+    },
+    "expected": {
+      "table": [
+        [
+          2,
+          11,
+          2,
+          11
+        ],
+        [
+          1,
+          12,
+          1,
+          12
+        ],
+        [
+          4,
+          8,
+          4,
+          8
+        ],
+        [
+          6,
+          6,
+          6,
+          6
+        ],
+        [
+          2,
+          10,
+          2,
+          10
+        ]
+      ]
+    }
+  }
+]

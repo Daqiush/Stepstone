@@ -1,0 +1,2224 @@
+{
+  "generatedAt": "2026-09-25T12:26:48.534Z",
+  "benchmark": {
+    "seed": 20260923,
+    "iterations": 2,
+    "completedIterations": 2,
+    "fixtureCount": 28,
+    "completedFixtureCount": 28,
+    "bundleBytes": 323370,
+    "parityMismatches": [],
+    "candidateDifferences": [],
+    "solveCpuMs": [
+      7,
+      3,
+      9
+    ],
+    "queueDelayMs": [
+      7,
+      3,
+      10
+    ],
+    "maxMemoryBytes": 18939904,
+    "queueProbe": "local Worker ordered pair: distinct same-DO ping queued after solve; timing captured at ping completion",
+    "generation": {
+      "randomTableEvery": 100,
+      "solveDepthRule": "(index - 1) % 13",
+      "solveDepthMeaning": "number of complete legal tricks played before the current partial trick"
+    },
+    "randomTableCount": 1,
+    "solveDepthCounts": [
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "operations": [
+      {
+        "id": "problem.A1.opening",
+        "kind": "table",
+        "depth": null,
+        "baseline": [
+          [
+            10,
+            3,
+            10,
+            3
+          ],
+          [
+            10,
+            3,
+            10,
+            3
+          ],
+          [
+            10,
+            3,
+            10,
+            3
+          ],
+          [
+            12,
+            1,
+            12,
+            1
+          ],
+          [
+            10,
+            3,
+            10,
+            3
+          ]
+        ],
+        "worker": [
+          [
+            10,
+            3,
+            10,
+            3
+          ],
+          [
+            10,
+            3,
+            10,
+            3
+          ],
+          [
+            10,
+            3,
+            10,
+            3
+          ],
+          [
+            12,
+            1,
+            12,
+            1
+          ],
+          [
+            10,
+            3,
+            10,
+            3
+          ]
+        ],
+        "baselineMs": 164.1662,
+        "workerMs": 223.82569999999998,
+        "initMs": 0,
+        "solveCpuMs": 205,
+        "queueDelayMs": null,
+        "heapBytes": 18939904
+      },
+      {
+        "id": "problem.A1.test-0",
+        "kind": "table",
+        "depth": null,
+        "baseline": [
+          [
+            10,
+            3,
+            10,
+            3
+          ],
+          [
+            10,
+            3,
+            10,
+            3
+          ],
+          [
+            10,
+            3,
+            10,
+            3
+          ],
+          [
+            12,
+            1,
+            12,
+            1
+          ],
+          [
+            10,
+            3,
+            10,
+            3
+          ]
+        ],
+        "worker": [
+          [
+            10,
+            3,
+            10,
+            3
+          ],
+          [
+            10,
+            3,
+            10,
+            3
+          ],
+          [
+            10,
+            3,
+            10,
+            3
+          ],
+          [
+            12,
+            1,
+            12,
+            1
+          ],
+          [
+            10,
+            3,
+            10,
+            3
+          ]
+        ],
+        "baselineMs": 151.94939999999997,
+        "workerMs": 186.94309999999996,
+        "initMs": 0,
+        "solveCpuMs": 171,
+        "queueDelayMs": null,
+        "heapBytes": 18939904
+      },
+      {
+        "id": "problem.A2.opening",
+        "kind": "table",
+        "depth": null,
+        "baseline": [
+          [
+            5,
+            6,
+            5,
+            6
+          ],
+          [
+            6,
+            7,
+            6,
+            7
+          ],
+          [
+            6,
+            6,
+            6,
+            6
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ],
+          [
+            7,
+            4,
+            7,
+            4
+          ]
+        ],
+        "worker": [
+          [
+            5,
+            6,
+            5,
+            6
+          ],
+          [
+            6,
+            7,
+            6,
+            7
+          ],
+          [
+            6,
+            6,
+            6,
+            6
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ],
+          [
+            7,
+            4,
+            7,
+            4
+          ]
+        ],
+        "baselineMs": 124.21550000000002,
+        "workerMs": 102.73709999999994,
+        "initMs": 0,
+        "solveCpuMs": 86,
+        "queueDelayMs": null,
+        "heapBytes": 18939904
+      },
+      {
+        "id": "problem.A2.test-0",
+        "kind": "table",
+        "depth": null,
+        "baseline": [
+          [
+            5,
+            6,
+            5,
+            6
+          ],
+          [
+            6,
+            7,
+            6,
+            7
+          ],
+          [
+            6,
+            6,
+            6,
+            6
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ],
+          [
+            7,
+            4,
+            7,
+            4
+          ]
+        ],
+        "worker": [
+          [
+            5,
+            6,
+            5,
+            6
+          ],
+          [
+            6,
+            7,
+            6,
+            7
+          ],
+          [
+            6,
+            6,
+            6,
+            6
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ],
+          [
+            7,
+            4,
+            7,
+            4
+          ]
+        ],
+        "baselineMs": 133.90589999999997,
+        "workerMs": 103.60269999999991,
+        "initMs": 0,
+        "solveCpuMs": 86,
+        "queueDelayMs": null,
+        "heapBytes": 18939904
+      },
+      {
+        "id": "problem.A3.opening",
+        "kind": "table",
+        "depth": null,
+        "baseline": [
+          [
+            5,
+            8,
+            5,
+            8
+          ],
+          [
+            6,
+            7,
+            6,
+            7
+          ],
+          [
+            7,
+            6,
+            7,
+            6
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ]
+        ],
+        "worker": [
+          [
+            5,
+            8,
+            5,
+            8
+          ],
+          [
+            6,
+            7,
+            6,
+            7
+          ],
+          [
+            7,
+            6,
+            7,
+            6
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ]
+        ],
+        "baselineMs": 252.61660000000006,
+        "workerMs": 523.4686000000002,
+        "initMs": 0,
+        "solveCpuMs": 512,
+        "queueDelayMs": null,
+        "heapBytes": 18939904
+      },
+      {
+        "id": "problem.A3.test-0",
+        "kind": "table",
+        "depth": null,
+        "baseline": [
+          [
+            5,
+            8,
+            5,
+            8
+          ],
+          [
+            6,
+            7,
+            6,
+            7
+          ],
+          [
+            7,
+            6,
+            7,
+            6
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ]
+        ],
+        "worker": [
+          [
+            5,
+            8,
+            5,
+            8
+          ],
+          [
+            6,
+            7,
+            6,
+            7
+          ],
+          [
+            7,
+            6,
+            7,
+            6
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ]
+        ],
+        "baselineMs": 236.15700000000015,
+        "workerMs": 573.6297,
+        "initMs": 0,
+        "solveCpuMs": 560,
+        "queueDelayMs": null,
+        "heapBytes": 18939904
+      },
+      {
+        "id": "problem.A3.test-1",
+        "kind": "table",
+        "depth": null,
+        "baseline": [
+          [
+            9,
+            4,
+            9,
+            4
+          ],
+          [
+            8,
+            5,
+            8,
+            5
+          ],
+          [
+            7,
+            5,
+            7,
+            6
+          ],
+          [
+            8,
+            4,
+            8,
+            5
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ]
+        ],
+        "worker": [
+          [
+            9,
+            4,
+            9,
+            4
+          ],
+          [
+            8,
+            5,
+            8,
+            5
+          ],
+          [
+            7,
+            5,
+            7,
+            6
+          ],
+          [
+            8,
+            4,
+            8,
+            5
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ]
+        ],
+        "baselineMs": 190.45740000000023,
+        "workerMs": 291.05099999999993,
+        "initMs": 0,
+        "solveCpuMs": 275,
+        "queueDelayMs": null,
+        "heapBytes": 18939904
+      },
+      {
+        "id": "problem.A3.test-2",
+        "kind": "table",
+        "depth": null,
+        "baseline": [
+          [
+            4,
+            8,
+            4,
+            8
+          ],
+          [
+            6,
+            6,
+            6,
+            6
+          ],
+          [
+            6,
+            7,
+            6,
+            7
+          ],
+          [
+            9,
+            3,
+            10,
+            3
+          ],
+          [
+            9,
+            3,
+            9,
+            3
+          ]
+        ],
+        "worker": [
+          [
+            4,
+            8,
+            4,
+            8
+          ],
+          [
+            6,
+            6,
+            6,
+            6
+          ],
+          [
+            6,
+            7,
+            6,
+            7
+          ],
+          [
+            9,
+            3,
+            10,
+            3
+          ],
+          [
+            9,
+            3,
+            9,
+            3
+          ]
+        ],
+        "baselineMs": 361.24260000000004,
+        "workerMs": 644.5178999999998,
+        "initMs": 0,
+        "solveCpuMs": 623,
+        "queueDelayMs": null,
+        "heapBytes": 18939904
+      },
+      {
+        "id": "problem.A3.test-3",
+        "kind": "table",
+        "depth": null,
+        "baseline": [
+          [
+            5,
+            8,
+            5,
+            8
+          ],
+          [
+            6,
+            6,
+            6,
+            6
+          ],
+          [
+            7,
+            6,
+            7,
+            6
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ]
+        ],
+        "worker": [
+          [
+            5,
+            8,
+            5,
+            8
+          ],
+          [
+            6,
+            6,
+            6,
+            6
+          ],
+          [
+            7,
+            6,
+            7,
+            6
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ]
+        ],
+        "baselineMs": 463.5729999999994,
+        "workerMs": 1250.4165999999996,
+        "initMs": 0,
+        "solveCpuMs": 1232,
+        "queueDelayMs": null,
+        "heapBytes": 18939904
+      },
+      {
+        "id": "problem.A4.opening",
+        "kind": "table",
+        "depth": null,
+        "baseline": [
+          [
+            7,
+            6,
+            7,
+            6
+          ],
+          [
+            12,
+            1,
+            12,
+            1
+          ],
+          [
+            12,
+            1,
+            12,
+            1
+          ],
+          [
+            8,
+            5,
+            8,
+            5
+          ],
+          [
+            8,
+            1,
+            8,
+            1
+          ]
+        ],
+        "worker": [
+          [
+            7,
+            6,
+            7,
+            6
+          ],
+          [
+            12,
+            1,
+            12,
+            1
+          ],
+          [
+            12,
+            1,
+            12,
+            1
+          ],
+          [
+            8,
+            5,
+            8,
+            5
+          ],
+          [
+            8,
+            1,
+            8,
+            1
+          ]
+        ],
+        "baselineMs": 1249.9961999999996,
+        "workerMs": 1649.3447999999999,
+        "initMs": 0,
+        "solveCpuMs": 1635,
+        "queueDelayMs": null,
+        "heapBytes": 18939904
+      },
+      {
+        "id": "problem.A4.test-0",
+        "kind": "table",
+        "depth": null,
+        "baseline": [
+          [
+            7,
+            6,
+            7,
+            6
+          ],
+          [
+            12,
+            1,
+            12,
+            1
+          ],
+          [
+            12,
+            1,
+            12,
+            1
+          ],
+          [
+            8,
+            5,
+            8,
+            5
+          ],
+          [
+            8,
+            1,
+            8,
+            1
+          ]
+        ],
+        "worker": [
+          [
+            7,
+            6,
+            7,
+            6
+          ],
+          [
+            12,
+            1,
+            12,
+            1
+          ],
+          [
+            12,
+            1,
+            12,
+            1
+          ],
+          [
+            8,
+            5,
+            8,
+            5
+          ],
+          [
+            8,
+            1,
+            8,
+            1
+          ]
+        ],
+        "baselineMs": 1222.0463,
+        "workerMs": 1636.5725999999995,
+        "initMs": 0,
+        "solveCpuMs": 1621,
+        "queueDelayMs": null,
+        "heapBytes": 18939904
+      },
+      {
+        "id": "problem.A5.opening",
+        "kind": "table",
+        "depth": null,
+        "baseline": [
+          [
+            6,
+            7,
+            6,
+            7
+          ],
+          [
+            7,
+            5,
+            7,
+            5
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ]
+        ],
+        "worker": [
+          [
+            6,
+            7,
+            6,
+            7
+          ],
+          [
+            7,
+            5,
+            7,
+            5
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ]
+        ],
+        "baselineMs": 392.2441000000017,
+        "workerMs": 658.6476999999995,
+        "initMs": 0,
+        "solveCpuMs": 644,
+        "queueDelayMs": null,
+        "heapBytes": 18939904
+      },
+      {
+        "id": "problem.A5.test-0",
+        "kind": "table",
+        "depth": null,
+        "baseline": [
+          [
+            6,
+            7,
+            6,
+            7
+          ],
+          [
+            7,
+            5,
+            7,
+            5
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ]
+        ],
+        "worker": [
+          [
+            6,
+            7,
+            6,
+            7
+          ],
+          [
+            7,
+            5,
+            7,
+            5
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ]
+        ],
+        "baselineMs": 398.0661,
+        "workerMs": 650.7464999999993,
+        "initMs": 0,
+        "solveCpuMs": 635,
+        "queueDelayMs": null,
+        "heapBytes": 18939904
+      },
+      {
+        "id": "problem.A5.test-0.branch-0",
+        "kind": "solve",
+        "depth": null,
+        "baseline": {
+          "score": 5,
+          "cards": [
+            {
+              "suit": "S",
+              "rank": 14
+            }
+          ]
+        },
+        "worker": {
+          "score": 5,
+          "cards": [
+            {
+              "suit": "S",
+              "rank": 14
+            }
+          ]
+        },
+        "baselineMs": 46.196500000000015,
+        "workerMs": 7,
+        "initMs": 0,
+        "solveCpuMs": 7,
+        "queueDelayMs": 7,
+        "heapBytes": 18939904
+      },
+      {
+        "id": "problem.A6.opening",
+        "kind": "table",
+        "depth": null,
+        "baseline": [
+          [
+            12,
+            1,
+            12,
+            1
+          ],
+          [
+            7,
+            6,
+            7,
+            6
+          ],
+          [
+            11,
+            1,
+            11,
+            1
+          ],
+          [
+            7,
+            6,
+            7,
+            6
+          ],
+          [
+            11,
+            1,
+            11,
+            1
+          ]
+        ],
+        "worker": [
+          [
+            12,
+            1,
+            12,
+            1
+          ],
+          [
+            7,
+            6,
+            7,
+            6
+          ],
+          [
+            11,
+            1,
+            11,
+            1
+          ],
+          [
+            7,
+            6,
+            7,
+            6
+          ],
+          [
+            11,
+            1,
+            11,
+            1
+          ]
+        ],
+        "baselineMs": 390.0794999999998,
+        "workerMs": 442.6952000000001,
+        "initMs": 0,
+        "solveCpuMs": 426,
+        "queueDelayMs": null,
+        "heapBytes": 18939904
+      },
+      {
+        "id": "problem.A6.test-0",
+        "kind": "table",
+        "depth": null,
+        "baseline": [
+          [
+            12,
+            1,
+            12,
+            1
+          ],
+          [
+            7,
+            6,
+            7,
+            6
+          ],
+          [
+            11,
+            1,
+            11,
+            1
+          ],
+          [
+            7,
+            6,
+            7,
+            6
+          ],
+          [
+            11,
+            1,
+            11,
+            1
+          ]
+        ],
+        "worker": [
+          [
+            12,
+            1,
+            12,
+            1
+          ],
+          [
+            7,
+            6,
+            7,
+            6
+          ],
+          [
+            11,
+            1,
+            11,
+            1
+          ],
+          [
+            7,
+            6,
+            7,
+            6
+          ],
+          [
+            11,
+            1,
+            11,
+            1
+          ]
+        ],
+        "baselineMs": 410.9310000000005,
+        "workerMs": 471.03230000000076,
+        "initMs": 0,
+        "solveCpuMs": 457,
+        "queueDelayMs": null,
+        "heapBytes": 18939904
+      },
+      {
+        "id": "problem.A7.opening",
+        "kind": "table",
+        "depth": null,
+        "baseline": [
+          [
+            10,
+            3,
+            10,
+            3
+          ],
+          [
+            6,
+            6,
+            6,
+            6
+          ],
+          [
+            9,
+            3,
+            9,
+            3
+          ],
+          [
+            7,
+            5,
+            7,
+            5
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ]
+        ],
+        "worker": [
+          [
+            10,
+            3,
+            10,
+            3
+          ],
+          [
+            6,
+            6,
+            6,
+            6
+          ],
+          [
+            9,
+            3,
+            9,
+            3
+          ],
+          [
+            7,
+            5,
+            7,
+            5
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ]
+        ],
+        "baselineMs": 143.01230000000032,
+        "workerMs": 183.9989999999998,
+        "initMs": 0,
+        "solveCpuMs": 171,
+        "queueDelayMs": null,
+        "heapBytes": 18939904
+      },
+      {
+        "id": "problem.A7.test-0",
+        "kind": "table",
+        "depth": null,
+        "baseline": [
+          [
+            10,
+            3,
+            10,
+            3
+          ],
+          [
+            6,
+            6,
+            6,
+            6
+          ],
+          [
+            9,
+            3,
+            9,
+            3
+          ],
+          [
+            7,
+            5,
+            7,
+            5
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ]
+        ],
+        "worker": [
+          [
+            10,
+            3,
+            10,
+            3
+          ],
+          [
+            6,
+            6,
+            6,
+            6
+          ],
+          [
+            9,
+            3,
+            9,
+            3
+          ],
+          [
+            7,
+            5,
+            7,
+            5
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ]
+        ],
+        "baselineMs": 136.52210000000014,
+        "workerMs": 192.78529999999955,
+        "initMs": 0,
+        "solveCpuMs": 180,
+        "queueDelayMs": null,
+        "heapBytes": 18939904
+      },
+      {
+        "id": "problem.A7.test-1",
+        "kind": "table",
+        "depth": null,
+        "baseline": [
+          [
+            9,
+            4,
+            9,
+            4
+          ],
+          [
+            4,
+            9,
+            4,
+            9
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ],
+          [
+            7,
+            6,
+            7,
+            6
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ]
+        ],
+        "worker": [
+          [
+            9,
+            4,
+            9,
+            4
+          ],
+          [
+            4,
+            9,
+            4,
+            9
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ],
+          [
+            7,
+            6,
+            7,
+            6
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ]
+        ],
+        "baselineMs": 175.71689999999944,
+        "workerMs": 188.8814999999995,
+        "initMs": 0,
+        "solveCpuMs": 174,
+        "queueDelayMs": null,
+        "heapBytes": 18939904
+      },
+      {
+        "id": "problem.A8.opening",
+        "kind": "table",
+        "depth": null,
+        "baseline": [
+          [
+            7,
+            6,
+            7,
+            6
+          ],
+          [
+            8,
+            5,
+            8,
+            5
+          ],
+          [
+            8,
+            5,
+            8,
+            5
+          ],
+          [
+            10,
+            3,
+            10,
+            3
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ]
+        ],
+        "worker": [
+          [
+            7,
+            6,
+            7,
+            6
+          ],
+          [
+            8,
+            5,
+            8,
+            5
+          ],
+          [
+            8,
+            5,
+            8,
+            5
+          ],
+          [
+            10,
+            3,
+            10,
+            3
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ]
+        ],
+        "baselineMs": 87.17199999999866,
+        "workerMs": 43.73569999999745,
+        "initMs": 0,
+        "solveCpuMs": 27,
+        "queueDelayMs": null,
+        "heapBytes": 18939904
+      },
+      {
+        "id": "problem.A8.test-0",
+        "kind": "table",
+        "depth": null,
+        "baseline": [
+          [
+            7,
+            6,
+            7,
+            6
+          ],
+          [
+            8,
+            5,
+            8,
+            5
+          ],
+          [
+            8,
+            5,
+            8,
+            5
+          ],
+          [
+            10,
+            3,
+            10,
+            3
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ]
+        ],
+        "worker": [
+          [
+            7,
+            6,
+            7,
+            6
+          ],
+          [
+            8,
+            5,
+            8,
+            5
+          ],
+          [
+            8,
+            5,
+            8,
+            5
+          ],
+          [
+            10,
+            3,
+            10,
+            3
+          ],
+          [
+            9,
+            4,
+            9,
+            4
+          ]
+        ],
+        "baselineMs": 85.28290000000197,
+        "workerMs": 40.198599999999715,
+        "initMs": 0,
+        "solveCpuMs": 28,
+        "queueDelayMs": null,
+        "heapBytes": 18939904
+      },
+      {
+        "id": "problem.A9.opening",
+        "kind": "table",
+        "depth": null,
+        "baseline": [
+          [
+            8,
+            5,
+            8,
+            5
+          ],
+          [
+            12,
+            1,
+            12,
+            1
+          ],
+          [
+            12,
+            1,
+            12,
+            1
+          ],
+          [
+            10,
+            2,
+            10,
+            2
+          ],
+          [
+            12,
+            1,
+            12,
+            1
+          ]
+        ],
+        "worker": [
+          [
+            8,
+            5,
+            8,
+            5
+          ],
+          [
+            12,
+            1,
+            12,
+            1
+          ],
+          [
+            12,
+            1,
+            12,
+            1
+          ],
+          [
+            10,
+            2,
+            10,
+            2
+          ],
+          [
+            12,
+            1,
+            12,
+            1
+          ]
+        ],
+        "baselineMs": 60.160900000002584,
+        "workerMs": 23.183399999998073,
+        "initMs": 0,
+        "solveCpuMs": 11,
+        "queueDelayMs": null,
+        "heapBytes": 18939904
+      },
+      {
+        "id": "problem.A9.test-0",
+        "kind": "table",
+        "depth": null,
+        "baseline": [
+          [
+            8,
+            5,
+            8,
+            5
+          ],
+          [
+            12,
+            1,
+            12,
+            1
+          ],
+          [
+            12,
+            1,
+            12,
+            1
+          ],
+          [
+            10,
+            2,
+            10,
+            2
+          ],
+          [
+            12,
+            1,
+            12,
+            1
+          ]
+        ],
+        "worker": [
+          [
+            8,
+            5,
+            8,
+            5
+          ],
+          [
+            12,
+            1,
+            12,
+            1
+          ],
+          [
+            12,
+            1,
+            12,
+            1
+          ],
+          [
+            10,
+            2,
+            10,
+            2
+          ],
+          [
+            12,
+            1,
+            12,
+            1
+          ]
+        ],
+        "baselineMs": 57.61410000000251,
+        "workerMs": 28.38470000000234,
+        "initMs": 0,
+        "solveCpuMs": 14,
+        "queueDelayMs": null,
+        "heapBytes": 18939904
+      },
+      {
+        "id": "problem.A9.test-1",
+        "kind": "table",
+        "depth": null,
+        "baseline": [
+          [
+            8,
+            5,
+            8,
+            5
+          ],
+          [
+            12,
+            1,
+            12,
+            1
+          ],
+          [
+            12,
+            1,
+            12,
+            1
+          ],
+          [
+            8,
+            4,
+            8,
+            4
+          ],
+          [
+            12,
+            1,
+            12,
+            1
+          ]
+        ],
+        "worker": [
+          [
+            8,
+            5,
+            8,
+            5
+          ],
+          [
+            12,
+            1,
+            12,
+            1
+          ],
+          [
+            12,
+            1,
+            12,
+            1
+          ],
+          [
+            8,
+            4,
+            8,
+            4
+          ],
+          [
+            12,
+            1,
+            12,
+            1
+          ]
+        ],
+        "baselineMs": 64.1864999999998,
+        "workerMs": 24.550799999997253,
+        "initMs": 0,
+        "solveCpuMs": 9,
+        "queueDelayMs": null,
+        "heapBytes": 18939904
+      },
+      {
+        "id": "problem.Ω.opening",
+        "kind": "table",
+        "depth": null,
+        "baseline": [
+          [
+            12,
+            1,
+            12,
+            1
+          ],
+          [
+            11,
+            2,
+            11,
+            2
+          ],
+          [
+            6,
+            7,
+            6,
+            7
+          ],
+          [
+            4,
+            9,
+            4,
+            9
+          ],
+          [
+            11,
+            1,
+            11,
+            1
+          ]
+        ],
+        "worker": [
+          [
+            12,
+            1,
+            12,
+            1
+          ],
+          [
+            11,
+            2,
+            11,
+            2
+          ],
+          [
+            6,
+            7,
+            6,
+            7
+          ],
+          [
+            4,
+            9,
+            4,
+            9
+          ],
+          [
+            11,
+            1,
+            11,
+            1
+          ]
+        ],
+        "baselineMs": 148.64890000000014,
+        "workerMs": 98.2032999999974,
+        "initMs": 0,
+        "solveCpuMs": 83,
+        "queueDelayMs": null,
+        "heapBytes": 18939904
+      },
+      {
+        "id": "problem.Ω.test-0",
+        "kind": "table",
+        "depth": null,
+        "baseline": [
+          [
+            12,
+            1,
+            12,
+            1
+          ],
+          [
+            11,
+            2,
+            11,
+            2
+          ],
+          [
+            6,
+            7,
+            6,
+            7
+          ],
+          [
+            4,
+            9,
+            4,
+            9
+          ],
+          [
+            11,
+            1,
+            11,
+            1
+          ]
+        ],
+        "worker": [
+          [
+            12,
+            1,
+            12,
+            1
+          ],
+          [
+            11,
+            2,
+            11,
+            2
+          ],
+          [
+            6,
+            7,
+            6,
+            7
+          ],
+          [
+            4,
+            9,
+            4,
+            9
+          ],
+          [
+            11,
+            1,
+            11,
+            1
+          ]
+        ],
+        "baselineMs": 135.7573999999986,
+        "workerMs": 83.28369999999995,
+        "initMs": 0,
+        "solveCpuMs": 71,
+        "queueDelayMs": null,
+        "heapBytes": 18939904
+      },
+      {
+        "id": "synthetic.solve.seed-20260923-partial",
+        "kind": "solve",
+        "depth": null,
+        "baseline": {
+          "score": 4,
+          "cards": [
+            {
+              "suit": "H",
+              "rank": 10
+            }
+          ]
+        },
+        "worker": {
+          "score": 4,
+          "cards": [
+            {
+              "suit": "H",
+              "rank": 10
+            }
+          ]
+        },
+        "baselineMs": 52.662100000001374,
+        "workerMs": 3,
+        "initMs": 0,
+        "solveCpuMs": 3,
+        "queueDelayMs": 3,
+        "heapBytes": 18939904
+      },
+      {
+        "id": "synthetic.table.seed-20260923-table",
+        "kind": "table",
+        "depth": null,
+        "baseline": [
+          [
+            2,
+            11,
+            2,
+            11
+          ],
+          [
+            1,
+            12,
+            1,
+            12
+          ],
+          [
+            4,
+            8,
+            4,
+            8
+          ],
+          [
+            6,
+            6,
+            6,
+            6
+          ],
+          [
+            2,
+            10,
+            2,
+            10
+          ]
+        ],
+        "worker": [
+          [
+            2,
+            11,
+            2,
+            11
+          ],
+          [
+            1,
+            12,
+            1,
+            12
+          ],
+          [
+            4,
+            8,
+            4,
+            8
+          ],
+          [
+            6,
+            6,
+            6,
+            6
+          ],
+          [
+            2,
+            10,
+            2,
+            10
+          ]
+        ],
+        "baselineMs": 417.58539999999994,
+        "workerMs": 559.6551,
+        "initMs": 0,
+        "solveCpuMs": 547,
+        "queueDelayMs": null,
+        "heapBytes": 18939904
+      },
+      {
+        "id": "random-0",
+        "kind": "table",
+        "depth": null,
+        "baseline": [
+          [
+            2,
+            11,
+            2,
+            11
+          ],
+          [
+            1,
+            12,
+            1,
+            12
+          ],
+          [
+            5,
+            8,
+            5,
+            8
+          ],
+          [
+            3,
+            9,
+            3,
+            9
+          ],
+          [
+            2,
+            11,
+            2,
+            11
+          ]
+        ],
+        "worker": [
+          [
+            2,
+            11,
+            2,
+            11
+          ],
+          [
+            1,
+            12,
+            1,
+            12
+          ],
+          [
+            5,
+            8,
+            5,
+            8
+          ],
+          [
+            3,
+            9,
+            3,
+            9
+          ],
+          [
+            2,
+            11,
+            2,
+            11
+          ]
+        ],
+        "baselineMs": 1427.4266000000025,
+        "workerMs": 2779.4566000000013,
+        "initMs": 0,
+        "solveCpuMs": 2764,
+        "queueDelayMs": null,
+        "heapBytes": 18939904
+      },
+      {
+        "id": "random-1",
+        "kind": "solve",
+        "depth": 0,
+        "baseline": {
+          "score": 7,
+          "cards": [
+            {
+              "suit": "S",
+              "rank": 14
+            },
+            {
+              "suit": "S",
+              "rank": 8
+            }
+          ]
+        },
+        "worker": {
+          "score": 7,
+          "cards": [
+            {
+              "suit": "S",
+              "rank": 8
+            },
+            {
+              "suit": "S",
+              "rank": 14
+            }
+          ]
+        },
+        "baselineMs": 70.71740000000136,
+        "workerMs": 9,
+        "initMs": 0,
+        "solveCpuMs": 9,
+        "queueDelayMs": 10,
+        "heapBytes": 18939904
+      }
+    ],
+    "status": "complete"
+  },
+  "budget": {
+    "rooms": 50,
+    "actions": {
+      "allocation": {
+        "countPerRoom": 1,
+        "readsEach": 1,
+        "writesEach": 1
+      },
+      "owner-session insert": {
+        "countPerRoom": 1,
+        "readsEach": 1,
+        "writesEach": 1
+      },
+      "join-session insert": {
+        "countPerRoom": 4,
+        "readsEach": 1,
+        "writesEach": 1
+      },
+      "state-row update": {
+        "countPerRoom": 1000,
+        "readsEach": 1,
+        "writesEach": 1
+      },
+      "token rotation": {
+        "countPerRoom": 4,
+        "readsEach": 1,
+        "writesEach": 1
+      },
+      "scheduled-action insert/delete pair": {
+        "countPerRoom": 1,
+        "readsEach": 1,
+        "writesEach": 2
+      },
+      "expiry": {
+        "countPerRoom": 1,
+        "readsEach": 1,
+        "writesEach": 1
+      },
+      "registry-release retry": {
+        "countPerRoom": 1,
+        "readsEach": 2,
+        "writesEach": 1
+      },
+      "reuse/tombstone cycle": {
+        "countPerRoom": 1,
+        "readsEach": 2,
+        "writesEach": 2
+      }
+    },
+    "readsPerRoom": 1016,
+    "writesPerRoom": 1016,
+    "readsPerDay": 50800,
+    "writesPerDay": 50800,
+    "model": "SQL row counts: updates read then write one row; registry release retries one read before success."
+  }
+}

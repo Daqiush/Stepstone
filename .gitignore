@@ -1,5 +1,7 @@
 node_modules/
 .worktrees/
+workers/.wrangler/
+workers/test/results/*.json
 
 # macOS metadata
 .DS_Store
