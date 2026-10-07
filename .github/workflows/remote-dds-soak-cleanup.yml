@@ -26,6 +26,9 @@ jobs:
           $runAttempt = '${{ github.event.workflow_run.run_attempt }}'
           $identityName = "remote-dds-identity-$runId-$runAttempt"
           $deploymentName = "remote-dds-deployment-$runId-$runAttempt"
+          $escapedRunId = [regex]::Escape($runId)
+          $identityFamilyPattern = "^remote-dds-identity-$escapedRunId-(?<attempt>[1-9]\d*)$"
+          $deploymentFamilyPattern = "^remote-dds-deployment-$escapedRunId-(?<attempt>[1-9]\d*)$"
           $artifacts = @()
           $page = 1
           do {
@@ -36,13 +39,18 @@ jobs:
           } while ($batch.Count -eq 100)
           $identities = @($artifacts | Where-Object { $_.name -ceq $identityName })
           $deployments = @($artifacts | Where-Object { $_.name -ceq $deploymentName })
-          $unexpected = @($artifacts | Where-Object {
-            ($_.name.StartsWith('remote-dds-identity-', [System.StringComparison]::Ordinal) -or
-             $_.name.StartsWith('remote-dds-deployment-', [System.StringComparison]::Ordinal)) -and
+          $ignored = @($artifacts | Where-Object {
+            (($_.name -cmatch $identityFamilyPattern) -or ($_.name -cmatch $deploymentFamilyPattern)) -and
             $_.name -cne $identityName -and $_.name -cne $deploymentName
+          })
+          $unexpected = @($artifacts | Where-Object {
+            $looksLikeAuthorization = $_.name -match '^remote-dds-(?:identity|deployment)'
+            $isCanonicalForRun = ($_.name -cmatch $identityFamilyPattern) -or ($_.name -cmatch $deploymentFamilyPattern)
+            $looksLikeAuthorization -and -not $isCanonicalForRun
           })
           "identity-count=$($identities.Count)" >> $env:GITHUB_OUTPUT
           "deployment-count=$($deployments.Count)" >> $env:GITHUB_OUTPUT
+          "ignored-count=$($ignored.Count)" >> $env:GITHUB_OUTPUT
           "unexpected-count=$($unexpected.Count)" >> $env:GITHUB_OUTPUT
 
       - name: Authorize only one exact current-attempt identity

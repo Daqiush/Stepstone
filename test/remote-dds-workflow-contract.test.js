@@ -331,6 +331,45 @@ function cleanupStep(job, id) {
   return step;
 }
 
+function executeCleanupInventory(inventory, { runId, runAttempt, artifactNames }) {
+  const root = mkdtempSync(join(tmpdir(), 'remote-dds-backstop-inventory-'));
+  const output = join(root, 'github-output.txt');
+  const shell = process.platform === 'win32' ? 'powershell.exe' : 'pwsh';
+  const script = runText(inventory)
+    .replaceAll(cleanupExpression('github.event.workflow_run.id'), runId)
+    .replaceAll(cleanupExpression('github.event.workflow_run.run_attempt'), runAttempt);
+  const harness = `
+function global:Invoke-RestMethod {
+  param($Headers, $Uri)
+  $parsedNames = ConvertFrom-Json -InputObject $env:ARTIFACT_NAMES_JSON
+  $names = @($parsedNames)
+  [pscustomobject]@{ artifacts = @($names | ForEach-Object { [pscustomobject]@{ name = [string]$_ } }) }
+}
+${script}`;
+  try {
+    const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-Command', harness], {
+      cwd: root,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ARTIFACT_NAMES_JSON: JSON.stringify(artifactNames),
+        GITHUB_OUTPUT: output,
+        GITHUB_TOKEN: 'contract-test-token',
+        PRIMARY_REPOSITORY: 'owner/repository',
+      },
+    });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    const bytes = readFileSync(output);
+    const text = bytes[0] === 0xff && bytes[1] === 0xfe ? bytes.subarray(2).toString('utf16le') : bytes.toString('utf8');
+    return Object.fromEntries(text.trim().split(/\r?\n/).map((line) => {
+      const separator = line.indexOf('=');
+      return [line.slice(0, separator), line.slice(separator + 1)];
+    }));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function exactCleanupContext(command) {
   for (const [flag, value] of [
     ['--repository', cleanupExpression('github.event.repository.full_name')],
@@ -429,6 +468,64 @@ test('backstop inventory derives exact current-attempt authorization and no-depl
     ['commitSha', `'${cleanupExpression('github.event.workflow_run.head_sha')}'`], ['workerName', '$null'],
     ['subdomainDisabled', '$false'], ['objectDeleted', '$false'], ['currentAbsent', '$true'], ['legacyAbsent', '$true'],
   ]) assert.ok(runText(absent).includes(`${field} = ${value}`), `no-deployment result has wrong ${field}`);
+});
+
+test('backstop inventory ignores canonical prior attempts but rejects malformed or cross-run authorization names', () => {
+  const { workflow } = loadCleanupWorkflow();
+  const inventory = cleanupStep(cleanupJob(workflow), 'inventory');
+  const runId = '424242';
+  const runAttempt = '2';
+  const currentIdentity = `remote-dds-identity-${runId}-${runAttempt}`;
+  const currentDeployment = `remote-dds-deployment-${runId}-${runAttempt}`;
+  const withPrior = executeCleanupInventory(inventory, {
+    runId,
+    runAttempt,
+    artifactNames: [
+      `remote-dds-identity-${runId}-1`,
+      `remote-dds-deployment-${runId}-1`,
+      currentIdentity,
+      currentDeployment,
+      `remote-dds-primary-cleanup-${runId}-1`,
+      `remote-dds-backstop-cleanup-${runId}-1-1`,
+    ],
+  });
+  assert.deepEqual(withPrior, {
+    'identity-count': '1',
+    'deployment-count': '1',
+    'ignored-count': '2',
+    'unexpected-count': '0',
+  });
+
+  const invalidNames = [
+    'remote-dds-identity-424243-1',
+    'remote-dds-deployment-424243-1',
+    `remote-dds-identity-${runId}-0`,
+    `remote-dds-deployment-${runId}-00`,
+    `remote-dds-identity-${runId}-02`,
+    `remote-dds-deployment-${runId}-x`,
+    `remote-dds-identity-${runId}-${runAttempt}-extra`,
+    `remote-dds-deployment-alias-${runId}-${runAttempt}`,
+    `REMOTE-DDS-IDENTITY-${runId}-1`,
+  ];
+  const malformed = executeCleanupInventory(inventory, {
+    runId,
+    runAttempt,
+    artifactNames: [currentIdentity, currentDeployment, ...invalidNames],
+  });
+  assert.deepEqual(malformed, {
+    'identity-count': '1',
+    'deployment-count': '1',
+    'ignored-count': '0',
+    'unexpected-count': String(invalidNames.length),
+  });
+
+  const duplicate = executeCleanupInventory(inventory, {
+    runId,
+    runAttempt,
+    artifactNames: [currentIdentity, currentIdentity],
+  });
+  assert.equal(duplicate['identity-count'], '2');
+  assert.match(runText(cleanupStep(cleanupJob(workflow), 'authorize')), /\$identityCount\s+-gt\s+1/i);
 });
 
 test('backstop downloads only exact triggering-run artifacts into the untrusted root', () => {
