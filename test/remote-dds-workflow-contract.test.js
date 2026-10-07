@@ -11,6 +11,7 @@ const YAML = require('yaml');
 const ROOT = resolve(__dirname, '..');
 const WORKFLOW_PATH = resolve(ROOT, '.github/workflows/remote-dds-soak.yml');
 const CLEANUP_WORKFLOW_PATH = resolve(ROOT, '.github/workflows/remote-dds-soak-cleanup.yml');
+const WINDOWS_DDS_BUILD_PATH = resolve(ROOT, 'scripts/build-windows-dds.ps1');
 const APPROVED_ACTIONS = new Set([
   'actions/checkout@11d5960a326750d5838078e36cf38b85af677262',
   'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
@@ -78,10 +79,44 @@ test('manual entry point, permissions, concurrency, and action pins are locked d
   assert.deepEqual(workflow.concurrency, { group: 'stepstone-remote-dds-soak', 'cancel-in-progress': false });
   assert.deepEqual(workflow.permissions, { contents: 'read', actions: 'read' });
   for (const job of Object.values(workflow.jobs)) {
-    assert.equal(job['runs-on'], 'windows-latest');
+    assert.equal(job['runs-on'], 'windows-2022');
     assert.equal(job.permissions, undefined, 'jobs may not broaden workflow permissions');
     for (const step of steps(job)) if (step.uses !== undefined) assert.ok(APPROVED_ACTIONS.has(step.uses), `unapproved action: ${step.uses}`);
   }
+});
+
+test('native DDS jobs initialize the pinned submodule and build both CLI baselines before use', () => {
+  const { workflow } = loadWorkflow();
+  const nativeJobs = ['prepare', ...Array.from({ length: 6 }, (_, index) => `segment-${index + 1}`)];
+
+  for (const jobName of nativeJobs) {
+    const job = workflow.jobs[jobName];
+    const checkout = steps(job).find((step) => step.uses === 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262');
+    assert.equal(checkout?.with?.submodules, 'recursive', `${jobName} must initialize the pinned DDS submodule`);
+
+    const install = stepIndex(job, /^npm ci$/m);
+    const build = stepIndex(job, /scripts[\\/]build-windows-dds\.ps1/);
+    const smoke = stepIndex(job, /^npm run test:dds:smoke$/m);
+    const consumer = jobName === 'prepare'
+      ? stepIndex(job, /^npm test$/m)
+      : stepIndex(job, /remote-worker-dds-soak\.mjs/);
+    assert.ok(install < build && build < smoke && smoke < consumer, `${jobName} must build and smoke DDS before consuming it`);
+  }
+
+  for (const jobName of ['gate', 'cleanup']) {
+    const job = workflow.jobs[jobName];
+    assert.equal(steps(job).some((step) => /build-windows-dds\.ps1/.test(runText(step))), false);
+  }
+
+  const buildSource = readFileSync(WINDOWS_DDS_BUILD_PATH, 'utf8');
+  assert.match(buildSource, /vswhere\.exe/i);
+  assert.match(buildSource, /Microsoft\.VisualStudio\.Component\.VC\.Tools\.x86\.x64/);
+  assert.match(buildSource, /solution[\\/]DDS\.vcxproj/i);
+  assert.match(buildSource, /native[\\/]dds-cli[\\/]dds_calc\.cpp/i);
+  assert.match(buildSource, /native[\\/]dds-cli[\\/]dds_solve\.cpp/i);
+  assert.match(buildSource, /\/MD(?:['"\s,]|$)/);
+  assert.match(buildSource, /dds_calc\.exe/i);
+  assert.match(buildSource, /dds_solve\.exe/i);
 });
 
 test('prepare proves the repository before authorizing and recording deployment', () => {
@@ -89,6 +124,7 @@ test('prepare proves the repository before authorizing and recording deployment'
   const prepare = workflow.jobs.prepare;
   assert.ok(prepare);
   const install = stepIndex(prepare, /^npm ci$/m);
+  const build = stepIndex(prepare, /scripts[\\/]build-windows-dds\.ps1/);
   const unit = stepIndex(prepare, /^npm test$/m);
   const workers = stepIndex(prepare, /^npm run test:workers$/m);
   const smoke = stepIndex(prepare, /^npm run test:dds:smoke$/m);
@@ -96,7 +132,7 @@ test('prepare proves the repository before authorizing and recording deployment'
   const identityUpload = steps(prepare).findIndex((step) => step.uses === UPLOAD && step.with?.name === artifact('identity'));
   const deploy = stepIndex(prepare, /--deploy-from-identity/);
   const ready = stepIndex(prepare, /--create-ready/);
-  assert.ok(install < unit && unit < workers && workers < smoke && smoke < preflight && preflight < identityUpload && identityUpload < deploy && deploy < ready);
+  assert.ok(install < build && build < smoke && smoke < unit && unit < workers && workers < preflight && preflight < identityUpload && identityUpload < deploy && deploy < ready);
   const derive = findRun(prepare, /remote-dds-ci-identity\.mjs/);
   exactContext(derive.run);
   assert.match(derive.run, /--identity-out\s+"?\$env:RUNNER_TEMP[\\/]remote-dds-trusted-identity\.json"?/i);
