@@ -65,10 +65,10 @@ function successfulPayload(response, payload, { allowNotFound = false } = {}) {
   if (!isRecord(payload) || typeof payload.success !== 'boolean') throw invalidResponse('Cloudflare API returned a malformed envelope');
   if (payload.success === false) {
     if (!validFailureEnvelope(payload)) throw invalidResponse('Cloudflare API returned a malformed error envelope');
-    if ((Object.hasOwn(payload, 'result') && payload.result !== null)
-        || (Object.hasOwn(payload, 'result_info') && !validResultInfo(payload.result_info))) throw invalidResponse('Cloudflare API returned malformed result metadata');
     if (authOrPermissionEnvelope(payload)) throw diagnostic('API_AUTH_OR_PERMISSION', new Error('Cloudflare API denied authorization'));
     if (allowNotFound && explicitNotFound(response, payload)) return null;
+    if ((Object.hasOwn(payload, 'result') && payload.result !== null)
+        || (Object.hasOwn(payload, 'result_info') && !validResultInfo(payload.result_info))) throw invalidResponse('Cloudflare API returned malformed result metadata');
     throw requestFailed('Cloudflare API request failed');
   }
   if (!response.ok) throw requestFailed('Cloudflare API request failed');

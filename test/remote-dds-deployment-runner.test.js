@@ -315,6 +315,22 @@ test('code-10007-only responses still prove exact absence without mutation', asy
   assert.deepEqual(result, { absent: true }); assert.equal(mutations, 0);
 });
 
+for (const status of [400, 404]) {
+  for (const [label, metadata] of [['result', { result: 'malformed' }], ['result_info', { result_info: 'malformed' }]]) {
+    test(`HTTP ${status} code-10007-only absence ignores unrelated malformed ${label}`, async () => {
+      const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity(); let mutations = 0;
+      const result = await api.readWorkerVersions({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
+        fetchImpl: async (url, options = {}) => {
+          if ((options.method ?? 'GET') !== 'GET') mutations++;
+          return response({ success: false, errors: [{ code: 10007, message: 'Worker not found' }], ...metadata }, status);
+        },
+      });
+      assert.deepEqual(result, { status: 'ABSENT_ENDPOINT', versions: [] });
+      assert.equal(mutations, 0);
+    });
+  }
+}
+
 test('deployment requires a persisted preflight and rederives ownership from trusted arguments before any request', async () => {
   const f = await deploymentFixture();
   try {
