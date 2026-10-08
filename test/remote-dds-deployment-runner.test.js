@@ -17,6 +17,13 @@ function repo() {
 
 async function deployment() { return import('../scripts/prepare-remote-dds-deployment.mjs'); }
 async function runner() { return import('../scripts/remote-worker-dds-soak.mjs'); }
+async function assertDiagnostic(thunk, expectedCode) {
+  const { publicDiagnosticCode } = await import('../scripts/remote-dds-public-errors.mjs');
+  await assert.rejects(thunk, (error) => {
+    assert.equal(publicDiagnosticCode(error), expectedCode);
+    return true;
+  });
+}
 
 const CONTEXT = { repository: 'bridge/stepstone', workflow: 'Remote DDS Soak', runId: '12345', runAttempt: '2', commitSha: 'a'.repeat(40) };
 const TOKEN = 'fake-source-token';
@@ -163,6 +170,151 @@ test('an exact-name collision rejects immediately with zero deployment or deleti
   assert.equal(reads, 1); assert.equal(mutations, 0);
 });
 
+for (const missing of ['accountId', 'apiToken']) test('Cloudflare preflight classifies missing ' + missing + ' before fetch', async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity(); let fetches = 0;
+  const options = { accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
+    fetchImpl: async () => { fetches++; throw new Error('must not fetch'); } };
+  delete options[missing];
+  await assertDiagnostic(() => api.confirmExactAbsence(options), 'REQUIRED_CONFIG_MISSING');
+  assert.equal(fetches, 0);
+});
+
+test('Cloudflare preflight classifies a wholly missing options object as required configuration', async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs');
+  await assertDiagnostic(() => api.confirmExactAbsence(), 'REQUIRED_CONFIG_MISSING');
+});
+
+test('Cloudflare preflight classifies a rejected request without authorizing mutation', async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity(); let mutations = 0;
+  await assertDiagnostic(() => api.confirmExactAbsence({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
+    fetchImpl: async (url, options = {}) => {
+      if ((options.method ?? 'GET') !== 'GET') mutations++;
+      throw new TypeError('fetch failed with sensitive-marker');
+    },
+  }), 'API_REQUEST_FAILED');
+  assert.equal(mutations, 0);
+});
+
+for (const status of [401, 403]) test('Cloudflare preflight classifies HTTP ' + status + ' before parsing its body', async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity(); let jsonReads = 0, mutations = 0;
+  await assertDiagnostic(() => api.confirmExactAbsence({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
+    fetchImpl: async (url, options = {}) => {
+      if ((options.method ?? 'GET') !== 'GET') mutations++;
+      return { ok: false, status, json: async () => { jsonReads++; throw new SyntaxError('non-json sensitive-marker'); } };
+    },
+  }), 'API_AUTH_OR_PERMISSION');
+  assert.equal(jsonReads, 0); assert.equal(mutations, 0);
+});
+
+test('Cloudflare preflight classifies non-auth invalid JSON as an invalid response', async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity(); let mutations = 0;
+  await assertDiagnostic(() => api.confirmExactAbsence({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
+    fetchImpl: async (url, options = {}) => {
+      if ((options.method ?? 'GET') !== 'GET') mutations++;
+      return { ok: false, status: 500, json: async () => { throw new SyntaxError('html sensitive-marker'); } };
+    },
+  }), 'API_RESPONSE_INVALID');
+  assert.equal(mutations, 0);
+});
+
+test('Cloudflare preflight gives an auth envelope precedence over mixed code-10007 absence', async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity(); let mutations = 0;
+  await assertDiagnostic(() => api.confirmExactAbsence({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
+    fetchImpl: async (url, options = {}) => {
+      if ((options.method ?? 'GET') !== 'GET') mutations++;
+      return response({ success: false, errors: [{ code: 10007 }, { code: 10000, message: 'Permission denied sensitive-marker' }] }, 404);
+    },
+  }), 'API_AUTH_OR_PERMISSION');
+  assert.equal(mutations, 0);
+});
+
+test('Cloudflare preflight classifies another valid unsuccessful envelope as a request failure', async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity(); let mutations = 0;
+  await assertDiagnostic(() => api.confirmExactAbsence({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
+    fetchImpl: async (url, options = {}) => {
+      if ((options.method ?? 'GET') !== 'GET') mutations++;
+      return response({ success: false, errors: [{ code: 10001, message: 'Rate limited sensitive-marker' }] }, 429);
+    },
+  }), 'API_REQUEST_FAILED');
+  assert.equal(mutations, 0);
+});
+
+for (const [label, payload, expectedCode] of [
+  ['auth envelope', { success: false, errors: [{ code: 10000, message: 'Authentication error sensitive-marker' }] }, 'API_AUTH_OR_PERMISSION'],
+  ['non-auth envelope', { success: false, errors: [{ code: 10001, message: 'Request rejected sensitive-marker' }] }, 'API_REQUEST_FAILED'],
+  ['missing errors', { success: false }, 'API_RESPONSE_INVALID'],
+  ['empty errors', { success: false, errors: [] }, 'API_RESPONSE_INVALID'],
+  ['malformed errors', { success: false, errors: [{ code: 10001, message: 17 }] }, 'API_RESPONSE_INVALID'],
+  ['non-object result metadata', { success: false, errors: [{ code: 10001 }], result_info: 'invalid' }, 'API_RESPONSE_INVALID'],
+  ['incomplete result metadata', { success: false, errors: [{ code: 10001 }], result_info: {} }, 'API_RESPONSE_INVALID'],
+  ['malformed result value', { success: false, errors: [{ code: 10001 }], result: 'invalid' }, 'API_RESPONSE_INVALID'],
+]) test('HTTP 200 success:false classifies a valid or malformed ' + label, async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity(); let mutations = 0;
+  await assertDiagnostic(() => api.confirmExactAbsence({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
+    fetchImpl: async (url, options = {}) => {
+      if ((options.method ?? 'GET') !== 'GET') mutations++;
+      const path = new URL(url).pathname;
+      if (path.endsWith('/workers/scripts/' + identity.workerName)) return notFound();
+      return response(payload);
+    },
+  }), expectedCode);
+  assert.equal(mutations, 0);
+});
+
+for (const [label, payload] of [
+  ['malformed result', { success: true, result: {}, result_info: { page: 1, per_page: 100, total_pages: 0, count: 0, total_count: 0 } }],
+  ['malformed pagination', { success: true, result: [], result_info: { page: 1, per_page: 100, total_pages: 1, count: 0 } }],
+]) test('Cloudflare preflight classifies successful ' + label + ' as an invalid response', async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity(); let mutations = 0;
+  await assertDiagnostic(() => api.confirmExactAbsence({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
+    fetchImpl: async (url, options = {}) => {
+      if ((options.method ?? 'GET') !== 'GET') mutations++;
+      const path = new URL(url).pathname;
+      if (path.endsWith('/workers/scripts/' + identity.workerName)) return notFound();
+      return response(payload);
+    },
+  }), 'API_RESPONSE_INVALID');
+  assert.equal(mutations, 0);
+});
+
+test('only confirmExactAbsence classifies a successful exact endpoint as a collision', async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity(); let mutations = 0;
+  await assertDiagnostic(() => api.confirmExactAbsence({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
+    fetchImpl: async (url, options = {}) => {
+      if ((options.method ?? 'GET') !== 'GET') mutations++;
+      return response({});
+    },
+  }), 'TEMPORARY_WORKER_COLLISION');
+  assert.equal(mutations, 0);
+});
+
+test('only confirmExactAbsence classifies an exact match from a fully validated list as a collision', async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity(); let mutations = 0;
+  await assertDiagnostic(() => api.confirmExactAbsence({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
+    fetchImpl: async (url, options = {}) => {
+      if ((options.method ?? 'GET') !== 'GET') mutations++;
+      const path = new URL(url).pathname;
+      if (path.endsWith('/workers/scripts/' + identity.workerName)) return notFound();
+      if (path.endsWith('/workers/workers')) return response(page([{ id: WORKER_ID, name: identity.workerName }]));
+      throw new Error('must stop after the proven collision');
+    },
+  }), 'TEMPORARY_WORKER_COLLISION');
+  assert.equal(mutations, 0);
+});
+
+test('code-10007-only responses still prove exact absence without mutation', async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity(); let mutations = 0;
+  const result = await api.confirmExactAbsence({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
+    fetchImpl: async (url, options = {}) => {
+      if ((options.method ?? 'GET') !== 'GET') mutations++;
+      const path = new URL(url).pathname;
+      if (path.endsWith('/workers/scripts/' + identity.workerName)) return notFound();
+      return response(page([]));
+    },
+  });
+  assert.deepEqual(result, { absent: true }); assert.equal(mutations, 0);
+});
+
 test('deployment requires a persisted preflight and rederives ownership from trusted arguments before any request', async () => {
   const f = await deploymentFixture();
   try {
@@ -271,7 +423,7 @@ test('version verification requires the immutable version id and matching worker
   } });
   assert.equal(verified.scriptETag, 'script-etag-1');
   for (const tag of [null, 'b'.repeat(43)]) await assert.rejects(() => mod.verifyWorkersDeployment({ ...args, fetchImpl: async () => response(versionDetail(identity, tag)) }), /ownership|tag/i);
-  await assert.rejects(() => mod.verifyWorkersDeployment({ ...args, fetchImpl: async () => response({ ...versionDetail(identity), result: { ...versionDetail(identity).result, id: 'other' } }) }), /version ID|immutable/i);
+  await assertDiagnostic(() => mod.verifyWorkersDeployment({ ...args, fetchImpl: async () => response({ ...versionDetail(identity), result: { ...versionDetail(identity).result, id: 'other' } }) }), 'API_RESPONSE_INVALID');
 });
 
 for (const [label, tag, versions, deletes] of [
@@ -333,6 +485,30 @@ test('shared API finds later-page exact objects and legacy scripts without treat
   assert.equal(reads.length, 4);
 });
 
+test('presence readers preserve normalized records for ownership and cleanup consumers', async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity();
+  const options = { accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName, ownershipTag: identity.ownershipTag,
+    fetchImpl: async (url) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith('/workers/workers')) return response(page([{ id: WORKER_ID, name: identity.workerName }]));
+      if (path.endsWith('/workers/scripts-search')) return response(page([{ script_name: identity.workerName }]));
+      if (path.endsWith('/workers/scripts/' + identity.workerName)) return response({});
+      if (path.endsWith('/versions')) return response(versionPage([{ id: 'deployed-v1' }]));
+      if (path.endsWith('/versions/deployed-v1')) return response(versionDetail(identity));
+      throw new Error('unexpected presence read');
+    },
+  };
+  const worker = await api.findExactWorker(options);
+  const legacy = await api.listLegacyExactScript({ ...options, includeExact: true });
+  assert.deepEqual(worker, { id: WORKER_ID, name: identity.workerName });
+  assert.deepEqual(legacy, { name: identity.workerName });
+  const snapshot = await api.readOwnershipSnapshot(options);
+  assert.deepEqual(snapshot.worker, worker);
+  assert.deepEqual(snapshot.legacy, legacy);
+  assert.equal(snapshot.versionEvidence.status, 'PRESENT');
+  assert.equal(snapshot.versionEvidence.versions[0].id, 'deployed-v1');
+});
+
 for (const target of ['objects', 'legacy', 'versions']) {
   for (const bad of ['missing metadata', 'malformed cursor', 'repeated cursor', 'cyclic cursor', 'inconsistent pages', 'non-advancing page', 'duplicate exact']) {
     test(target + ' pagination fails closed on ' + bad, async () => {
@@ -355,7 +531,7 @@ for (const target of ['objects', 'legacy', 'versions']) {
       };
       const options = { accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName, fetchImpl };
       const method = target === 'objects' ? api.findExactWorker : target === 'legacy' ? api.listLegacyExactScript : api.readWorkerVersions;
-      await assert.rejects(() => method(options), /pagination|cursor|duplicate|page/i);
+      await assertDiagnostic(() => method(options), 'API_RESPONSE_INVALID');
       assert.ok(reads <= 3);
     });
   }
@@ -378,7 +554,7 @@ for (const target of ['objects', 'legacy', 'versions']) {
       }
       return response(listingPayload(target, [listingItem(target, 0)], Number(parsed.searchParams.get('page')), 2, 1, 2));
     } };
-    await assert.rejects(() => listingMethod(api, target)(options), /duplicate|identity|pagination/i);
+    await assertDiagnostic(() => listingMethod(api, target)(options), 'API_RESPONSE_INVALID');
   });
 
   for (const bad of ['missing count', 'missing total count', 'count mismatch', 'total count exceeds capacity', 'total pages mismatch', 'total count drift', 'short nonfinal page', 'short final page']) {
@@ -401,7 +577,7 @@ for (const target of ['objects', 'legacy', 'versions']) {
         if (bad === 'total count drift' && number === 2) payload.result_info.total_count = 102;
         return response(payload);
       } };
-      await assert.rejects(() => listingMethod(api, target)(options), /pagination|count|page/i);
+      await assertDiagnostic(() => listingMethod(api, target)(options), 'API_RESPONSE_INVALID');
     });
   }
 
@@ -424,14 +600,14 @@ for (const target of ['objects', 'legacy', 'versions']) {
 
 test('current Worker list refuses one immutable ID associated with conflicting names', async () => {
   const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity();
-  await assert.rejects(() => api.findExactWorker({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
+  await assertDiagnostic(() => api.findExactWorker({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
     fetchImpl: async () => response(page([{ id: WORKER_ID, name: 'other' }, { id: WORKER_ID, name: 'changed' }])),
-  }), /duplicate|identity|conflict|pagination/i);
+  }), 'API_RESPONSE_INVALID');
 });
 
 for (const bad of ['duplicate non-target Worker', 'total_count 201 on two pages']) test('absence confirmation refuses ' + bad, async () => {
   const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity();
-  await assert.rejects(() => api.confirmExactAbsence({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
+  await assertDiagnostic(() => api.confirmExactAbsence({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
     fetchImpl: async (url) => {
       const parsed = new URL(url), number = Number(parsed.searchParams.get('page'));
       if (parsed.pathname.endsWith('/workers/scripts/' + identity.workerName)) return notFound();
@@ -439,7 +615,7 @@ for (const bad of ['duplicate non-target Worker', 'total_count 201 on two pages'
       const items = Array.from({ length: number === 1 ? 100 : 1 }, (_, i) => listingItem('objects', number === 2 && bad === 'duplicate non-target Worker' ? 0 : (number - 1) * 100 + i));
       return response(page(items, number, 2, 100, bad === 'total_count 201 on two pages' ? 201 : 101));
     },
-  }), /duplicate|identity|pagination|count|page/i);
+  }), 'API_RESPONSE_INVALID');
 });
 
 test('shared API normalizes every immutable version with script ETag and canonical config fingerprint without credentials', async () => {
@@ -463,33 +639,35 @@ test('a missing versions endpoint returns typed absence, while missing immutable
   for (const payload of [notFound(), notFound(400)]) {
     assert.deepEqual(await api.readWorkerVersions({ ...options, fetchImpl: async () => payload }), { status: 'ABSENT_ENDPOINT', versions: [] });
   }
-  for (const status of [401, 403, 500]) await assert.rejects(() => api.readWorkerVersions({ ...options, fetchImpl: async () => response({ success: false }, status) }), /failed|Cloudflare/i);
-  await assert.rejects(() => api.readWorkerVersions({ ...options, versionId: 'missing', fetchImpl: async () => response({}, 404) }), /failed|immutable|Cloudflare/i);
+  for (const [status, code] of [[401, 'API_AUTH_OR_PERMISSION'], [403, 'API_AUTH_OR_PERMISSION'], [500, 'API_RESPONSE_INVALID']]) {
+    await assertDiagnostic(() => api.readWorkerVersions({ ...options, fetchImpl: async () => response({ success: false }, status) }), code);
+  }
+  await assertDiagnostic(() => api.readWorkerVersions({ ...options, versionId: 'missing', fetchImpl: async () => response({}, 404) }), 'API_RESPONSE_INVALID');
 });
 
 const unsafeAbsenceCases = [
-  ['HTTP 401 with not-found code', 401, [{ code: 10007 }]],
-  ['HTTP 403 with not-found code', 403, [{ code: 10007 }]],
-  ['HTTP 500 with not-found code', 500, [{ code: 10007 }]],
-  ['HTTP 503 with not-found code', 503, [{ code: 10007 }]],
-  ['HTTP 429 with not-found code', 429, [{ code: 10007 }]],
-  ['HTTP 200 with failure envelope', 200, [{ code: 10007 }]],
-  ['HTTP 404 without errors', 404, undefined],
-  ['HTTP 404 with empty errors', 404, []],
-  ['HTTP 404 with mixed errors', 404, [{ code: 10007 }, { code: 10000, message: 'Authentication error' }]],
-  ['HTTP 400 with mixed errors', 400, [{ code: 10007 }, { code: 10000, message: 'Authentication error' }]],
-  ['HTTP 404 with permission error', 404, [{ code: 10007, message: 'Permission denied' }]],
-  ['HTTP 400 with service error', 400, [{ code: 10007, message: 'Internal service error' }]],
-  ['HTTP 404 with an unknown code', 404, [{ code: 10000 }]],
+  ['HTTP 401 with not-found code', 401, [{ code: 10007 }], 'API_AUTH_OR_PERMISSION'],
+  ['HTTP 403 with not-found code', 403, [{ code: 10007 }], 'API_AUTH_OR_PERMISSION'],
+  ['HTTP 500 with not-found code', 500, [{ code: 10007 }], 'API_REQUEST_FAILED'],
+  ['HTTP 503 with not-found code', 503, [{ code: 10007 }], 'API_REQUEST_FAILED'],
+  ['HTTP 429 with not-found code', 429, [{ code: 10007 }], 'API_REQUEST_FAILED'],
+  ['HTTP 200 with failure envelope', 200, [{ code: 10007 }], 'API_REQUEST_FAILED'],
+  ['HTTP 404 without errors', 404, undefined, 'API_RESPONSE_INVALID'],
+  ['HTTP 404 with empty errors', 404, [], 'API_RESPONSE_INVALID'],
+  ['HTTP 404 with mixed errors', 404, [{ code: 10007 }, { code: 10000, message: 'Authentication error' }], 'API_AUTH_OR_PERMISSION'],
+  ['HTTP 400 with mixed errors', 400, [{ code: 10007 }, { code: 10000, message: 'Authentication error' }], 'API_AUTH_OR_PERMISSION'],
+  ['HTTP 404 with permission error', 404, [{ code: 10007, message: 'Permission denied' }], 'API_AUTH_OR_PERMISSION'],
+  ['HTTP 400 with service error', 400, [{ code: 10007, message: 'Internal service error' }], 'API_REQUEST_FAILED'],
+  ['HTTP 404 with an unknown code', 404, [{ code: 10000 }], 'API_REQUEST_FAILED'],
 ];
 
-for (const [label, status, errors] of unsafeAbsenceCases) {
+for (const [label, status, errors, expectedCode] of unsafeAbsenceCases) {
   const failedResponse = () => response({ success: false, ...(errors === undefined ? {} : { errors }) }, status);
   test('typed versions absence refuses ' + label, async () => {
     const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity();
-    await assert.rejects(() => api.readWorkerVersions({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
+    await assertDiagnostic(() => api.readWorkerVersions({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
       fetchImpl: async () => failedResponse(),
-    }), /Cloudflare|failed|absence/i);
+    }), expectedCode);
   });
 
   test('placeholder cleanup is never authorized by ' + label, async () => {
@@ -516,10 +694,10 @@ for (const [label, status, errors] of unsafeAbsenceCases) {
 
 for (const method of ['confirmExactAbsence', 'listLegacyExactScript']) test(method + ' refuses an exact HTTP 404 carrying mixed not-found and permission errors', async () => {
   const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity();
-  await assert.rejects(() => api[method]({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName, includeExact: true,
+  await assertDiagnostic(() => api[method]({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName, includeExact: true,
     fetchImpl: async (url) => new URL(url).pathname.endsWith('/workers/scripts/' + identity.workerName)
       ? response({ success: false, errors: [{ code: 10007 }, { code: 10000 }] }, 404) : response(page([])),
-  }), /Cloudflare|failed|absence/i);
+  }), 'API_REQUEST_FAILED');
 });
 
 test('an absent versions endpoint permits cleanup only for a current exact placeholder with both legacy readers absent', async () => {
@@ -746,7 +924,7 @@ for (const target of ['objects', 'legacy', 'versions']) test('official ' + targe
     fetchImpl: async () => response({ success: true, result: target === 'versions' ? { items: [] } : [], result_info: { cursor: null } }),
   };
   const method = target === 'objects' ? api.findExactWorker : target === 'legacy' ? api.listLegacyExactScript : api.readWorkerVersions;
-  await assert.rejects(() => method(options), /pagination|page/i);
+  await assertDiagnostic(() => method(options), 'API_RESPONSE_INVALID');
 });
 
 test('secret upload is bracketed by complete exact object, legacy, and immutable version ownership reads', async () => {
