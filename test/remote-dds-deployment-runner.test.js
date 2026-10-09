@@ -215,7 +215,7 @@ test('Cloudflare preflight classifies null options as required configuration', a
 for (const [label, payload, expectedCode] of [
   ['auth envelope', { success: false, errors: [{ code: 10000, message: 'Authentication error sensitive-marker' }] }, 'API_AUTH_OR_PERMISSION'],
   ['non-auth envelope', { success: false, errors: [{ code: 10001, message: 'Request rejected sensitive-marker' }] }, 'API_REQUEST_FAILED'],
-  ['malformed failure envelope', { success: false, errors: [] }, 'API_RESPONSE_INVALID'],
+  ['malformed failure envelope', { success: false, errors: [] }, 'API_EXACT_SCRIPT_RESPONSE_INVALID'],
 ]) test('exact HTTP 200 JSON ' + label + ' is classified before collision', async () => {
   const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity(); let reads = 0, mutations = 0;
   await assertDiagnostic(() => api.confirmExactAbsence({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
@@ -236,7 +236,7 @@ test('exact HTTP 200 JSON response with invalid JSON is classified before collis
       if ((options.method ?? 'GET') !== 'GET') mutations++;
       return { ok: true, status: 200, headers: { get: () => 'application/problem+json' }, json: async () => { throw new SyntaxError('sensitive-marker'); } };
     },
-  }), 'API_RESPONSE_INVALID');
+  }), 'API_EXACT_SCRIPT_RESPONSE_INVALID');
   assert.equal(reads, 1); assert.equal(mutations, 0);
 });
 
@@ -252,7 +252,7 @@ for (const [label, payload] of [
       if ((options.method ?? 'GET') !== 'GET') mutations++;
       return jsonResponse(payload);
     },
-  }), 'API_RESPONSE_INVALID');
+  }), 'API_EXACT_SCRIPT_RESPONSE_INVALID');
   assert.equal(reads, 1); assert.equal(mutations, 0);
 });
 
@@ -297,7 +297,7 @@ test('Cloudflare preflight classifies non-auth invalid JSON as an invalid respon
       if ((options.method ?? 'GET') !== 'GET') mutations++;
       return { ok: false, status: 500, json: async () => { throw new SyntaxError('html sensitive-marker'); } };
     },
-  }), 'API_RESPONSE_INVALID');
+  }), 'API_EXACT_SCRIPT_RESPONSE_INVALID');
   assert.equal(mutations, 0);
 });
 
@@ -326,12 +326,12 @@ test('Cloudflare preflight classifies another valid unsuccessful envelope as a r
 for (const [label, payload, expectedCode] of [
   ['auth envelope', { success: false, errors: [{ code: 10000, message: 'Authentication error sensitive-marker' }] }, 'API_AUTH_OR_PERMISSION'],
   ['non-auth envelope', { success: false, errors: [{ code: 10001, message: 'Request rejected sensitive-marker' }] }, 'API_REQUEST_FAILED'],
-  ['missing errors', { success: false }, 'API_RESPONSE_INVALID'],
-  ['empty errors', { success: false, errors: [] }, 'API_RESPONSE_INVALID'],
-  ['malformed errors', { success: false, errors: [{ code: 10001, message: 17 }] }, 'API_RESPONSE_INVALID'],
-  ['non-object result metadata', { success: false, errors: [{ code: 10001 }], result_info: 'invalid' }, 'API_RESPONSE_INVALID'],
-  ['incomplete result metadata', { success: false, errors: [{ code: 10001 }], result_info: {} }, 'API_RESPONSE_INVALID'],
-  ['malformed result value', { success: false, errors: [{ code: 10001 }], result: 'invalid' }, 'API_RESPONSE_INVALID'],
+  ['missing errors', { success: false }, 'API_WORKERS_LIST_RESPONSE_INVALID'],
+  ['empty errors', { success: false, errors: [] }, 'API_WORKERS_LIST_RESPONSE_INVALID'],
+  ['malformed errors', { success: false, errors: [{ code: 10001, message: 17 }] }, 'API_WORKERS_LIST_RESPONSE_INVALID'],
+  ['non-object result metadata', { success: false, errors: [{ code: 10001 }], result_info: 'invalid' }, 'API_WORKERS_LIST_RESPONSE_INVALID'],
+  ['incomplete result metadata', { success: false, errors: [{ code: 10001 }], result_info: {} }, 'API_WORKERS_LIST_RESPONSE_INVALID'],
+  ['malformed result value', { success: false, errors: [{ code: 10001 }], result: 'invalid' }, 'API_WORKERS_LIST_RESPONSE_INVALID'],
 ]) test('HTTP 200 success:false classifies a valid or malformed ' + label, async () => {
   const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity(); let mutations = 0;
   await assertDiagnostic(() => api.confirmExactAbsence({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
@@ -357,8 +357,29 @@ for (const [label, payload] of [
       if (path.endsWith('/workers/scripts/' + identity.workerName)) return notFound();
       return response(payload);
     },
-  }), 'API_RESPONSE_INVALID');
+  }), 'API_WORKERS_LIST_RESPONSE_INVALID');
   assert.equal(mutations, 0);
+});
+
+for (const [stage, expectedCode] of [
+  ['exact script', 'API_EXACT_SCRIPT_RESPONSE_INVALID'],
+  ['Workers list', 'API_WORKERS_LIST_RESPONSE_INVALID'],
+  ['scripts search', 'API_SCRIPTS_SEARCH_RESPONSE_INVALID'],
+]) test('absence preflight safely identifies an invalid ' + stage + ' response', async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity();
+  await assertDiagnostic(() => api.confirmExactAbsence({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
+    fetchImpl: async (url) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith('/workers/scripts/' + identity.workerName)) {
+        return stage === 'exact script' ? jsonResponse({ success: true }) : notFound();
+      }
+      if (path.endsWith('/workers/workers')) {
+        return stage === 'Workers list' ? response({ success: true, result: [], result_info: {} }) : response(page([]));
+      }
+      if (path.endsWith('/workers/scripts-search')) return response({ success: true, result: [], result_info: {} });
+      throw new Error('unexpected request');
+    },
+  }), expectedCode);
 });
 
 test('only confirmExactAbsence classifies a successful exact endpoint as a collision', async () => {
@@ -746,7 +767,7 @@ for (const bad of ['duplicate non-target Worker', 'total_count 201 on two pages'
       const items = Array.from({ length: number === 1 ? 100 : 1 }, (_, i) => listingItem('objects', number === 2 && bad === 'duplicate non-target Worker' ? 0 : (number - 1) * 100 + i));
       return response(page(items, number, 2, 100, bad === 'total_count 201 on two pages' ? 201 : 101));
     },
-  }), 'API_RESPONSE_INVALID');
+  }), 'API_WORKERS_LIST_RESPONSE_INVALID');
 });
 
 test('shared API normalizes every immutable version with script ETag and canonical config fingerprint without credentials', async () => {
@@ -989,7 +1010,15 @@ test('deployment process wrapper renders an unbranded internal failure as UNKNOW
 
 test('deployment process wrapper preserves every branded Cloudflare diagnostic', async () => {
   const mod = await deployment(); const { diagnostic } = await import('../scripts/remote-dds-public-errors.mjs');
-  for (const code of ['API_AUTH_OR_PERMISSION', 'TEMPORARY_WORKER_COLLISION', 'API_RESPONSE_INVALID', 'API_REQUEST_FAILED']) {
+  for (const code of [
+    'API_AUTH_OR_PERMISSION',
+    'TEMPORARY_WORKER_COLLISION',
+    'API_RESPONSE_INVALID',
+    'API_EXACT_SCRIPT_RESPONSE_INVALID',
+    'API_WORKERS_LIST_RESPONSE_INVALID',
+    'API_SCRIPTS_SEARCH_RESPONSE_INVALID',
+    'API_REQUEST_FAILED',
+  ]) {
     let stderr = '', exitCode;
     await mod.runDeploymentProcess([], {}, { runDeploymentCli: async () => { throw diagnostic(code, new Error(SECRET_MARKERS.join(' '))); } }, {
       error: (value) => { stderr += value; }, setExitCode: (value) => { exitCode = value; },

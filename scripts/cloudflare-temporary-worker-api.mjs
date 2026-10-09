@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { canonicalJson } from './remote-dds-soak-state.mjs';
-import { diagnostic } from './remote-dds-public-errors.mjs';
+import { diagnostic, publicDiagnosticCode } from './remote-dds-public-errors.mjs';
 
 // Mutation authority comes from a complete exact-object read, never a caller's
 // name-only object or a serialized artifact masquerading as an API observation.
@@ -24,6 +24,10 @@ function inputs(options = {}) {
 }
 function invalidResponse(message, cause) { return diagnostic('API_RESPONSE_INVALID', new Error(message, { cause })); }
 function requestFailed(message, cause) { return diagnostic('API_REQUEST_FAILED', new Error(message, { cause })); }
+function rethrowInvalidResponseAs(error, code) {
+  if (publicDiagnosticCode(error) === 'API_RESPONSE_INVALID') throw diagnostic(code, error);
+  throw error;
+}
 function isRecord(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
 function validError(error) {
   return isRecord(error) && (typeof error.code === 'number' || typeof error.code === 'string')
@@ -226,10 +230,17 @@ export async function deleteExactWorker(options) {
 }
 export async function confirmExactAbsence(options) {
   const client = inputs(options);
-  if (await exactScriptExists(client)) throw diagnostic('TEMPORARY_WORKER_COLLISION', new Error('Temporary Worker collision: exact name already exists'));
-  const worker = await findExactWorker(options);
+  let exactExists;
+  try { exactExists = await exactScriptExists(client); }
+  catch (error) { rethrowInvalidResponseAs(error, 'API_EXACT_SCRIPT_RESPONSE_INVALID'); }
+  if (exactExists) throw diagnostic('TEMPORARY_WORKER_COLLISION', new Error('Temporary Worker collision: exact name already exists'));
+  let worker;
+  try { worker = await findExactWorker(options); }
+  catch (error) { rethrowInvalidResponseAs(error, 'API_WORKERS_LIST_RESPONSE_INVALID'); }
   if (worker) throw diagnostic('TEMPORARY_WORKER_COLLISION', new Error('Temporary Worker collision: exact name already exists'));
-  const legacy = await listLegacyExactScript(options);
+  let legacy;
+  try { legacy = await listLegacyExactScript(options); }
+  catch (error) { rethrowInvalidResponseAs(error, 'API_SCRIPTS_SEARCH_RESPONSE_INVALID'); }
   if (legacy) throw diagnostic('TEMPORARY_WORKER_COLLISION', new Error('Temporary Worker collision: exact name already exists'));
   return { absent: true };
 }
