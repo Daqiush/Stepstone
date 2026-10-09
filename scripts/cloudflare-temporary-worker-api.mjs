@@ -111,7 +111,7 @@ async function exactScriptExists(client) {
 }
 // These three official endpoints use pages. A cursor from a different API cannot
 // prove exhaustion when the requested page metadata is missing.
-async function listAll(client, path, { query = {}, items = (payload) => payload.result, allowNotFound = false } = {}) {
+async function listAll(client, path, { query = {}, items = (payload) => payload.result, allowNotFound = false, unfilteredTotalCount = false } = {}) {
   const results = []; let totalPages, perPage, totalCount;
   for (let page = 1; page <= 100000; page++) {
     const url = new URL(`${client.base}/${path}`);
@@ -130,13 +130,13 @@ async function listAll(client, path, { query = {}, items = (payload) => payload.
         || !Number.isSafeInteger(info.count) || info.count !== values.length || !Number.isSafeInteger(info.total_count) || info.total_count < 0
         || (info.total_pages === 0 && (page !== 1 || values.length !== 0)) || (info.total_pages > 0 && page > info.total_pages)) throw invalidResponse('Cloudflare pagination page is missing, malformed, or non-advancing');
     const expectedPages = Math.ceil(info.total_count / info.per_page);
-    if ((info.total_count === 0 ? info.total_pages > 1 : info.total_pages !== expectedPages)
-        || info.count !== Math.min(info.per_page, Math.max(0, info.total_count - (page - 1) * info.per_page))) throw invalidResponse('Cloudflare pagination counts and page capacity are inconsistent');
+    if (!unfilteredTotalCount && ((info.total_count === 0 ? info.total_pages > 1 : info.total_pages !== expectedPages)
+        || info.count !== Math.min(info.per_page, Math.max(0, info.total_count - (page - 1) * info.per_page)))) throw invalidResponse('Cloudflare pagination counts and page capacity are inconsistent');
     if (totalPages !== undefined && (totalPages !== info.total_pages || perPage !== info.per_page || totalCount !== info.total_count)) throw invalidResponse('Cloudflare pagination pages are inconsistent');
     totalPages = info.total_pages; perPage = info.per_page; totalCount = info.total_count;
     results.push(...values);
     if (page >= totalPages) {
-      if (results.length !== totalCount) throw invalidResponse('Cloudflare pagination cumulative count is inconsistent');
+      if (!unfilteredTotalCount && results.length !== totalCount) throw invalidResponse('Cloudflare pagination cumulative count is inconsistent');
       return results;
     }
   }
@@ -162,7 +162,7 @@ export async function findExactWorker(options) {
 export async function listLegacyExactScript(options) {
   const client = inputs(options); let exactExists = false;
   if (options.includeExact === true) exactExists = await exactScriptExists(client);
-  const scripts = await listAll(client, 'scripts-search', { query: { name: client.name } });
+  const scripts = await listAll(client, 'scripts-search', { query: { name: client.name }, unfilteredTotalCount: true });
   const seen = new Set();
   for (const script of scripts) {
     if (typeof script?.script_name !== 'string' || !script.script_name || script.script_name.trim() !== script.script_name) throw invalidResponse('Cloudflare API returned an invalid legacy script identity');

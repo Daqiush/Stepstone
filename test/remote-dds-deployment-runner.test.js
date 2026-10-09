@@ -399,6 +399,21 @@ test('code-10007-only responses still prove exact absence without mutation', asy
   assert.deepEqual(result, { absent: true }); assert.equal(mutations, 0);
 });
 
+test('scripts-search accepts an unfiltered account total while proving exact name absence', async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity(); let mutations = 0;
+  const result = await api.confirmExactAbsence({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
+    fetchImpl: async (url, options = {}) => {
+      if ((options.method ?? 'GET') !== 'GET') mutations++;
+      const path = new URL(url).pathname;
+      if (path.endsWith('/workers/scripts/' + identity.workerName)) return notFound();
+      if (path.endsWith('/workers/workers')) return response(page([]));
+      if (path.endsWith('/workers/scripts-search')) return response(page([], 1, 1, 100, 7));
+      throw new Error('unexpected request');
+    },
+  });
+  assert.deepEqual(result, { absent: true }); assert.equal(mutations, 0);
+});
+
 for (const status of [400, 404]) {
   for (const [label, metadata] of [['result', { result: 'malformed' }], ['result_info', { result_info: 'malformed' }]]) {
     test(`HTTP ${status} code-10007-only absence ignores unrelated malformed ${label}`, async () => {
@@ -609,6 +624,9 @@ test('presence readers preserve normalized records for ownership and cleanup con
   assert.equal(snapshot.versionEvidence.versions[0].id, 'deployed-v1');
 });
 
+const strictPaginationFailures = ['missing count', 'missing total count', 'count mismatch', 'total count exceeds capacity', 'total pages mismatch', 'total count drift', 'short nonfinal page', 'short final page'];
+const permittedSearchTotalShapes = new Set(['total count exceeds capacity', 'total pages mismatch', 'short nonfinal page', 'short final page']);
+
 for (const target of ['objects', 'legacy', 'versions']) {
   for (const bad of ['missing metadata', 'malformed cursor', 'repeated cursor', 'cyclic cursor', 'inconsistent pages', 'non-advancing page', 'duplicate exact']) {
     test(target + ' pagination fails closed on ' + bad, async () => {
@@ -657,8 +675,9 @@ for (const target of ['objects', 'legacy', 'versions']) {
     await assertDiagnostic(() => listingMethod(api, target)(options), 'API_RESPONSE_INVALID');
   });
 
-  for (const bad of ['missing count', 'missing total count', 'count mismatch', 'total count exceeds capacity', 'total pages mismatch', 'total count drift', 'short nonfinal page', 'short final page']) {
-    test(target + ' pagination refuses ' + bad, async () => {
+  for (const bad of strictPaginationFailures) {
+    const searchShapeIsDocumented = target === 'legacy' && permittedSearchTotalShapes.has(bad);
+    test(target + ' pagination ' + (searchShapeIsDocumented ? 'accepts documented ' : 'refuses ') + bad, async () => {
       const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity();
       const options = { accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName, fetchImpl: async (url) => {
         const parsed = new URL(url);
@@ -677,7 +696,8 @@ for (const target of ['objects', 'legacy', 'versions']) {
         if (bad === 'total count drift' && number === 2) payload.result_info.total_count = 102;
         return response(payload);
       } };
-      await assertDiagnostic(() => listingMethod(api, target)(options), 'API_RESPONSE_INVALID');
+      if (searchShapeIsDocumented) assert.equal(await listingMethod(api, target)(options), null);
+      else await assertDiagnostic(() => listingMethod(api, target)(options), 'API_RESPONSE_INVALID');
     });
   }
 
@@ -697,6 +717,17 @@ for (const target of ['objects', 'legacy', 'versions']) {
     else assert.equal(result, null);
   });
 }
+
+test('legacy search traverses every reported page when unfiltered totals and sparse filtered pages diverge', async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity(); let pages = 0;
+  const result = await api.listLegacyExactScript({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
+    fetchImpl: async (url) => {
+      pages++; const number = Number(new URL(url).searchParams.get('page'));
+      return response(page(number === 1 ? [{ script_name: 'other' }] : [], number, 2, 100, 201));
+    },
+  });
+  assert.equal(pages, 2); assert.equal(result, null);
+});
 
 test('current Worker list refuses one immutable ID associated with conflicting names', async () => {
   const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity();
