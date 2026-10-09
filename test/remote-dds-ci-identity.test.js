@@ -207,24 +207,28 @@ test('derive CLI classifies an absent source token without exposing arguments or
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('derive CLI classifies GitHub environment output failure without printing the derived key', () => {
+test('derive CLI writes the secret-free identity before classifying GitHub environment output failure', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'dds-ci-identity-env-io-'));
   try {
     const argumentMarker = 'env-io-argument-marker-must-not-leak';
     const secretMarker = 'env-io-secret-marker-must-not-leak';
     const outputMarker = 'env-io-output-marker-must-not-leak';
+    const identityOutputMarker = 'env-io-identity-output-marker-must-not-leak';
     const failureMarker = 'append-failure-marker-must-not-leak';
     const githubEnv = join(dir, outputMarker); writeFileSync(githubEnv, 'EXISTING=value\n');
+    const identityOut = join(dir, identityOutputMarker);
     const preload = `data:text/javascript,${encodeURIComponent(`
       import fs from 'node:fs';
       import { syncBuiltinESMExports } from 'node:module';
       fs.appendFileSync = () => { throw new Error('${failureMarker}'); };
       syncBuiltinESMExports();
     `)}`;
-    const args = [cli, '--derive', ...contextArgs.slice(0, 3), argumentMarker, ...contextArgs.slice(4), '--github-env', githubEnv];
+    const args = [cli, '--derive', ...contextArgs.slice(0, 3), argumentMarker, ...contextArgs.slice(4), '--github-env', githubEnv, '--identity-out', identityOut];
     const result = spawnSync(process.execPath, ['--import', preload, ...args], { env: { ...process.env, CLOUDFLARE_API_TOKEN: secretMarker }, encoding: 'utf8' });
-    assertCliFailure(result, 'LOCAL_IO_FAILED', [argumentMarker, secretMarker, outputMarker, failureMarker, 'EpcIq_vg1echjFz_T43uSTY6xxYXivOmobzaTD8CVVk']);
+    assertCliFailure(result, 'LOCAL_IO_FAILED', [argumentMarker, secretMarker, outputMarker, identityOutputMarker, failureMarker, 'EpcIq_vg1echjFz_T43uSTY6xxYXivOmobzaTD8CVVk']);
     assert.equal(readFileSync(githubEnv, 'utf8'), 'EXISTING=value\n');
+    assert.deepEqual(JSON.parse(readFileSync(identityOut, 'utf8')), (await mod()).deriveCiIdentity({ ...INPUT, workflow: argumentMarker, secret: secretMarker }));
+    assert.equal(readFileSync(identityOut, 'utf8').includes(secretMarker), false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -235,11 +239,13 @@ test('derive CLI classifies identity report output failure without printing the 
     const secretMarker = 'report-io-secret-marker-must-not-leak';
     const outputMarker = 'report-io-output-marker-must-not-leak';
     const githubEnv = join(dir, 'github.env');
+    const originalEnvironment = 'EXISTING=must-remain-byte-for-byte\n'; writeFileSync(githubEnv, originalEnvironment);
     const blockedParent = join(dir, outputMarker); writeFileSync(blockedParent, 'not-a-directory');
     const identityOut = join(blockedParent, 'identity.json');
     const args = [cli, '--derive', ...contextArgs.slice(0, 3), argumentMarker, ...contextArgs.slice(4), '--github-env', githubEnv, '--identity-out', identityOut];
     const result = spawnSync(process.execPath, args, { env: { ...process.env, CLOUDFLARE_API_TOKEN: secretMarker }, encoding: 'utf8' });
     assertCliFailure(result, 'LOCAL_IO_FAILED', [argumentMarker, secretMarker, outputMarker, 'EpcIq_vg1echjFz_T43uSTY6xxYXivOmobzaTD8CVVk']);
+    assert.equal(readFileSync(githubEnv, 'utf8'), originalEnvironment);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

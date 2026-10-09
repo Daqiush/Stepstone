@@ -211,15 +211,15 @@ function runCli() {
   if (sameOutputTarget) {
     throw diagnostic('CLI_INPUT_INVALID', new Error('Identity output and GitHub environment must be separate files'));
   }
+  if (out) {
+    try { writeReportCheckpoint(out, identity); }
+    catch (error) { throw diagnostic('LOCAL_IO_FAILED', error); }
+  }
   try {
     const existing = existsSync(envFile) ? readFileSync(envFile) : Buffer.alloc(0);
     const separator = existing.length && existing.at(-1) !== 10 ? '\n' : '';
     appendFileSync(envFile, `${separator}DDS_REMOTE_TEST_KEY=${key}\n`, 'utf8');
   } catch (error) { throw diagnostic('LOCAL_IO_FAILED', error); }
-  if (out) {
-    try { writeReportCheckpoint(out, identity); }
-    catch (error) { throw diagnostic('LOCAL_IO_FAILED', error); }
-  }
   process.stdout.write(`::add-mask::${key}\n`);
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
