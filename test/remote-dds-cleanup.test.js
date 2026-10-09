@@ -135,9 +135,10 @@ for (const kind of ['current duplicate name', 'current duplicate ID', 'unrelated
       if (kind === 'current duplicate name') return response(page([exact, { ...exact, id: 'b'.repeat(32) }]));
       if (kind === 'current duplicate ID') return response(page([exact, { ...exact, name: 'other' }]));
       if (kind === 'unrelated duplicate ID') return response(page([exact, { id: 'b'.repeat(32), name: 'other' }, { id: 'b'.repeat(32), name: 'other' }]));
-      if (kind === 'malformed page') return response({ success: true, result: [] });
+      if (kind === 'malformed page') return response({ success: true, result: {} });
       if (kind === 'incomplete page') return response(page([exact], 1, 2, 100, 101));
-      if (kind === 'later malformed page') return parsed.searchParams.get('page') === '1' ? response(page([exact], 1, 2, 1, 2)) : response({ success: true, result: [] });
+      if (kind === 'later malformed page') return parsed.searchParams.get('page') === '1'
+        ? response(page([exact], 1, 2, 1, 2)) : response({ success: true, result: [], result_info: { page: 1, per_page: 1 } });
     }
     if (parsed.pathname.endsWith('/scripts-search')) {
       if (kind === 'legacy duplicate') return response(page([{ script_name: f.identity.workerName }, { script_name: f.identity.workerName }]));
@@ -160,7 +161,11 @@ test('later-page exact current and legacy matches are found through every page',
 
 test('an absent name cannot be proven by broken pagination', async () => {
   const m = await mod(), f = await fixture(); f.state.present = false; f.state.legacy = false;
-  f.intercept(async ({ parsed }) => parsed.pathname.endsWith('/workers/workers') ? response({ success: true, result: [], result_info: { cursor: 'finished' } }) : undefined);
+  f.intercept(async ({ parsed }) => parsed.pathname.endsWith('/workers/workers') ? response({
+    success: true,
+    result: [{ id: 'c'.repeat(32), name: 'other' }],
+    result_info: { page: Number(parsed.searchParams.get('page')), per_page: 100 },
+  }) : undefined);
   await assert.rejects(() => m.cleanupRemoteDdsDeployment(f.options)); assert.equal(f.mutations().length, 0);
 });
 

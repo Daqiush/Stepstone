@@ -113,10 +113,10 @@ async function exactScriptExists(client) {
   }
   return successfulPayload(response, await responseJson(response), { allowNotFound: true }) === null ? false : true;
 }
-// These three official endpoints use pages. A cursor from a different API cannot
-// prove exhaustion when the requested page metadata is missing.
-async function listAll(client, path, { query = {}, items = (payload) => payload.result, allowNotFound = false, unfilteredTotalCount = false } = {}) {
-  const results = []; let totalPages, perPage, totalCount;
+// These official endpoints use numbered pages. Counted endpoints require their
+// full totals; the Workers V4 array endpoint instead permits empty-page termination.
+async function listAll(client, path, { query = {}, items = (payload) => payload.result, allowNotFound = false, unfilteredTotalCount = false, emptyPageTermination = false } = {}) {
+  const results = []; const seenPagePayloads = new Set(); let totalPages, perPage, totalCount;
   for (let page = 1; page <= 100000; page++) {
     const url = new URL(`${client.base}/${path}`);
     for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value);
@@ -128,6 +128,28 @@ async function listAll(client, path, { query = {}, items = (payload) => payload.
       return null;
     }
     const values = items(payload); const info = payload.result_info;
+    const completeCountMetadata = isRecord(info)
+      && ['page', 'per_page', 'total_pages', 'count', 'total_count'].every((key) => Object.hasOwn(info, key));
+    // The Workers V4 array endpoint officially permits page/per_page-only (or
+    // absent) metadata. In that form, exhaust it exactly as the official SDK
+    // does: advance until an empty page, while rejecting repeated page bodies.
+    if (emptyPageTermination && !completeCountMetadata) {
+      if (!Array.isArray(values) || values.length > 100) throw invalidResponse('Cloudflare V4 page is missing or malformed');
+      if (info !== undefined && (!isRecord(info)
+          || (info.page !== undefined && (!Number.isSafeInteger(info.page) || info.page !== page))
+          || (info.per_page !== undefined && (!Number.isSafeInteger(info.per_page) || info.per_page < 1 || info.per_page > 100 || values.length > info.per_page))
+          || (info.count !== undefined && (!Number.isSafeInteger(info.count) || info.count !== values.length))
+          || (info.total_count !== undefined && (!Number.isSafeInteger(info.total_count) || info.total_count < 0))
+          || (info.total_pages !== undefined && (!Number.isSafeInteger(info.total_pages) || info.total_pages < 0 || info.total_pages > 100000
+            || (info.total_pages > 0 && page > info.total_pages))))) {
+        throw invalidResponse('Cloudflare V4 pagination metadata is malformed or non-advancing');
+      }
+      if (values.length === 0) return results;
+      const pagePayload = canonicalJson(values);
+      if (seenPagePayloads.has(pagePayload)) throw invalidResponse('Cloudflare V4 pagination repeated a nonempty page');
+      seenPagePayloads.add(pagePayload); results.push(...values);
+      continue;
+    }
     if (!Array.isArray(values) || !info || typeof info !== 'object' || Array.isArray(info)) throw invalidResponse('Cloudflare pagination metadata is missing or malformed');
     if (!Number.isSafeInteger(info.page) || info.page !== page || !Number.isSafeInteger(info.per_page) || info.per_page < 1 || info.per_page > 100
         || !Number.isSafeInteger(info.total_pages) || info.total_pages < 0 || info.total_pages > 100000 || values.length > info.per_page
@@ -147,7 +169,7 @@ async function listAll(client, path, { query = {}, items = (payload) => payload.
   throw invalidResponse('Cloudflare pagination did not terminate');
 }
 export async function findExactWorker(options) {
-  const client = inputs(options); const workers = await listAll(client, 'workers');
+  const client = inputs(options); const workers = await listAll(client, 'workers', { emptyPageTermination: true });
   const seen = new Map();
   for (const worker of workers) {
     if (typeof worker?.id !== 'string' || !/^[a-f0-9]{32}$/i.test(worker.id) || typeof worker.name !== 'string' || !worker.name || worker.name.trim() !== worker.name) throw invalidResponse('Cloudflare API returned an invalid immutable Worker identity');

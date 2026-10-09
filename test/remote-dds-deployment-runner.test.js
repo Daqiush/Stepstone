@@ -347,7 +347,7 @@ for (const [label, payload, expectedCode] of [
 
 for (const [label, payload] of [
   ['malformed result', { success: true, result: {}, result_info: { page: 1, per_page: 100, total_pages: 0, count: 0, total_count: 0 } }],
-  ['malformed pagination', { success: true, result: [], result_info: { page: 1, per_page: 100, total_pages: 1, count: 0 } }],
+  ['malformed pagination', { success: true, result: [], result_info: { page: 2, per_page: 100 } }],
 ]) test('Cloudflare preflight classifies successful ' + label + ' as an invalid response', async () => {
   const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity(); let mutations = 0;
   await assertDiagnostic(() => api.confirmExactAbsence({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
@@ -374,7 +374,7 @@ for (const [stage, expectedCode] of [
         return stage === 'exact script' ? jsonResponse({ success: true }) : notFound();
       }
       if (path.endsWith('/workers/workers')) {
-        return stage === 'Workers list' ? response({ success: true, result: [], result_info: {} }) : response(page([]));
+        return stage === 'Workers list' ? response({ success: true, result: [], result_info: { page: 2, per_page: 100 } }) : response(page([]));
       }
       if (path.endsWith('/workers/scripts-search')) return response({ success: true, result: [], result_info: {} });
       throw new Error('unexpected request');
@@ -649,7 +649,10 @@ const strictPaginationFailures = ['missing count', 'missing total count', 'count
 const permittedSearchTotalShapes = new Set(['total count exceeds capacity', 'total pages mismatch', 'short nonfinal page', 'short final page']);
 
 for (const target of ['objects', 'legacy', 'versions']) {
-  for (const bad of ['missing metadata', 'malformed cursor', 'repeated cursor', 'cyclic cursor', 'inconsistent pages', 'non-advancing page', 'duplicate exact']) {
+  const failures = target === 'objects'
+    ? ['inconsistent pages', 'non-advancing page', 'duplicate exact']
+    : ['missing metadata', 'malformed cursor', 'repeated cursor', 'cyclic cursor', 'inconsistent pages', 'non-advancing page', 'duplicate exact'];
+  for (const bad of failures) {
     test(target + ' pagination fails closed on ' + bad, async () => {
       const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity(); let reads = 0;
       const item = target === 'objects' ? { id: WORKER_ID, name: identity.workerName } : target === 'legacy' ? { script_name: identity.workerName } : { id: 'deployed-v1' };
@@ -755,6 +758,36 @@ test('current Worker list refuses one immutable ID associated with conflicting n
   await assertDiagnostic(() => api.findExactWorker({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
     fetchImpl: async () => response(page([{ id: WORKER_ID, name: 'other' }, { id: WORKER_ID, name: 'changed' }])),
   }), 'API_RESPONSE_INVALID');
+});
+
+for (const [label, resultInfo] of [
+  ['only page and per_page', (number) => ({ page: number, per_page: 100 })],
+  ['no result_info', () => undefined],
+]) test('current Worker list accepts official V4 pagination with ' + label, async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity(); let pages = 0;
+  const result = await api.findExactWorker({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
+    fetchImpl: async (url) => {
+      pages++; const number = Number(new URL(url).searchParams.get('page'));
+      const payload = { success: true, result: number === 1 ? [{ id: WORKER_ID, name: 'other' }] : [] };
+      const info = resultInfo(number);
+      if (info !== undefined) payload.result_info = info;
+      return response(payload);
+    },
+  });
+  assert.equal(result, null); assert.equal(pages, 2);
+});
+
+test('current Worker V4 pagination rejects a repeated nonempty page without totals', async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity(); let pages = 0;
+  await assertDiagnostic(() => api.findExactWorker({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
+    fetchImpl: async (url) => {
+      pages++;
+      if (pages > 2) throw new Error('pagination continued after a repeated page');
+      const number = Number(new URL(url).searchParams.get('page'));
+      return response({ success: true, result: [{ id: WORKER_ID, name: 'other' }], result_info: { page: number, per_page: 100 } });
+    },
+  }), 'API_RESPONSE_INVALID');
+  assert.equal(pages, 2);
 });
 
 for (const bad of ['duplicate non-target Worker', 'total_count 201 on two pages']) test('absence confirmation refuses ' + bad, async () => {
@@ -1177,13 +1210,15 @@ for (const tag of [null, 'b'.repeat(43)]) test('successful Wrangler deploy with 
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 
-for (const target of ['objects', 'legacy', 'versions']) test('official ' + target + ' page reader rejects a cursor-only terminal envelope', async () => {
+for (const target of ['objects', 'legacy', 'versions']) test('official ' + target + ' page reader '
+  + (target === 'objects' ? 'accepts an empty cursor-only envelope' : 'rejects a cursor-only terminal envelope'), async () => {
   const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity();
   const options = { accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
     fetchImpl: async () => response({ success: true, result: target === 'versions' ? { items: [] } : [], result_info: { cursor: null } }),
   };
   const method = target === 'objects' ? api.findExactWorker : target === 'legacy' ? api.listLegacyExactScript : api.readWorkerVersions;
-  await assertDiagnostic(() => method(options), 'API_RESPONSE_INVALID');
+  if (target === 'objects') assert.equal(await method(options), null);
+  else await assertDiagnostic(() => method(options), 'API_RESPONSE_INVALID');
 });
 
 test('secret upload is bracketed by complete exact object, legacy, and immutable version ownership reads', async () => {
