@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const { mkdtempSync, rmSync, mkdirSync, writeFileSync } = require('node:fs');
+const { spawnSync } = require('node:child_process');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const test = require('node:test');
@@ -29,6 +30,27 @@ const CONTEXT = { repository: 'bridge/stepstone', workflow: 'Remote DDS Soak', r
 const TOKEN = 'fake-source-token';
 const KEY = 'a'.repeat(43);
 const WORKER_ID = 'b'.repeat(32);
+const DEPLOYMENT_CLI = join(__dirname, '../scripts/prepare-remote-dds-deployment.mjs');
+const CONTEXT_ARGS = ['--repository', CONTEXT.repository, '--workflow', CONTEXT.workflow, '--run-id', CONTEXT.runId,
+  '--run-attempt', CONTEXT.runAttempt, '--commit-sha', CONTEXT.commitSha];
+const SECRET_MARKERS = ['account-marker-must-not-leak', 'token-marker-must-not-leak', 'worker-name-marker-must-not-leak',
+  'https://url-marker-must-not-leak.example', 'body-marker-must-not-leak', 'stack-marker-must-not-leak'];
+function deploymentEnvironment(overrides = {}) {
+  const env = { ...process.env, CLOUDFLARE_ACCOUNT_ID: SECRET_MARKERS[0], CLOUDFLARE_API_TOKEN: SECRET_MARKERS[1], DDS_REMOTE_TEST_KEY: KEY };
+  for (const [key, value] of Object.entries(overrides)) {
+    if (value === undefined) delete env[key];
+    else env[key] = value;
+  }
+  return env;
+}
+function assertDeploymentCliFailure(result, code, markers = SECRET_MARKERS) {
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '');
+  assert.equal(result.stderr, `Remote DDS deployment failed [${code}].\n`);
+  for (const marker of markers) assert.equal(`${result.stdout}${result.stderr}`.includes(marker), false, marker);
+}
+function deploymentArgs(mode, input, out) { return [mode, mode === '--preflight' ? '--identity' : input, mode === '--preflight' ? input : undefined,
+  ...CONTEXT_ARGS, '--out', out].filter((value) => value !== undefined); }
 const page = (items, number = 1, total = 1, perPage = 100, totalCount = (total - 1) * perPage + items.length) => ({ success: true, result: items,
   result_info: { page: number, per_page: perPage, total_pages: total, count: items.length, total_count: totalCount } });
 const versionPage = (items, ...args) => ({ ...page(items, ...args), result: { items } });
@@ -783,27 +805,112 @@ test('shared mutation API disables only the exact workers.dev subdomain and dele
   assert.equal(calls.length, 2);
 });
 
-test('deployment CLI rejects unknown, duplicate, mixed modes, and missing trusted context before accessing secrets or network', async () => {
-  const { spawnSync } = require('node:child_process');
-  const script = join(__dirname, '../scripts/prepare-remote-dds-deployment.mjs');
+test('deployment CLI classifies invalid arguments and GitHub context without leaking boundary markers', async () => {
   for (const args of [
     ['--deploy-and-verify', '--out', 'unused.json'],
     ['--preflight', '--identity', 'x', '--out', 'unused.json'],
     ['--preflight', '--preflight', '--out', 'unused.json'],
     ['--preflight', '--deploy-from-identity', 'x', '--out', 'unused.json'],
     ['--unknown', '--out', 'unused.json'],
+    ['--preflight', '--identity', SECRET_MARKERS[2], '--repository', SECRET_MARKERS[3], ...CONTEXT_ARGS.slice(2), '--out', SECRET_MARKERS[4]],
   ]) {
-    const result = spawnSync(process.execPath, [script, ...args], { encoding: 'utf8', env: { ...process.env, CLOUDFLARE_API_TOKEN: TOKEN, DDS_REMOTE_TEST_KEY: KEY } });
-    assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /argument|mode|required|Unknown|Duplicate/i);
-    assert.equal(result.stderr.includes(TOKEN), false); assert.equal(result.stderr.includes(KEY), false);
+    const result = spawnSync(process.execPath, [DEPLOYMENT_CLI, ...args], { encoding: 'utf8', env: deploymentEnvironment() });
+    assertDeploymentCliFailure(result, 'CLI_INPUT_INVALID');
   }
 });
 
-test('preflight and deploy CLI forms atomically persist secret-free records with trusted context', async () => {
-  const f = await deploymentFixture();
+test('deployment CLI classifies missing, unreadable, and invalid-JSON input without leaking paths or content', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'remote-dds-deployment-input-'));
   try {
-    const input = join(f.root, 'identity.json'), pre = join(f.root, 'pre-deployment.json'), out = join(f.root, 'deployment.json');
+    const missing = join(dir, 'missing-' + SECRET_MARKERS[2]);
+    const unreadable = join(dir, 'unreadable-' + SECRET_MARKERS[2]); mkdirSync(unreadable);
+    const invalid = join(dir, 'invalid.json'); writeFileSync(invalid, `{${SECRET_MARKERS[4]} ${SECRET_MARKERS[5]}`);
+    for (const input of [missing, unreadable, invalid]) {
+      const result = spawnSync(process.execPath, [DEPLOYMENT_CLI, ...deploymentArgs('--preflight', input, join(dir, 'out.json'))],
+        { encoding: 'utf8', env: deploymentEnvironment() });
+      assertDeploymentCliFailure(result, 'CLI_INPUT_INVALID');
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('deployment CLI classifies missing account, token, and deploy-time key as required configuration', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'remote-dds-deployment-config-'));
+  try {
+    const identity = (await import('../scripts/remote-dds-ci-identity.mjs')).deriveCiIdentity({ ...CONTEXT, secret: SECRET_MARKERS[1] });
+    const identityPath = join(dir, 'identity.json'); writeFileSync(identityPath, JSON.stringify(identity));
+    for (const missing of ['CLOUDFLARE_ACCOUNT_ID', 'CLOUDFLARE_API_TOKEN']) {
+      const result = spawnSync(process.execPath, [DEPLOYMENT_CLI, ...deploymentArgs('--preflight', identityPath, join(dir, `${missing}.json`))],
+        { encoding: 'utf8', env: deploymentEnvironment({ [missing]: undefined }) });
+      assertDeploymentCliFailure(result, 'REQUIRED_CONFIG_MISSING', [...SECRET_MARKERS, identity.workerName]);
+    }
+    const predeployment = (await import('../scripts/remote-dds-ci-identity.mjs')).createPreDeploymentIdentity({
+      identity, noCollisionVerifiedAt: '2026-10-01T00:00:00.000Z',
+    });
+    const predeploymentPath = join(dir, 'predeployment.json'); writeFileSync(predeploymentPath, JSON.stringify(predeployment));
+    const result = spawnSync(process.execPath, [DEPLOYMENT_CLI, ...deploymentArgs('--deploy-from-identity', predeploymentPath, join(dir, 'deployment.json'))],
+      { encoding: 'utf8', env: deploymentEnvironment({ DDS_REMOTE_TEST_KEY: undefined }) });
+    assertDeploymentCliFailure(result, 'REQUIRED_CONFIG_MISSING', [...SECRET_MARKERS, identity.workerName]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('deployment CLI classifies malformed and trusted-mismatched parsed identities without leaking identity material', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'remote-dds-deployment-identity-'));
+  try {
+    const identityModule = await import('../scripts/remote-dds-ci-identity.mjs');
+    const malformedPath = join(dir, 'malformed.json');
+    writeFileSync(malformedPath, JSON.stringify({ workerName: SECRET_MARKERS[2], endpoint: SECRET_MARKERS[3], body: SECRET_MARKERS[4], stack: SECRET_MARKERS[5] }));
+    const mismatched = identityModule.deriveCiIdentity({ ...CONTEXT, secret: 'different-token-marker-must-not-leak' });
+    const mismatchPath = join(dir, 'mismatch.json'); writeFileSync(mismatchPath, JSON.stringify(mismatched));
+    for (const input of [malformedPath, mismatchPath]) {
+      const result = spawnSync(process.execPath, [DEPLOYMENT_CLI, ...deploymentArgs('--preflight', input, join(dir, 'out.json'))],
+        { encoding: 'utf8', env: deploymentEnvironment() });
+      assertDeploymentCliFailure(result, 'IDENTITY_INVALID', [...SECRET_MARKERS, mismatched.workerName, 'different-token-marker-must-not-leak']);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('deployment process wrapper renders an unbranded internal failure as UNKNOWN', async () => {
+  const mod = await deployment(); let stderr = '', exitCode;
+  const internal = new Error(SECRET_MARKERS.join(' ')); internal.stack += `\n${SECRET_MARKERS[5]}`;
+  const result = await mod.runDeploymentProcess([], {}, { runDeploymentCli: async () => { throw internal; } }, {
+    error: (value) => { stderr += value; }, setExitCode: (value) => { exitCode = value; },
+  });
+  assert.equal(result, undefined); assert.equal(exitCode, 1);
+  assert.equal(stderr, 'Remote DDS deployment failed [UNKNOWN].\n');
+  for (const marker of SECRET_MARKERS) assert.equal(stderr.includes(marker), false);
+});
+
+test('deployment process wrapper preserves every branded Cloudflare diagnostic', async () => {
+  const mod = await deployment(); const { diagnostic } = await import('../scripts/remote-dds-public-errors.mjs');
+  for (const code of ['API_AUTH_OR_PERMISSION', 'TEMPORARY_WORKER_COLLISION', 'API_RESPONSE_INVALID', 'API_REQUEST_FAILED']) {
+    let stderr = '', exitCode;
+    await mod.runDeploymentProcess([], {}, { runDeploymentCli: async () => { throw diagnostic(code, new Error(SECRET_MARKERS.join(' '))); } }, {
+      error: (value) => { stderr += value; }, setExitCode: (value) => { exitCode = value; },
+    });
+    assert.equal(exitCode, 1); assert.equal(stderr, `Remote DDS deployment failed [${code}].\n`);
+    for (const marker of SECRET_MARKERS) assert.equal(stderr.includes(marker), false);
+  }
+});
+
+test('deployment process wrapper classifies an injected report checkpoint write failure as LOCAL_IO_FAILED', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'remote-dds-deployment-report-'));
+  try {
+    const identity = (await import('../scripts/remote-dds-ci-identity.mjs')).deriveCiIdentity({ ...CONTEXT, secret: SECRET_MARKERS[1] });
+    const input = join(dir, 'identity.json'); writeFileSync(input, JSON.stringify(identity));
+    let stderr = '', exitCode;
+    await (await deployment()).runDeploymentProcess(deploymentArgs('--preflight', input, join(dir, 'out.json')), deploymentEnvironment(), {
+      fetchImpl: async (url) => new URL(url).pathname.includes('/workers/scripts/') ? notFound() : response(page([])),
+      writeReportCheckpoint: () => { throw new Error(SECRET_MARKERS.join(' ')); },
+    }, { error: (value) => { stderr += value; }, setExitCode: (value) => { exitCode = value; } });
+    assert.equal(exitCode, 1); assert.equal(stderr, 'Remote DDS deployment failed [LOCAL_IO_FAILED].\n');
+    for (const marker of [...SECRET_MARKERS, identity.workerName]) assert.equal(stderr.includes(marker), false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('preflight and deploy CLI forms atomically persist secret-free records with trusted context', async () => {
+  const f = await deploymentFixture(); const outputRoot = mkdtempSync(join(process.cwd(), '.remote-dds-deployment-output-'));
+  try {
+    const input = join(f.root, 'identity.json'), pre = join(outputRoot, 'pre-deployment.json'), out = join(outputRoot, 'deployment.json');
     writeFileSync(input, JSON.stringify(f.identity));
     const context = ['--repository', CONTEXT.repository, '--workflow', CONTEXT.workflow, '--run-id', CONTEXT.runId, '--run-attempt', CONTEXT.runAttempt, '--commit-sha', CONTEXT.commitSha];
     const env = { CLOUDFLARE_ACCOUNT_ID: 'acct', CLOUDFLARE_API_TOKEN: TOKEN, DDS_REMOTE_TEST_KEY: KEY };
@@ -816,8 +923,8 @@ test('preflight and deploy CLI forms atomically persist secret-free records with
     f.mod.assertDeploymentManifest(manifest, { root: f.root });
     assert.equal(require('node:fs').readFileSync(out, 'utf8').includes(KEY), false);
     assert.equal(require('node:fs').readFileSync(out, 'utf8').includes(TOKEN), false);
-    assert.equal(require('node:fs').readdirSync(f.root).some((name) => name.endsWith('.tmp')), false);
-  } finally { rmSync(f.root, { recursive: true, force: true }); }
+    assert.equal(require('node:fs').readdirSync(outputRoot).some((name) => name.endsWith('.tmp')), false);
+  } finally { rmSync(outputRoot, { recursive: true, force: true }); rmSync(f.root, { recursive: true, force: true }); }
 });
 
 test('partial cleanup refuses a replacement immutable object after a code-10007 retry', async () => {

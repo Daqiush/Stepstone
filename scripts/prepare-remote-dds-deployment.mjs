@@ -9,6 +9,7 @@ import { writeReportCheckpoint } from './worker-dds-checkpoint.mjs';
 import { deriveCiIdentity, assertGithubContext, assertCiIdentity, createPreDeploymentIdentity, assertPreDeploymentIdentity, createDeploymentRecord, assertDeploymentRecord } from './remote-dds-ci-identity.mjs';
 import { readWorkerVersions, confirmExactAbsence, OwnershipRefusal, observeImmutableVersions, readOwnershipSnapshot, sameOwnershipSnapshot } from './cloudflare-temporary-worker-api.mjs';
 import { cleanupRemoteDdsDeployment } from './cleanup-remote-dds-deployment.mjs';
+import { diagnostic, renderRemoteDdsFailure } from './remote-dds-public-errors.mjs';
 
 export const DEPLOYMENT_MANIFEST_VERSION = 2;
 export const WASM_PATH = 'workers/vendor/bridge-dds/dds-worker.wasm';
@@ -207,16 +208,49 @@ export function parseDeploymentOptions(args) {
   return { preflight, context, input: values.get(preflight ? '--identity' : '--deploy-from-identity'), out: values.get('--out') };
 }
 export async function runDeploymentCli(args, env = process.env, dependencies = {}) {
-  const options = parseDeploymentOptions(args);
-  const input = JSON.parse(readFileSync(resolve(options.input), 'utf8'));
-  const common = { ...dependencies, accountId: env.CLOUDFLARE_ACCOUNT_ID, apiToken: env.CLOUDFLARE_API_TOKEN, context: options.context };
+  let options;
+  try { options = parseDeploymentOptions(args); }
+  catch (error) { throw diagnostic('CLI_INPUT_INVALID', error); }
+  const accountId = env.CLOUDFLARE_ACCOUNT_ID, apiToken = env.CLOUDFLARE_API_TOKEN;
+  if (typeof accountId !== 'string' || !accountId || typeof apiToken !== 'string' || !apiToken) {
+    throw diagnostic('REQUIRED_CONFIG_MISSING', new Error('Temporary Workers deployment requires account and token'));
+  }
+  if (!options.preflight && (typeof env.DDS_REMOTE_TEST_KEY !== 'string' || !env.DDS_REMOTE_TEST_KEY)) {
+    throw diagnostic('REQUIRED_CONFIG_MISSING', new Error('Remote test key is required for deployment'));
+  }
+  let input;
+  try { input = JSON.parse(readFileSync(resolve(options.input), 'utf8')); }
+  catch (error) { throw diagnostic('CLI_INPUT_INVALID', error); }
+  try {
+    const trustedIdentity = deriveCiIdentity({ ...options.context, secret: apiToken });
+    if (options.preflight) {
+      const supplied = assertCiIdentity(input, { context: options.context });
+      if (canonicalJson(supplied) !== canonicalJson(trustedIdentity)) throw new Error('Predeployment identity does not match derived ownership');
+    } else {
+      assertPreDeploymentIdentity(input, { trustedIdentity, context: options.context });
+    }
+  } catch (error) { throw diagnostic('IDENTITY_INVALID', error); }
+  const checkpointWriter = dependencies.writeReportCheckpoint ?? writeReportCheckpoint;
+  const runtimeDependencies = { ...dependencies };
+  delete runtimeDependencies.writeReportCheckpoint;
+  const common = { ...runtimeDependencies, accountId, apiToken, context: options.context };
   const record = options.preflight ? await preflightTemporaryWorkerIdentity({ ...common, identity: input })
     : createDeploymentManifest({ root: dependencies.root, verifiedDeployment: await deployAndVerifyWorkers({ ...common, preDeploymentIdentity: input, remoteTestKey: env.DDS_REMOTE_TEST_KEY }) });
-  writeReportCheckpoint(resolve(options.out), record);
+  try { checkpointWriter(resolve(options.out), record); }
+  catch (error) { throw diagnostic('LOCAL_IO_FAILED', error); }
   return record;
 }
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) runDeploymentCli(process.argv.slice(2)).catch(() => {
-  // Error objects from a child process or fetch may contain source credentials.
-  console.error('Remote DDS deployment failed; verify CLI arguments, identity, collision, and ownership evidence.');
-  process.exitCode = 1;
-});
+export async function runDeploymentProcess(args, env = process.env, dependencies = {}, io = {}) {
+  const execute = dependencies.runDeploymentCli ?? runDeploymentCli;
+  const writeError = io.error ?? ((value) => process.stderr.write(value));
+  const setExitCode = io.setExitCode ?? ((value) => { process.exitCode = value; });
+  try { return await execute(args, env, dependencies); }
+  catch (error) {
+    writeError(`${renderRemoteDdsFailure(error)}\n`);
+    setExitCode(1);
+    return undefined;
+  }
+}
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  runDeploymentProcess(process.argv.slice(2));
+}
