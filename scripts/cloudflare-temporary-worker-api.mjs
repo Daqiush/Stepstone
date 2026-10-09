@@ -105,7 +105,7 @@ async function exactScriptExists(client) {
   if (response.ok) {
     if (!responseIsJson(response)) return true;
     successfulPayload(response, await responseJson(response));
-    return true;
+    throw invalidResponse('Cloudflare exact-name endpoint returned an unexpected JSON success envelope');
   }
   return successfulPayload(response, await responseJson(response), { allowNotFound: true }) === null ? false : true;
 }

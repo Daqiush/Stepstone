@@ -240,6 +240,22 @@ test('exact HTTP 200 JSON response with invalid JSON is classified before collis
   assert.equal(reads, 1); assert.equal(mutations, 0);
 });
 
+for (const [label, payload] of [
+  ['missing result', { success: true }],
+  ['null result', { success: true, result: null }],
+  ['unrelated result', { success: true, result: { unrelated: 'value' } }],
+]) test('exact HTTP 200 JSON success with ' + label + ' cannot prove presence', async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity(); let reads = 0, mutations = 0;
+  await assertDiagnostic(() => api.confirmExactAbsence({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
+    fetchImpl: async (url, options = {}) => {
+      reads++;
+      if ((options.method ?? 'GET') !== 'GET') mutations++;
+      return jsonResponse(payload);
+    },
+  }), 'API_RESPONSE_INVALID');
+  assert.equal(reads, 1); assert.equal(mutations, 0);
+});
+
 test('exact HTTP 200 non-JSON script body proves presence without reading the body', async () => {
   const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity(); let reads = 0, jsonReads = 0, mutations = 0;
   await assertDiagnostic(() => api.confirmExactAbsence({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
