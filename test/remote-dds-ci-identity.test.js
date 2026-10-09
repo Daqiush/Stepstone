@@ -261,9 +261,21 @@ test('derive CLI classifies output canonicalization failure without exposing pat
     const preload = `data:text/javascript,${encodeURIComponent(`
       import fs from 'node:fs';
       import { syncBuiltinESMExports } from 'node:module';
-      const fail = () => { throw new Error('${failureMarker}'); };
-      fail.native = fail;
-      fs.realpathSync = fail;
+      const original = fs.realpathSync;
+      const originalNative = fs.realpathSync.native;
+      const shouldFail = (value) => {
+        const path = String(value);
+        return path.includes('${envOutputMarker}') || path.includes('${identityOutputMarker}');
+      };
+      const scoped = (...args) => {
+        if (shouldFail(args[0])) throw new Error('${failureMarker}');
+        return original(...args);
+      };
+      scoped.native = (...args) => {
+        if (shouldFail(args[0])) throw new Error('${failureMarker}');
+        return originalNative(...args);
+      };
+      fs.realpathSync = scoped;
       syncBuiltinESMExports();
     `)}`;
     const args = [cli, '--derive', ...contextArgs.slice(0, 3), argumentMarker, ...contextArgs.slice(4), '--github-env', githubEnv, '--identity-out', identityOut];
