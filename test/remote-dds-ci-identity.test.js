@@ -10,6 +10,13 @@ const cli = resolve(__dirname, '../scripts/remote-dds-ci-identity.mjs');
 const mod = () => import('../scripts/remote-dds-ci-identity.mjs');
 const contextArgs = ['--repository', INPUT.repository, '--workflow', INPUT.workflow, '--run-id', INPUT.runId, '--run-attempt', INPUT.runAttempt, '--commit-sha', INPUT.commitSha];
 
+function assertCliFailure(result, code, markers = []) {
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '');
+  assert.equal(result.stderr, `Remote DDS deployment failed [${code}].\n`);
+  for (const marker of markers) assert.equal(`${result.stdout}${result.stderr}`.includes(marker), false, marker);
+}
+
 test('test key uses the pinned UTF-8 JSON HMAC vector and binds only repository/run/attempt', async () => {
   const { deriveRemoteTestKey } = await mod();
   const key = deriveRemoteTestKey(INPUT);
@@ -144,7 +151,7 @@ test('identity derivation strictly rejects invalid context and absent source sec
   for (const [field, value] of bad) assert.throws(() => deriveCiIdentity({ ...INPUT, [field]: value }), new RegExp(field === 'secret' ? 'secret' : field, 'i'), `${field}: ${value}`);
 });
 
-test('derive CLI masks the key before appending it and atomically writes a secret-free identity', async () => {
+test('derive CLI masks the key after writing the environment and a secret-free identity', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'dds-ci-identity-'));
   try {
     const githubEnv = join(dir, 'github.env'); const out = join(dir, 'current-job.json');
@@ -162,18 +169,77 @@ test('derive CLI masks the key before appending it and atomically writes a secre
 test('derive CLI rejects unknown, duplicate, mixed, and missing arguments without writing', () => {
   const dir = mkdtempSync(join(tmpdir(), 'dds-ci-identity-invalid-'));
   try {
-    const githubEnv = join(dir, 'github.env'); const base = [cli, '--derive', ...contextArgs, '--github-env', githubEnv];
-    for (const args of [base.concat('--unknown', 'x'), base.concat('--derive'), base.concat('--repository', INPUT.repository), base.concat('--create-ready'), base.slice(0, -1), [cli, ...contextArgs, '--github-env', githubEnv]]) {
+    const marker = 'cli-argument-marker-must-not-leak';
+    const githubEnv = join(dir, `github-${marker}.env`); const base = [cli, '--derive', ...contextArgs, '--github-env', githubEnv];
+    for (const args of [base.concat('--unknown', marker), base.concat('--derive'), base.concat('--repository', marker), base.concat('--create-ready'), base.slice(0, -1), [cli, ...contextArgs, '--github-env', githubEnv]]) {
       const result = spawnSync(process.execPath, args, { env: { ...process.env, CLOUDFLARE_API_TOKEN: INPUT.secret }, encoding: 'utf8' });
-      assert.notEqual(result.status, 0);
-      assert.match(result.stderr, /identity CLI argument/i);
+      assertCliFailure(result, 'CLI_INPUT_INVALID', [marker, INPUT.secret]);
       assert.equal(existsSync(githubEnv), false);
-      assert.equal(`${result.stdout}${result.stderr}`.includes(INPUT.secret), false);
-      assert.equal(result.stdout.includes('::add-mask::'), false);
     }
-    const result = spawnSync(process.execPath, base, { env: { ...process.env, CLOUDFLARE_API_TOKEN: '', DDS_REMOTE_TEST_KEY: 'untrusted-key' }, encoding: 'utf8' });
-    assert.notEqual(result.status, 0);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('derive CLI classifies invalid GitHub context without exposing argument or environment markers', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dds-ci-identity-context-'));
+  try {
+    const argumentMarker = 'invalid-context-marker-must-not-leak';
+    const environmentMarker = 'context-secret-marker-must-not-leak';
+    const outputMarker = 'context-output-marker-must-not-leak';
+    const githubEnv = join(dir, outputMarker);
+    const args = [cli, '--derive', '--repository', argumentMarker, ...contextArgs.slice(2), '--github-env', githubEnv];
+    const result = spawnSync(process.execPath, args, { env: { ...process.env, CLOUDFLARE_API_TOKEN: environmentMarker }, encoding: 'utf8' });
+    assertCliFailure(result, 'CLI_INPUT_INVALID', [argumentMarker, environmentMarker, outputMarker]);
     assert.equal(existsSync(githubEnv), false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('derive CLI classifies an absent source token without exposing arguments or inherited key material', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dds-ci-identity-token-'));
+  try {
+    const argumentMarker = 'required-config-argument-marker-must-not-leak';
+    const inheritedKeyMarker = 'inherited-key-marker-must-not-leak';
+    const outputMarker = 'required-config-output-marker-must-not-leak';
+    const githubEnv = join(dir, outputMarker);
+    const args = [cli, '--derive', ...contextArgs.slice(0, 3), argumentMarker, ...contextArgs.slice(4), '--github-env', githubEnv];
+    const result = spawnSync(process.execPath, args, { env: { ...process.env, CLOUDFLARE_API_TOKEN: '', DDS_REMOTE_TEST_KEY: inheritedKeyMarker }, encoding: 'utf8' });
+    assertCliFailure(result, 'REQUIRED_CONFIG_MISSING', [argumentMarker, inheritedKeyMarker, outputMarker]);
+    assert.equal(existsSync(githubEnv), false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('derive CLI classifies GitHub environment output failure without printing the derived key', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dds-ci-identity-env-io-'));
+  try {
+    const argumentMarker = 'env-io-argument-marker-must-not-leak';
+    const secretMarker = 'env-io-secret-marker-must-not-leak';
+    const outputMarker = 'env-io-output-marker-must-not-leak';
+    const failureMarker = 'append-failure-marker-must-not-leak';
+    const githubEnv = join(dir, outputMarker); writeFileSync(githubEnv, 'EXISTING=value\n');
+    const preload = `data:text/javascript,${encodeURIComponent(`
+      import fs from 'node:fs';
+      import { syncBuiltinESMExports } from 'node:module';
+      fs.appendFileSync = () => { throw new Error('${failureMarker}'); };
+      syncBuiltinESMExports();
+    `)}`;
+    const args = [cli, '--derive', ...contextArgs.slice(0, 3), argumentMarker, ...contextArgs.slice(4), '--github-env', githubEnv];
+    const result = spawnSync(process.execPath, ['--import', preload, ...args], { env: { ...process.env, CLOUDFLARE_API_TOKEN: secretMarker }, encoding: 'utf8' });
+    assertCliFailure(result, 'LOCAL_IO_FAILED', [argumentMarker, secretMarker, outputMarker, failureMarker, 'EpcIq_vg1echjFz_T43uSTY6xxYXivOmobzaTD8CVVk']);
+    assert.equal(readFileSync(githubEnv, 'utf8'), 'EXISTING=value\n');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('derive CLI classifies identity report output failure without printing the derived key', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dds-ci-identity-report-io-'));
+  try {
+    const argumentMarker = 'report-io-argument-marker-must-not-leak';
+    const secretMarker = 'report-io-secret-marker-must-not-leak';
+    const outputMarker = 'report-io-output-marker-must-not-leak';
+    const githubEnv = join(dir, 'github.env');
+    const blockedParent = join(dir, outputMarker); writeFileSync(blockedParent, 'not-a-directory');
+    const identityOut = join(blockedParent, 'identity.json');
+    const args = [cli, '--derive', ...contextArgs.slice(0, 3), argumentMarker, ...contextArgs.slice(4), '--github-env', githubEnv, '--identity-out', identityOut];
+    const result = spawnSync(process.execPath, args, { env: { ...process.env, CLOUDFLARE_API_TOKEN: secretMarker }, encoding: 'utf8' });
+    assertCliFailure(result, 'LOCAL_IO_FAILED', [argumentMarker, secretMarker, outputMarker, 'EpcIq_vg1echjFz_T43uSTY6xxYXivOmobzaTD8CVVk']);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -193,9 +259,7 @@ test('derive CLI rejects Windows case aliases of one output before any writes', 
     const githubEnv = join(dir, 'github.env'); const out = join(dir, 'GITHUB.ENV');
     const original = 'EXISTING=case-sensitive-content\n'; writeFileSync(githubEnv, original);
     const result = spawnSync(process.execPath, [cli, '--derive', ...contextArgs, '--github-env', githubEnv, '--identity-out', out], { env: { ...process.env, CLOUDFLARE_API_TOKEN: INPUT.secret }, encoding: 'utf8' });
-    assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /separate files|same.*target/i);
-    assert.equal(result.stdout, '');
+    assertCliFailure(result, 'CLI_INPUT_INVALID');
     assert.equal(readFileSync(githubEnv, 'utf8'), original);
     assert.equal(readFileSync(out, 'utf8'), original);
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -209,9 +273,7 @@ test('derive CLI rejects parent junction/symlink output aliases before any write
     const githubEnv = join(parent, 'github.env'); const out = join(alias, 'github.env');
     const original = 'EXISTING=junction-original-content\n'; writeFileSync(githubEnv, original);
     const result = spawnSync(process.execPath, [cli, '--derive', ...contextArgs, '--github-env', githubEnv, '--identity-out', out], { env: { ...process.env, CLOUDFLARE_API_TOKEN: INPUT.secret }, encoding: 'utf8' });
-    assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /separate files|same.*target/i);
-    assert.equal(result.stdout, '');
+    assertCliFailure(result, 'CLI_INPUT_INVALID');
     assert.equal(readFileSync(githubEnv, 'utf8'), original);
     assert.equal(readFileSync(out, 'utf8'), original);
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -224,9 +286,7 @@ test('derive CLI rejects aliased output paths even before the output file exists
     symlinkSync(parent, alias, process.platform === 'win32' ? 'junction' : 'dir');
     const githubEnv = join(parent, 'github.env'); const out = join(alias, 'github.env');
     const result = spawnSync(process.execPath, [cli, '--derive', ...contextArgs, '--github-env', githubEnv, '--identity-out', out], { env: { ...process.env, CLOUDFLARE_API_TOKEN: INPUT.secret }, encoding: 'utf8' });
-    assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /separate files|same.*target/i);
-    assert.equal(result.stdout, '');
+    assertCliFailure(result, 'CLI_INPUT_INVALID');
     assert.equal(existsSync(githubEnv), false);
     assert.equal(existsSync(out), false);
   } finally { rmSync(dir, { recursive: true, force: true }); }

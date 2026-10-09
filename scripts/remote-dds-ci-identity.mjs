@@ -3,6 +3,7 @@ import { appendFileSync, existsSync, readFileSync, realpathSync } from 'node:fs'
 import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { canonicalJson } from './remote-dds-soak-state.mjs';
+import { diagnostic, renderRemoteDdsFailure } from './remote-dds-public-errors.mjs';
 import { writeReportCheckpoint } from './worker-dds-checkpoint.mjs';
 
 export const CI_SCHEMA_VERSION = 1;
@@ -189,17 +190,37 @@ export function canonicalOutputTarget(path) {
   }
 }
 function runCli() {
-  const args = parseCli(process.argv.slice(2));
-  const input = { repository: args.get('--repository'), workflow: args.get('--workflow'), runId: args.get('--run-id'), runAttempt: args.get('--run-attempt'), commitSha: args.get('--commit-sha'), secret: process.env.CLOUDFLARE_API_TOKEN };
+  let args;
+  try { args = parseCli(process.argv.slice(2)); }
+  catch (error) { throw diagnostic('CLI_INPUT_INVALID', error); }
+  const context = { repository: args.get('--repository'), workflow: args.get('--workflow'), runId: args.get('--run-id'), runAttempt: args.get('--run-attempt'), commitSha: args.get('--commit-sha') };
+  try {
+    assertGithubContext(context);
+    if (`ss-dds-soak-gh-${context.runId}-${context.runAttempt}-${'0'.repeat(12)}`.length > 63) throw new Error('Worker name exceeds 63 characters for runId/runAttempt');
+  } catch (error) { throw diagnostic('CLI_INPUT_INVALID', error); }
+  const sourceToken = process.env.CLOUDFLARE_API_TOKEN;
+  if (typeof sourceToken !== 'string' || !sourceToken) throw diagnostic('REQUIRED_CONFIG_MISSING', new Error('A source secret is required'));
+  const input = { ...context, secret: sourceToken };
   const identity = deriveCiIdentity(input); const key = deriveRemoteTestKey(input);
   const envFile = resolve(args.get('--github-env')); const out = args.has('--identity-out') ? resolve(args.get('--identity-out')) : null;
-  if (out && canonicalOutputTarget(out) === canonicalOutputTarget(envFile)) throw new Error('Identity output and GitHub environment must be separate files');
-  const existing = existsSync(envFile) ? readFileSync(envFile) : Buffer.alloc(0);
-  const separator = existing.length && existing.at(-1) !== 10 ? '\n' : '';
+  if (out && canonicalOutputTarget(out) === canonicalOutputTarget(envFile)) {
+    throw diagnostic('CLI_INPUT_INVALID', new Error('Identity output and GitHub environment must be separate files'));
+  }
+  try {
+    const existing = existsSync(envFile) ? readFileSync(envFile) : Buffer.alloc(0);
+    const separator = existing.length && existing.at(-1) !== 10 ? '\n' : '';
+    appendFileSync(envFile, `${separator}DDS_REMOTE_TEST_KEY=${key}\n`, 'utf8');
+  } catch (error) { throw diagnostic('LOCAL_IO_FAILED', error); }
+  if (out) {
+    try { writeReportCheckpoint(out, identity); }
+    catch (error) { throw diagnostic('LOCAL_IO_FAILED', error); }
+  }
   process.stdout.write(`::add-mask::${key}\n`);
-  appendFileSync(envFile, `${separator}DDS_REMOTE_TEST_KEY=${key}\n`, 'utf8');
-  if (out) writeReportCheckpoint(out, identity);
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  try { runCli(); } catch (error) { console.error(error.message); process.exitCode = 1; }
+  try { runCli(); }
+  catch (error) {
+    process.stderr.write(`${renderRemoteDdsFailure(error)}\n`);
+    process.exitCode = 1;
+  }
 }
