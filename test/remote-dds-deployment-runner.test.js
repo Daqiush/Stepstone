@@ -55,6 +55,7 @@ const page = (items, number = 1, total = 1, perPage = 100, totalCount = (total -
   result_info: { page: number, per_page: perPage, total_pages: total, count: items.length, total_count: totalCount } });
 const versionPage = (items, ...args) => ({ ...page(items, ...args), result: { items } });
 const response = (payload, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => payload });
+const jsonResponse = (payload, status = 200) => ({ ...response(payload, status), headers: { get: (name) => name.toLowerCase() === 'content-type' ? 'application/json; charset=UTF-8' : null } });
 const notFound = (status = 404) => response({ success: false, errors: [{ code: 10007, message: 'Worker not found' }] }, status);
 async function ciIdentity(secret = TOKEN) { return (await import('../scripts/remote-dds-ci-identity.mjs')).deriveCiIdentity({ ...CONTEXT, secret }); }
 function versionDetail(identity, tag = identity.ownershipTag) {
@@ -204,6 +205,51 @@ for (const missing of ['accountId', 'apiToken']) test('Cloudflare preflight clas
 test('Cloudflare preflight classifies a wholly missing options object as required configuration', async () => {
   const api = await import('../scripts/cloudflare-temporary-worker-api.mjs');
   await assertDiagnostic(() => api.confirmExactAbsence(), 'REQUIRED_CONFIG_MISSING');
+});
+
+test('Cloudflare preflight classifies null options as required configuration', async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs');
+  await assertDiagnostic(() => api.confirmExactAbsence(null), 'REQUIRED_CONFIG_MISSING');
+});
+
+for (const [label, payload, expectedCode] of [
+  ['auth envelope', { success: false, errors: [{ code: 10000, message: 'Authentication error sensitive-marker' }] }, 'API_AUTH_OR_PERMISSION'],
+  ['non-auth envelope', { success: false, errors: [{ code: 10001, message: 'Request rejected sensitive-marker' }] }, 'API_REQUEST_FAILED'],
+  ['malformed failure envelope', { success: false, errors: [] }, 'API_RESPONSE_INVALID'],
+]) test('exact HTTP 200 JSON ' + label + ' is classified before collision', async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity(); let reads = 0, mutations = 0;
+  await assertDiagnostic(() => api.confirmExactAbsence({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
+    fetchImpl: async (url, options = {}) => {
+      reads++;
+      if ((options.method ?? 'GET') !== 'GET') mutations++;
+      return jsonResponse(payload);
+    },
+  }), expectedCode);
+  assert.equal(reads, 1); assert.equal(mutations, 0);
+});
+
+test('exact HTTP 200 JSON response with invalid JSON is classified before collision', async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity(); let reads = 0, mutations = 0;
+  await assertDiagnostic(() => api.confirmExactAbsence({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
+    fetchImpl: async (url, options = {}) => {
+      reads++;
+      if ((options.method ?? 'GET') !== 'GET') mutations++;
+      return { ok: true, status: 200, headers: { get: () => 'application/problem+json' }, json: async () => { throw new SyntaxError('sensitive-marker'); } };
+    },
+  }), 'API_RESPONSE_INVALID');
+  assert.equal(reads, 1); assert.equal(mutations, 0);
+});
+
+test('exact HTTP 200 non-JSON script body proves presence without reading the body', async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity(); let reads = 0, jsonReads = 0, mutations = 0;
+  await assertDiagnostic(() => api.confirmExactAbsence({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
+    fetchImpl: async (url, options = {}) => {
+      reads++;
+      if ((options.method ?? 'GET') !== 'GET') mutations++;
+      return { ok: true, status: 200, headers: { get: () => 'application/javascript' }, json: async () => { jsonReads++; throw new Error('script body must not be read'); } };
+    },
+  }), 'TEMPORARY_WORKER_COLLISION');
+  assert.equal(reads, 1); assert.equal(jsonReads, 0); assert.equal(mutations, 0);
 });
 
 test('Cloudflare preflight classifies a rejected request without authorizing mutation', async () => {

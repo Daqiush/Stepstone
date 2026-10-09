@@ -13,6 +13,9 @@ function temporaryName(value) {
   return value.toLowerCase();
 }
 function inputs(options = {}) {
+  if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+    throw diagnostic('REQUIRED_CONFIG_MISSING', new Error('Cloudflare API requires account and token'));
+  }
   const { accountId, apiToken, fetchImpl = fetch } = options;
   if (typeof accountId !== 'string' || !accountId || typeof apiToken !== 'string' || !apiToken) {
     throw diagnostic('REQUIRED_CONFIG_MISSING', new Error('Cloudflare API requires account and token'));
@@ -61,6 +64,20 @@ async function responseJson(response) {
     throw invalidResponse('Cloudflare API returned invalid JSON', error);
   }
 }
+function responseIsJson(response) {
+  let contentType;
+  try {
+    if (typeof response.headers?.get === 'function') contentType = response.headers.get('content-type');
+    else if (isRecord(response.headers)) contentType = response.headers['content-type'] ?? response.headers['Content-Type'];
+  } catch (error) {
+    if (error instanceof OwnershipRefusal) throw error;
+    throw invalidResponse('Cloudflare API returned invalid response headers', error);
+  }
+  if (contentType === undefined || contentType === null) return false;
+  if (typeof contentType !== 'string') throw invalidResponse('Cloudflare API returned invalid response headers');
+  const mediaType = contentType.split(';', 1)[0].trim().toLowerCase();
+  return mediaType.endsWith('/json') || mediaType.endsWith('+json');
+}
 function successfulPayload(response, payload, { allowNotFound = false } = {}) {
   if (!isRecord(payload) || typeof payload.success !== 'boolean') throw invalidResponse('Cloudflare API returned a malformed envelope');
   if (payload.success === false) {
@@ -85,7 +102,11 @@ function explicitNotFound(response, payload) {
 }
 async function exactScriptExists(client) {
   const response = await fetchResponse(client, `${client.base}/scripts/${encodeURIComponent(client.name)}`);
-  if (response.ok) return true;
+  if (response.ok) {
+    if (!responseIsJson(response)) return true;
+    successfulPayload(response, await responseJson(response));
+    return true;
+  }
   return successfulPayload(response, await responseJson(response), { allowNotFound: true }) === null ? false : true;
 }
 // These three official endpoints use pages. A cursor from a different API cannot
