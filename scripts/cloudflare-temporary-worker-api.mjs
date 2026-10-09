@@ -115,7 +115,7 @@ async function exactScriptExists(client) {
 }
 // These official endpoints use numbered pages. Counted endpoints require their
 // full totals; the Workers V4 array endpoint instead permits empty-page termination.
-async function listAll(client, path, { query = {}, items = (payload) => payload.result, allowNotFound = false, unfilteredTotalCount = false, emptyPageTermination = false } = {}) {
+async function listAll(client, path, { query = {}, items = (payload) => payload.result, allowNotFound = false, emptyPageTermination = false } = {}) {
   const results = []; const seenPagePayloads = new Set(); let totalPages, perPage, totalCount;
   for (let page = 1; page <= 100000; page++) {
     const url = new URL(`${client.base}/${path}`);
@@ -156,17 +156,57 @@ async function listAll(client, path, { query = {}, items = (payload) => payload.
         || !Number.isSafeInteger(info.count) || info.count !== values.length || !Number.isSafeInteger(info.total_count) || info.total_count < 0
         || (info.total_pages === 0 && (page !== 1 || values.length !== 0)) || (info.total_pages > 0 && page > info.total_pages)) throw invalidResponse('Cloudflare pagination page is missing, malformed, or non-advancing');
     const expectedPages = Math.ceil(info.total_count / info.per_page);
-    if (!unfilteredTotalCount && ((info.total_count === 0 ? info.total_pages > 1 : info.total_pages !== expectedPages)
-        || info.count !== Math.min(info.per_page, Math.max(0, info.total_count - (page - 1) * info.per_page)))) throw invalidResponse('Cloudflare pagination counts and page capacity are inconsistent');
+    if ((info.total_count === 0 ? info.total_pages > 1 : info.total_pages !== expectedPages)
+        || info.count !== Math.min(info.per_page, Math.max(0, info.total_count - (page - 1) * info.per_page))) throw invalidResponse('Cloudflare pagination counts and page capacity are inconsistent');
     if (totalPages !== undefined && (totalPages !== info.total_pages || perPage !== info.per_page || totalCount !== info.total_count)) throw invalidResponse('Cloudflare pagination pages are inconsistent');
     totalPages = info.total_pages; perPage = info.per_page; totalCount = info.total_count;
     results.push(...values);
     if (page >= totalPages) {
-      if (!unfilteredTotalCount && results.length !== totalCount) throw invalidResponse('Cloudflare pagination cumulative count is inconsistent');
+      if (results.length !== totalCount) throw invalidResponse('Cloudflare pagination cumulative count is inconsistent');
       return results;
     }
   }
   throw invalidResponse('Cloudflare pagination did not terminate');
+}
+// scripts-search exposes page controls, but its official response contract makes
+// result_info and every result_info field optional. Follow total_pages when the
+// API supplies it; otherwise the returned array is the complete observable page,
+// matching the official SDK's non-paginated search() result.
+async function listScriptSearch(client) {
+  const results = []; const seenPagePayloads = new Set(); let totalPages;
+  for (let page = 1; page <= 100000; page++) {
+    const url = new URL(`${client.base}/scripts-search`);
+    url.searchParams.set('name', client.name);
+    url.searchParams.set('per_page', '100');
+    url.searchParams.set('page', String(page));
+    const payload = await jsonRequest(client, url.toString());
+    const values = payload.result; const info = payload.result_info;
+    if (!Array.isArray(values) || values.length > 100) throw invalidResponse('Cloudflare script search result is missing or malformed');
+    if (info !== undefined) {
+      if (!isRecord(info)
+          || (info.page !== undefined && (!Number.isSafeInteger(info.page) || info.page !== page))
+          || (info.per_page !== undefined && (!Number.isSafeInteger(info.per_page) || info.per_page < 1 || info.per_page > 100 || values.length > info.per_page))
+          || (info.count !== undefined && (!Number.isSafeInteger(info.count) || info.count !== values.length))
+          || (info.total_count !== undefined && (!Number.isSafeInteger(info.total_count) || info.total_count < 0))
+          || (info.total_pages !== undefined && (!Number.isSafeInteger(info.total_pages) || info.total_pages < 0 || info.total_pages > 100000
+            || (info.total_pages === 0 && (page !== 1 || values.length !== 0))
+            || (info.total_pages > 0 && page > info.total_pages)))) {
+        throw invalidResponse('Cloudflare script search pagination metadata is malformed or non-advancing');
+      }
+      if (info.total_pages !== undefined) {
+        if (totalPages !== undefined && totalPages !== info.total_pages) throw invalidResponse('Cloudflare script search page totals are inconsistent');
+        totalPages = info.total_pages;
+      }
+    }
+    if (values.length) {
+      const pagePayload = canonicalJson(values);
+      if (seenPagePayloads.has(pagePayload)) throw invalidResponse('Cloudflare script search repeated a nonempty page');
+      seenPagePayloads.add(pagePayload);
+    }
+    results.push(...values);
+    if (totalPages === undefined || page >= totalPages) return results;
+  }
+  throw invalidResponse('Cloudflare script search pagination did not terminate');
 }
 export async function findExactWorker(options) {
   const client = inputs(options); const workers = await listAll(client, 'workers', { emptyPageTermination: true });
@@ -188,7 +228,7 @@ export async function findExactWorker(options) {
 export async function listLegacyExactScript(options) {
   const client = inputs(options); let exactExists = false;
   if (options.includeExact === true) exactExists = await exactScriptExists(client);
-  const scripts = await listAll(client, 'scripts-search', { query: { name: client.name }, unfilteredTotalCount: true });
+  const scripts = await listScriptSearch(client);
   const seen = new Set();
   for (const script of scripts) {
     if (typeof script?.script_name !== 'string' || !script.script_name || script.script_name.trim() !== script.script_name) throw invalidResponse('Cloudflare API returned an invalid legacy script identity');

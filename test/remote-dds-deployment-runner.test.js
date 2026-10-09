@@ -376,7 +376,7 @@ for (const [stage, expectedCode] of [
       if (path.endsWith('/workers/workers')) {
         return stage === 'Workers list' ? response({ success: true, result: [], result_info: { page: 2, per_page: 100 } }) : response(page([]));
       }
-      if (path.endsWith('/workers/scripts-search')) return response({ success: true, result: [], result_info: {} });
+      if (path.endsWith('/workers/scripts-search')) return response({ success: true, result: {} });
       throw new Error('unexpected request');
     },
   }), expectedCode);
@@ -433,6 +433,24 @@ test('scripts-search accepts an unfiltered account total while proving exact nam
     },
   });
   assert.deepEqual(result, { absent: true }); assert.equal(mutations, 0);
+});
+
+for (const [label, resultInfo] of [
+  ['no result_info', undefined],
+  ['partial result_info', { page: 1, per_page: 100, count: 0 }],
+]) test('scripts-search accepts the documented optional pagination metadata: ' + label, async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity(); let reads = 0;
+  const result = await api.listLegacyExactScript({ accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
+    fetchImpl: async (url) => {
+      reads++; const parsed = new URL(url);
+      assert.equal(parsed.pathname.endsWith('/workers/scripts-search'), true);
+      assert.equal(parsed.searchParams.get('name'), identity.workerName);
+      const payload = { success: true, result: [] };
+      if (resultInfo !== undefined) payload.result_info = resultInfo;
+      return response(payload);
+    },
+  });
+  assert.equal(result, null); assert.equal(reads, 1);
 });
 
 for (const status of [400, 404]) {
@@ -646,12 +664,14 @@ test('presence readers preserve normalized records for ownership and cleanup con
 });
 
 const strictPaginationFailures = ['missing count', 'missing total count', 'count mismatch', 'total count exceeds capacity', 'total pages mismatch', 'total count drift', 'short nonfinal page', 'short final page'];
-const permittedSearchTotalShapes = new Set(['total count exceeds capacity', 'total pages mismatch', 'short nonfinal page', 'short final page']);
+const permittedSearchTotalShapes = new Set(['missing count', 'missing total count', 'total count exceeds capacity', 'total pages mismatch', 'total count drift', 'short nonfinal page', 'short final page']);
 
 for (const target of ['objects', 'legacy', 'versions']) {
   const failures = target === 'objects'
     ? ['inconsistent pages', 'non-advancing page', 'duplicate exact']
-    : ['missing metadata', 'malformed cursor', 'repeated cursor', 'cyclic cursor', 'inconsistent pages', 'non-advancing page', 'duplicate exact'];
+    : target === 'legacy'
+      ? ['inconsistent pages', 'non-advancing page', 'duplicate exact']
+      : ['missing metadata', 'malformed cursor', 'repeated cursor', 'cyclic cursor', 'inconsistent pages', 'non-advancing page', 'duplicate exact'];
   for (const bad of failures) {
     test(target + ' pagination fails closed on ' + bad, async () => {
       const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity(); let reads = 0;
@@ -1211,13 +1231,13 @@ for (const tag of [null, 'b'.repeat(43)]) test('successful Wrangler deploy with 
 });
 
 for (const target of ['objects', 'legacy', 'versions']) test('official ' + target + ' page reader '
-  + (target === 'objects' ? 'accepts an empty cursor-only envelope' : 'rejects a cursor-only terminal envelope'), async () => {
+  + (target === 'versions' ? 'rejects a cursor-only terminal envelope' : 'accepts an empty cursor-only envelope'), async () => {
   const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity();
   const options = { accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName,
     fetchImpl: async () => response({ success: true, result: target === 'versions' ? { items: [] } : [], result_info: { cursor: null } }),
   };
   const method = target === 'objects' ? api.findExactWorker : target === 'legacy' ? api.listLegacyExactScript : api.readWorkerVersions;
-  if (target === 'objects') assert.equal(await method(options), null);
+  if (target !== 'versions') assert.equal(await method(options), null);
   else await assertDiagnostic(() => method(options), 'API_RESPONSE_INVALID');
 });
 
