@@ -127,7 +127,7 @@ async function listAll(client, path, { query = {}, items = (payload) => payload.
       if (page !== 1) throw invalidResponse('Cloudflare pagination endpoint vanished before termination');
       return null;
     }
-    const values = items(payload); const info = payload.result_info;
+    const values = items(payload); const info = payload.result_info === null ? undefined : payload.result_info;
     const completeCountMetadata = isRecord(info)
       && ['page', 'per_page', 'total_pages', 'count', 'total_count'].every((key) => Object.hasOwn(info, key));
     // The Workers V4 array endpoint officially permits page/per_page-only (or
@@ -180,7 +180,7 @@ async function listScriptSearch(client) {
     url.searchParams.set('per_page', '100');
     url.searchParams.set('page', String(page));
     const payload = await jsonRequest(client, url.toString());
-    const values = payload.result; const info = payload.result_info;
+    const values = payload.result; const info = payload.result_info === null ? undefined : payload.result_info;
     if (!Array.isArray(values) || values.length > 100) throw invalidResponse('Cloudflare script search result is missing or malformed');
     if (info !== undefined) {
       if (!isRecord(info)
@@ -242,7 +242,9 @@ export async function listLegacyExactScript(options) {
 function normalizedVersion(result, expectedId) {
   if (!result || result.id !== expectedId || typeof result.id !== 'string' || !result.id.trim()) throw invalidResponse('Cloudflare API did not verify the immutable version ID');
   const resources = result.resources;
-  if (!resources || typeof resources.script?.etag !== 'string' || !resources.script.etag.trim() || !Array.isArray(resources.bindings)
+  const bindings = resources?.bindings;
+  if (!resources || typeof resources.script?.etag !== 'string' || !resources.script.etag.trim()
+      || !(Array.isArray(bindings) || isRecord(bindings))
       || !resources.script_runtime || typeof resources.script_runtime !== 'object' || Array.isArray(resources.script_runtime)) throw invalidResponse('Cloudflare immutable version resource metadata is missing or malformed');
   const tag = result.annotations?.['workers/tag'];
   return { id: result.id, ownershipTag: typeof tag === 'string' ? tag : null, scriptETag: resources.script.etag,
@@ -250,7 +252,7 @@ function normalizedVersion(result, expectedId) {
 }
 export async function readWorkerVersions(options) {
   const client = inputs(options); const path = `scripts/${encodeURIComponent(client.name)}/versions`;
-  const versions = options.versionId === undefined ? await listAll(client, path, { items: (payload) => payload.result?.items, allowNotFound: true }) : [{ id: options.versionId }];
+  const versions = options.versionId === undefined ? await listAll(client, path, { items: (payload) => payload.result?.items, allowNotFound: true, emptyPageTermination: true }) : [{ id: options.versionId }];
   if (versions === null) return { status: 'ABSENT_ENDPOINT', versions: [] };
   const seen = new Set(); const records = [];
   for (const version of versions) {
