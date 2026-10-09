@@ -243,6 +243,31 @@ test('derive CLI classifies identity report output failure without printing the 
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('derive CLI classifies output canonicalization failure without exposing path or error markers', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dds-ci-identity-canonical-io-'));
+  try {
+    const argumentMarker = 'canonical-io-argument-marker-must-not-leak';
+    const secretMarker = 'canonical-io-secret-marker-must-not-leak';
+    const envOutputMarker = 'canonical-env-output-marker-must-not-leak';
+    const identityOutputMarker = 'canonical-identity-output-marker-must-not-leak';
+    const failureMarker = 'canonical-failure-marker-must-not-leak';
+    const githubEnv = join(dir, envOutputMarker); const identityOut = join(dir, identityOutputMarker);
+    const preload = `data:text/javascript,${encodeURIComponent(`
+      import fs from 'node:fs';
+      import { syncBuiltinESMExports } from 'node:module';
+      const fail = () => { throw new Error('${failureMarker}'); };
+      fail.native = fail;
+      fs.realpathSync = fail;
+      syncBuiltinESMExports();
+    `)}`;
+    const args = [cli, '--derive', ...contextArgs.slice(0, 3), argumentMarker, ...contextArgs.slice(4), '--github-env', githubEnv, '--identity-out', identityOut];
+    const result = spawnSync(process.execPath, ['--import', preload, ...args], { env: { ...process.env, CLOUDFLARE_API_TOKEN: secretMarker }, encoding: 'utf8' });
+    assertCliFailure(result, 'LOCAL_IO_FAILED', [argumentMarker, secretMarker, envOutputMarker, identityOutputMarker, failureMarker, 'EpcIq_vg1echjFz_T43uSTY6xxYXivOmobzaTD8CVVk']);
+    assert.equal(existsSync(githubEnv), false);
+    assert.equal(existsSync(identityOut), false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('derive CLI appends a separate GitHub environment assignment when its last line lacks a newline', () => {
   const dir = mkdtempSync(join(tmpdir(), 'dds-ci-env-newline-'));
   try {

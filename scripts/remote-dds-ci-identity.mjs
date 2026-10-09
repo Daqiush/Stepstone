@@ -203,7 +203,12 @@ function runCli() {
   const input = { ...context, secret: sourceToken };
   const identity = deriveCiIdentity(input); const key = deriveRemoteTestKey(input);
   const envFile = resolve(args.get('--github-env')); const out = args.has('--identity-out') ? resolve(args.get('--identity-out')) : null;
-  if (out && canonicalOutputTarget(out) === canonicalOutputTarget(envFile)) {
+  let sameOutputTarget = false;
+  if (out) {
+    try { sameOutputTarget = canonicalOutputTarget(out) === canonicalOutputTarget(envFile); }
+    catch (error) { throw diagnostic('LOCAL_IO_FAILED', error); }
+  }
+  if (sameOutputTarget) {
     throw diagnostic('CLI_INPUT_INVALID', new Error('Identity output and GitHub environment must be separate files'));
   }
   try {
