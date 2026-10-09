@@ -205,6 +205,7 @@ export function parseDeploymentOptions(args) {
   for (const key of values.keys()) if (!required.has(key)) throw new Error('Deployment CLI modes cannot mix arguments');
   for (const key of required) if (!values.has(key)) throw new Error('Missing required deployment CLI argument: ' + key);
   const context = assertGithubContext({ repository: values.get('--repository'), workflow: values.get('--workflow'), runId: values.get('--run-id'), runAttempt: values.get('--run-attempt'), commitSha: values.get('--commit-sha') });
+  if (`ss-dds-soak-gh-${context.runId}-${context.runAttempt}-${'0'.repeat(12)}`.length > 63) throw new Error('Worker name exceeds 63 characters for runId/runAttempt');
   return { preflight, context, input: values.get(preflight ? '--identity' : '--deploy-from-identity'), out: values.get('--out') };
 }
 export async function runDeploymentCli(args, env = process.env, dependencies = {}) {

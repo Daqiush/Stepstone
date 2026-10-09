@@ -819,6 +819,20 @@ test('deployment CLI classifies invalid arguments and GitHub context without lea
   }
 });
 
+test('deployment CLI classifies overlong run identity components as CLI input before supplied identity validation', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'remote-dds-deployment-context-length-'));
+  try {
+    const input = join(dir, SECRET_MARKERS[2] + '.json'); writeFileSync(input, '{}');
+    for (const [field, marker] of [['runId', '9'.repeat(80)], ['runAttempt', '8'.repeat(80)]]) {
+      const context = { ...CONTEXT, [field]: marker };
+      const args = ['--preflight', '--identity', input, '--repository', context.repository, '--workflow', context.workflow,
+        '--run-id', context.runId, '--run-attempt', context.runAttempt, '--commit-sha', context.commitSha, '--out', join(dir, SECRET_MARKERS[5])];
+      const result = spawnSync(process.execPath, [DEPLOYMENT_CLI, ...args], { encoding: 'utf8', env: deploymentEnvironment() });
+      assertDeploymentCliFailure(result, 'CLI_INPUT_INVALID', [...SECRET_MARKERS, marker]);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('deployment CLI classifies missing, unreadable, and invalid-JSON input without leaking paths or content', () => {
   const dir = mkdtempSync(join(tmpdir(), 'remote-dds-deployment-input-'));
   try {
