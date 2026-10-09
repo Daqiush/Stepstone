@@ -9,7 +9,7 @@ import { writeReportCheckpoint } from './worker-dds-checkpoint.mjs';
 import { deriveCiIdentity, assertGithubContext, assertCiIdentity, createPreDeploymentIdentity, assertPreDeploymentIdentity, createDeploymentRecord, assertDeploymentRecord } from './remote-dds-ci-identity.mjs';
 import { readWorkerVersions, confirmExactAbsence, OwnershipRefusal, observeImmutableVersions, readOwnershipSnapshot, sameOwnershipSnapshot } from './cloudflare-temporary-worker-api.mjs';
 import { cleanupRemoteDdsDeployment } from './cleanup-remote-dds-deployment.mjs';
-import { diagnostic, renderRemoteDdsFailure } from './remote-dds-public-errors.mjs';
+import { diagnostic, publicDiagnosticCode, renderRemoteDdsFailure } from './remote-dds-public-errors.mjs';
 
 export const DEPLOYMENT_MANIFEST_VERSION = 2;
 export const WASM_PATH = 'workers/vendor/bridge-dds/dds-worker.wasm';
@@ -26,6 +26,33 @@ export function harnessPaths(root) {
 }
 
 function sha256(bytes) { return createHash('sha256').update(bytes).digest('hex'); }
+export class ExternalCommandFailure extends Error {
+  constructor(cause) {
+    super(String(cause?.message || 'External deployment command failed'), { cause });
+    this.name = 'ExternalCommandFailure';
+    this.stderr = typeof cause?.stderr === 'string' ? cause.stderr : '';
+    this.stdout = typeof cause?.stdout === 'string' ? cause.stdout : '';
+  }
+}
+function externalCommandCode(error) {
+  const detail = [error?.stderr, error?.stdout, error?.message].filter((value) => typeof value === 'string').join('\n');
+  const auth = /\b(?:401|403)\b|authenticat|authori[sz]|unauthori[sz]ed|forbidden|permission|access denied|api token/i.test(detail);
+  return auth ? 'API_AUTH_OR_PERMISSION' : 'API_REQUEST_FAILED';
+}
+function throwExternalCommandFailure(error) { throw new ExternalCommandFailure(error); }
+function preserveNestedDiagnostic(error) {
+  let cause = error?.cause;
+  for (let depth = 0; cause && depth < 8; depth++, cause = cause.cause) {
+    const code = publicDiagnosticCode(cause);
+    if (code !== 'UNKNOWN') return diagnostic(code, error);
+  }
+  return error;
+}
+function classifyDeploymentBoundaryError(error) {
+  if (error instanceof OwnershipRefusal) return preserveNestedDiagnostic(error);
+  if (error instanceof ExternalCommandFailure) return diagnostic(externalCommandCode(error), error);
+  return error;
+}
 function asset(root, path, label) {
   const absolute = resolve(root, path);
   if (!existsSync(absolute)) throw new Error(`Missing ${label} asset: ${path}`);
@@ -117,25 +144,30 @@ export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImp
       '--var', 'DDS_REMOTE_TEST:true', '--var', 'DDS_DEPLOYMENT_BUILD_ID:' + buildId];
     try { execFile(wrangler, deployArgs, childOptions); }
     catch (firstError) {
-      if (!/\b10007\b/.test(String(firstError.message))) throw firstError;
+      if (!/\b10007\b/.test(String(firstError.message))) throwExternalCommandFailure(firstError);
       const partial = await readOwnershipSnapshot(apiOptions);
       if (partial === null) throw firstError;
       apiOptions.expectedWorkerId = partial.worker.id;
       await sleepImpl(2000);
       sameOwnershipSnapshot(await readOwnershipSnapshot(apiOptions), partial);
-      execFile(wrangler, deployArgs, childOptions);
+      try { execFile(wrangler, deployArgs, childOptions); }
+      catch (retryError) { throwExternalCommandFailure(retryError); }
     }
     const beforeSecret = await assertDeployedOwnership(apiOptions);
     apiOptions.expectedWorkerId = beforeSecret.worker.id;
-    execFile(process.execPath, [WRANGLER_CLI_PATH, 'secret', 'put', 'DDS_REMOTE_TEST_KEY', '--config', configPath],
-      { encoding: 'utf8', cwd: root, env: childEnvironment, input: remoteTestKey + '\n', stdio: ['pipe', 'pipe', 'pipe'] });
+    try {
+      execFile(process.execPath, [WRANGLER_CLI_PATH, 'secret', 'put', 'DDS_REMOTE_TEST_KEY', '--config', configPath],
+        { encoding: 'utf8', cwd: root, env: childEnvironment, input: remoteTestKey + '\n', stdio: ['pipe', 'pipe', 'pipe'] });
+    } catch (error) { throwExternalCommandFailure(error); }
     const afterSecret = await assertDeployedOwnership(apiOptions);
     const versions = afterSecret.versionEvidence.versions;
     const subdomainResponse = await fetchImpl('https://api.cloudflare.com/client/v4/accounts/' + encodeURIComponent(accountId) + '/workers/subdomain', { headers: { authorization: 'Bearer ' + apiToken } });
     const subdomain = await subdomainResponse.json();
     if (!subdomainResponse.ok || subdomain.success !== true || typeof subdomain.result?.subdomain !== 'string' || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(subdomain.result.subdomain)) throw new Error('Cloudflare did not verify the workers.dev subdomain');
     const workersDevUrl = 'https://' + temporaryWorkerName + '.' + subdomain.result.subdomain + '.workers.dev';
-    const wranglerVersion = String(execFile(wrangler, ['--version'], childOptions)).trim();
+    let wranglerVersion;
+    try { wranglerVersion = String(execFile(wrangler, ['--version'], childOptions)).trim(); }
+    catch (error) { throwExternalCommandFailure(error); }
     let verified;
     try {
       verified = await verifyWorkersDeployment({ fetchImpl, accountId, scriptName: temporaryWorkerName, apiToken, expectedVersionId: versions[0].id, ownershipTag, wranglerVersion });
@@ -247,7 +279,8 @@ export async function runDeploymentProcess(args, env = process.env, dependencies
   const setExitCode = io.setExitCode ?? ((value) => { process.exitCode = value; });
   try { return await execute(args, env, dependencies); }
   catch (error) {
-    writeError(`${renderRemoteDdsFailure(error)}\n`);
+    const renderedError = classifyDeploymentBoundaryError(error);
+    writeError(`${renderRemoteDdsFailure(renderedError)}\n`);
     setExitCode(1);
     return undefined;
   }

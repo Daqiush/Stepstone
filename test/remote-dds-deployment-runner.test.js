@@ -361,6 +361,29 @@ for (const [label, payload] of [
   assert.equal(mutations, 0);
 });
 
+test('Wrangler deployment failures are classified without exposing command diagnostics', async () => {
+  const mod = await deployment(); let stderr = '', exitCode;
+  const failure = new mod.ExternalCommandFailure(new Error('Wrangler API request failed: token-marker account-marker'));
+  await mod.runDeploymentProcess([], {}, { runDeploymentCli: async () => { throw failure; } }, {
+    error: (value) => { stderr += value; }, setExitCode: (value) => { exitCode = value; },
+  });
+  assert.equal(exitCode, 1);
+  assert.equal(stderr, 'Remote DDS deployment failed [API_REQUEST_FAILED].\n');
+  assert.equal(stderr.includes('token-marker'), false);
+});
+
+test('ownership-wrapped API failures preserve their safe category at the process boundary', async () => {
+  const mod = await deployment();
+  const { diagnostic } = await import('../scripts/remote-dds-public-errors.mjs');
+  const { OwnershipRefusal } = await import('../scripts/cloudflare-temporary-worker-api.mjs');
+  let stderr = '', exitCode;
+  await mod.runDeploymentProcess([], {}, {
+    runDeploymentCli: async () => { throw new OwnershipRefusal('ownership evidence failed', { cause: diagnostic('API_RESPONSE_INVALID', new Error('private response')) }); },
+  }, { error: (value) => { stderr += value; }, setExitCode: (value) => { exitCode = value; } });
+  assert.equal(exitCode, 1);
+  assert.equal(stderr, 'Remote DDS deployment failed [API_RESPONSE_INVALID].\n');
+});
+
 for (const [stage, expectedCode] of [
   ['exact script', 'API_EXACT_SCRIPT_RESPONSE_INVALID'],
   ['Workers list', 'API_WORKERS_LIST_RESPONSE_INVALID'],

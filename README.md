@@ -59,7 +59,7 @@ npm run test:server:smoke
 
 若有界安装等待后报告某个 `.publish-lock`，先确认没有其他 Stepstone DDS 安装或构建进程正在运行，再只删除错误信息明确报告的那个锁目录，然后重新运行 `npm install`；不要清理整个 DDS 构建目录或其他锁。
 
-Windows 继续使用本机已有的 `dds/Build/bin/x64/Release/*.exe`，也可以通过上述两个环境变量指定自行构建的程序；当前 `postinstall` 不负责为全新 Windows 克隆生成 DDS。`.exe`、`.lib`、`.obj` 等本机构建产物不进入版本控制。
+Windows 继续使用 `dds/Build/bin/x64/Release/*.exe`。全新 Windows 克隆可在安装 Visual Studio 的 C++ x64 工具链后，从项目根目录运行 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows-dds.ps1`，它会用当前固定的官方 DDS 子模块版本生成 `dds_calc.exe` 与 `dds_solve.exe`；当前 `postinstall` 不负责自动构建 Windows DDS。也可以通过上述两个环境变量指定自行构建的程序；`.exe`、`.lib`、`.obj` 等本机构建产物不进入版本控制。
 
 ## 三种对局模式
 

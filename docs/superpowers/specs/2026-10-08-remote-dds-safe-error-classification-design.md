@@ -68,6 +68,14 @@ Actual throw sites map as follows:
 | Environment/report output write failure after valid inputs | `LOCAL_IO_FAILED` |
 | Unrelated internal failure, including an unbranded or unknown error code | `UNKNOWN` |
 
+The deployment process boundary also classifies failures from the Wrangler deploy,
+secret-upload, and version commands as `API_REQUEST_FAILED`, or as
+`API_AUTH_OR_PERMISSION` when the command diagnostics contain an authentication or
+permission signal. An API diagnostic wrapped by an ownership refusal retains its
+original public category at this boundary; the internal ownership-refusal type and
+all fail-closed cleanup behavior remain unchanged. Direct library callers still
+receive the original command or ownership error rather than a public renderer type.
+
 Classification changes only the type of a thrown failure. It must not return absence for an error, broaden the explicit `10007` predicate, swallow or retag `OwnershipRefusal`, convert a failure into `null`, or authorize any deployment/deletion. The shared cleanup module retains its existing ownership-refusal flow.
 
 ## Testing
