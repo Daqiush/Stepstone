@@ -1097,6 +1097,109 @@ test('temporary configuration removes production routes and rejects persisted te
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test('shared timeout helper exports bounded deadlines and rejects unsafe timeout values locally', async () => {
+  const timeouts = await import('../scripts/remote-dds-timeouts.mjs');
+  assert.equal(timeouts.MANAGEMENT_API_TIMEOUT_MS, 30_000);
+  assert.equal(timeouts.ENDPOINT_PROBE_TIMEOUT_MS, 15_000);
+  for (const timeoutMs of [undefined, null, '100', 0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 2_147_483_648]) {
+    assert.throws(() => timeouts.deadlineSignal({ timeoutMs }), /positive safe integer|supported timeout/i);
+  }
+});
+
+test('shared timeout helper composes caller cancellation and classifies timeouts structurally', async () => {
+  const { deadlineSignal, isTimeoutError } = await import('../scripts/remote-dds-timeouts.mjs');
+  const caller = new AbortController();
+  const composed = deadlineSignal({ signal: caller.signal, timeoutMs: 1_000 });
+  caller.abort(new DOMException('caller-private-marker', 'AbortError'));
+  assert.equal(composed.aborted, true);
+  assert.equal(composed.reason, caller.signal.reason);
+  assert.equal(isTimeoutError(composed.reason), false);
+
+  const timeout = deadlineSignal({ timeoutMs: 1 });
+  await new Promise((resolve, reject) => {
+    const keepAlive = setTimeout(() => reject(new Error('deadline did not abort')), 1_000);
+    timeout.addEventListener('abort', () => { clearTimeout(keepAlive); resolve(); }, { once: true });
+  });
+  assert.equal(timeout.aborted, true);
+  assert.equal(isTimeoutError(timeout.reason), true);
+  assert.equal(isTimeoutError(Object.assign(new Error('private-marker'), { code: 'ETIMEDOUT' })), true);
+  assert.equal(isTimeoutError(Object.assign(new Error('private-marker'), { name: 'AbortError', cause: timeout.reason })), true);
+  assert.equal(isTimeoutError(new Error('timeout private-marker')), false);
+  assert.equal(isTimeoutError(new DOMException('private-marker', 'AbortError')), false);
+});
+
+test('every shared management request receives a composed abort signal', async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs');
+  const identity = await ciIdentity();
+  let present = false;
+  const calls = [];
+  const fetchImpl = async (url, init = {}) => {
+    calls.push({ url, signal: init.signal });
+    const path = new URL(url).pathname;
+    if (path.endsWith(`/workers/scripts/${identity.workerName}`)) return present ? response({}) : notFound();
+    if (path.endsWith('/workers/workers')) return response(page(present ? [{ id: WORKER_ID, name: identity.workerName }] : []));
+    if (path.endsWith('/workers/scripts-search')) return response(page(present ? [{ script_name: identity.workerName }] : []));
+    if (path.endsWith('/versions')) return response(versionPage([{ id: 'deployed-v1' }]));
+    if (path.endsWith('/versions/deployed-v1')) return response(versionDetail(identity));
+    if (init.method === 'DELETE' && path.endsWith('/subdomain')) {
+      return response({ success: true, result: { enabled: false, previews_enabled: false }, errors: [], messages: [] });
+    }
+    if (init.method === 'DELETE' && path.endsWith(`/workers/workers/${WORKER_ID}`)) return response({ success: true });
+    throw new Error('Unexpected test request');
+  };
+  const options = { accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName, fetchImpl };
+
+  const assertOperationSignals = async (operation) => {
+    const start = calls.length;
+    await operation();
+    const operationCalls = calls.slice(start);
+    assert.ok(operationCalls.length > 0);
+    assert.ok(operationCalls.every(({ signal }) => signal instanceof AbortSignal));
+  };
+
+  await assertOperationSignals(() => api.confirmExactAbsence(options));
+  present = true;
+  let snapshot;
+  await assertOperationSignals(async () => {
+    snapshot = await api.readOwnershipSnapshot({ ...options, ownershipTag: identity.ownershipTag });
+  });
+  await assertOperationSignals(() => api.disableWorkersDevSubdomain({ ...options, worker: snapshot.worker }));
+  await assertOperationSignals(() => api.deleteExactWorker({ ...options, worker: snapshot.worker }));
+});
+
+test('management API safely brands caller aborts and internal request deadlines', async () => {
+  const api = await import('../scripts/cloudflare-temporary-worker-api.mjs');
+  const timeouts = await import('../scripts/remote-dds-timeouts.mjs');
+  const errors = await import('../scripts/remote-dds-public-errors.mjs');
+  const identity = await ciIdentity();
+  const privateMarker = 'arbitrary-fetch-error-marker-must-not-leak';
+  const abortAwareFetch = async (url, { signal }) => new Promise((resolve, reject) => {
+    const keepAlive = setTimeout(() => reject(new Error('request deadline did not abort')), 1_000);
+    const fail = () => { clearTimeout(keepAlive); reject(new Error(privateMarker, { cause: signal.reason })); };
+    if (signal.aborted) fail();
+    else signal.addEventListener('abort', fail, { once: true });
+  });
+  const base = { accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName, fetchImpl: abortAwareFetch };
+
+  const caller = new AbortController();
+  caller.abort(new DOMException(privateMarker, 'AbortError'));
+  await assert.rejects(() => api.confirmExactAbsence({ ...base, signal: caller.signal }), (error) => {
+    assert.equal(errors.publicDiagnosticCode(error), 'API_REQUEST_FAILED');
+    assert.equal(timeouts.isTimeoutError(error), false);
+    assert.equal(errors.renderRemoteDdsFailure(error), 'Remote DDS deployment failed [API_REQUEST_FAILED].');
+    assert.equal(errors.renderRemoteDdsFailure(error).includes(privateMarker), false);
+    return true;
+  });
+
+  await assert.rejects(() => api.confirmExactAbsence({ ...base, requestTimeoutMs: 1 }), (error) => {
+    assert.equal(errors.publicDiagnosticCode(error), 'API_REQUEST_FAILED');
+    assert.equal(timeouts.isTimeoutError(error), true);
+    assert.equal(errors.renderRemoteDdsFailure(error), 'Remote DDS deployment failed [API_REQUEST_FAILED].');
+    assert.equal(errors.renderRemoteDdsFailure(error).includes(privateMarker), false);
+    return true;
+  });
+});
+
 test('shared mutation API disables only the exact workers.dev subdomain and deletes only the verified immutable object', async () => {
   const api = await import('../scripts/cloudflare-temporary-worker-api.mjs'); const identity = await ciIdentity(); const calls = [];
   const options = { accountId: 'acct', apiToken: TOKEN, temporaryWorkerName: identity.workerName, fetchImpl: async (url, init = {}) => {

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { canonicalJson } from './remote-dds-soak-state.mjs';
 import { diagnostic, publicDiagnosticCode } from './remote-dds-public-errors.mjs';
+import { deadlineSignal, MANAGEMENT_API_TIMEOUT_MS } from './remote-dds-timeouts.mjs';
 
 // Mutation authority comes from a complete exact-object read, never a caller's
 // name-only object or a serialized artifact masquerading as an API observation.
@@ -16,11 +17,11 @@ function inputs(options = {}) {
   if (options === null || typeof options !== 'object' || Array.isArray(options)) {
     throw diagnostic('REQUIRED_CONFIG_MISSING', new Error('Cloudflare API requires account and token'));
   }
-  const { accountId, apiToken, fetchImpl = fetch } = options;
+  const { accountId, apiToken, fetchImpl = fetch, signal, requestTimeoutMs = MANAGEMENT_API_TIMEOUT_MS } = options;
   if (typeof accountId !== 'string' || !accountId || typeof apiToken !== 'string' || !apiToken) {
     throw diagnostic('REQUIRED_CONFIG_MISSING', new Error('Cloudflare API requires account and token'));
   }
-  return { base: `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/workers`, name: temporaryName(options.temporaryWorkerName), fetchImpl, headers: { authorization: `Bearer ${apiToken}` } };
+  return { base: `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/workers`, name: temporaryName(options.temporaryWorkerName), fetchImpl, signal, requestTimeoutMs, headers: { authorization: `Bearer ${apiToken}` } };
 }
 function invalidResponse(message, cause) { return diagnostic('API_RESPONSE_INVALID', new Error(message, { cause })); }
 function requestFailed(message, cause) { return diagnostic('API_REQUEST_FAILED', new Error(message, { cause })); }
@@ -49,7 +50,10 @@ function authOrPermissionEnvelope(payload) {
 }
 async function fetchResponse(client, url, options = {}) {
   let response;
-  try { response = await client.fetchImpl(url, { ...options, headers: { ...client.headers, ...options.headers } }); }
+  try {
+    const signal = deadlineSignal({ signal: client.signal, timeoutMs: client.requestTimeoutMs });
+    response = await client.fetchImpl(url, { ...options, signal, headers: { ...client.headers, ...options.headers } });
+  }
   catch (error) {
     if (error instanceof OwnershipRefusal) throw error;
     throw requestFailed('Cloudflare API request failed', error);
