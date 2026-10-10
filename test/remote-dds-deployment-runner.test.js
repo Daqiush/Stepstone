@@ -5,6 +5,25 @@ const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const test = require('node:test');
 
+const RETRYABLE_WINDOWS_REMOVE_ERRORS = new Set(['EBUSY', 'ENOTEMPTY', 'EPERM']);
+
+function removeTreeAfterWindowsChildExit(path, {
+  remove = rmSync,
+  sleep = (delayMs) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs),
+  maxRetries = 10,
+  retryDelay = 100,
+} = {}) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      remove(path, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (!RETRYABLE_WINDOWS_REMOVE_ERRORS.has(error?.code) || attempt >= maxRetries) throw error;
+      sleep(retryDelay * (attempt + 1));
+    }
+  }
+}
+
 function repo() {
   const root = mkdtempSync(join(tmpdir(), 'remote-dds-deployment-'));
   mkdirSync(join(root, 'workers/vendor/bridge-dds'), { recursive: true });
@@ -891,11 +910,31 @@ test('a real timed-out synchronous Wrangler child returns control with a safe st
     assert.ok(Date.now() - started < 2_000, 'timed-out synchronous child did not return control promptly');
   } finally {
     // On hosted Windows runners, killing a timed-out .cmd process can leave its
-    // descendant alive just long enough to hold the batch file open. Node's
-    // recursive remover retries EBUSY/EPERM/ENOTEMPTY with linear backoff.
-    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-    rmSync(f.root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    // descendant alive just long enough to hold its command or cwd open.
+    removeTreeAfterWindowsChildExit(dir);
+    removeTreeAfterWindowsChildExit(f.root);
   }
+});
+
+test('Windows child cleanup retries only transient directory locks with bounded linear backoff', () => {
+  const delays = [];
+  let attempts = 0;
+  removeTreeAfterWindowsChildExit('fixture', {
+    remove(path, options) {
+      assert.equal(path, 'fixture');
+      assert.deepEqual(options, { recursive: true, force: true });
+      attempts++;
+      if (attempts < 3) throw Object.assign(new Error('locked'), { code: attempts === 1 ? 'EBUSY' : 'EPERM' });
+    },
+    sleep(delayMs) { delays.push(delayMs); },
+  });
+  assert.equal(attempts, 3);
+  assert.deepEqual(delays, [100, 200]);
+
+  assert.throws(() => removeTreeAfterWindowsChildExit('fixture', {
+    remove() { throw Object.assign(new Error('unexpected'), { code: 'EIO' }); },
+    sleep() { throw new Error('must not sleep'); },
+  }), { code: 'EIO' });
 });
 
 test('a new collision between persisted preflight and deployment causes zero mutation', async () => {
