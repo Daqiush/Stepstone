@@ -11,6 +11,7 @@ const YAML = require('yaml');
 const ROOT = resolve(__dirname, '..');
 const WORKFLOW_PATH = resolve(ROOT, '.github/workflows/remote-dds-soak.yml');
 const CLEANUP_WORKFLOW_PATH = resolve(ROOT, '.github/workflows/remote-dds-soak-cleanup.yml');
+const WINDOWS_DDS_WORKFLOW_PATH = resolve(ROOT, '.github/workflows/windows-dds-ci.yml');
 const WINDOWS_DDS_BUILD_PATH = resolve(ROOT, 'scripts/build-windows-dds.ps1');
 const CHECKOUT = 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1';
 const SETUP_NODE = 'actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1';
@@ -36,6 +37,12 @@ function loadCleanupWorkflow() {
   const source = readFileSync(CLEANUP_WORKFLOW_PATH, 'utf8');
   const workflow = YAML.parse(source);
   assert.ok(workflow && typeof workflow === 'object' && !Array.isArray(workflow), 'cleanup workflow must parse as a mapping');
+  return { source, workflow };
+}
+function loadWindowsDdsWorkflow() {
+  const source = readFileSync(WINDOWS_DDS_WORKFLOW_PATH, 'utf8');
+  const workflow = YAML.parse(source);
+  assert.ok(workflow && typeof workflow === 'object' && !Array.isArray(workflow), 'Windows DDS workflow must parse as a mapping');
   return { source, workflow };
 }
 function steps(job) {
@@ -110,6 +117,35 @@ test('all remote soak jobs use the Wrangler-supported Node.js 22 runtime', () =>
 test('embedded workflow contract harnesses execute under PowerShell 7', () => {
   assert.equal(POWERSHELL, 'pwsh');
   assert.doesNotMatch(readFileSync(__filename, 'utf8'), /powershell\.exe/i);
+});
+
+test('no-secret Windows DDS gate runs the exact native and focused verification sequence', () => {
+  const { source, workflow } = loadWindowsDdsWorkflow();
+  assert.equal(workflow.name, 'Windows DDS CI');
+  assert.deepEqual(Object.keys(workflow.on).sort(), ['pull_request', 'push']);
+  assert.deepEqual(workflow.on.push, { branches: ['master'] });
+  assert.equal(workflow.on.pull_request, null);
+  assert.deepEqual(workflow.permissions, { contents: 'read' });
+  assert.deepEqual(Object.keys(workflow.jobs), ['verify']);
+
+  const job = workflow.jobs.verify;
+  assert.equal(job['runs-on'], 'windows-2022');
+  assert.equal(job['timeout-minutes'], 30);
+  assert.equal(job.permissions, undefined);
+  const checkout = steps(job).find((step) => step.uses === CHECKOUT);
+  assert.equal(checkout?.with?.submodules, 'recursive');
+  const setup = steps(job).find((step) => step.uses === SETUP_NODE);
+  assert.equal(setup?.with?.['node-version'], 22);
+  for (const step of steps(job)) if (step.uses !== undefined) assert.ok(new Set([CHECKOUT, SETUP_NODE]).has(step.uses), `unapproved native gate action: ${step.uses}`);
+
+  assert.deepEqual(steps(job).filter((step) => step.run !== undefined).map((step) => runText(step).trim()), [
+    'npm ci',
+    './scripts/build-windows-dds.ps1',
+    'npm run test:dds:smoke',
+    'npm run test:commands',
+    'node --test test/remote-dds-deployment-runner.test.js test/remote-dds-cleanup.test.js test/remote-dds-workflow-contract.test.js test/assert-remote-soak-prerequisites.test.js test/gitattributes-contract.test.js',
+  ]);
+  assert.doesNotMatch(source, /secrets\.|CLOUDFLARE_|DDS_REMOTE_TEST_KEY|wrangler\s+deploy|prepare-remote-dds-deployment|cleanup-remote-dds-deployment|deleteExactWorker|disableWorkersDevSubdomain/i);
 });
 
 test('native DDS jobs initialize the pinned submodule and build both CLI baselines before use', () => {
