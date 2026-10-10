@@ -14,6 +14,57 @@ const notFound = () => response({ success: false, errors: [{ code: 10007, messag
 const page = (items, number = 1, total = 1, capacity = 100, count = items.length) => ({ success: true, result: items, result_info: { page: number, total_pages: total, per_page: capacity, count: items.length, total_count: count } });
 const versionPage = (items, ...args) => ({ ...page(items, ...args), result: { items } });
 
+const NEW_CLEANUP_DIAGNOSTICS = [
+  'CLEANUP_IDENTITY_INVALID',
+  'CLEANUP_OWNERSHIP_UNVERIFIED',
+  'CLEANUP_ENDPOINT_UNVERIFIED',
+  'CLEANUP_SUBDOMAIN_DISABLE_FAILED',
+  'CLEANUP_DELETE_FAILED',
+  'CLEANUP_ABSENCE_UNVERIFIED',
+  'CLEANUP_RESULT_WRITE_FAILED',
+  'CLEANUP_OWNERSHIP_READ_TIMEOUT',
+  'CLEANUP_SUBDOMAIN_LOOKUP_TIMEOUT',
+  'CLEANUP_SUBDOMAIN_DISABLE_TIMEOUT',
+  'CLEANUP_ENDPOINT_PROBE_TIMEOUT',
+  'CLEANUP_REVERIFY_TIMEOUT',
+  'CLEANUP_DELETE_TIMEOUT',
+  'CLEANUP_FINAL_ABSENCE_TIMEOUT',
+];
+
+test('every staged cleanup and timeout diagnostic has an exact leak-free public line', async () => {
+  const errors = await import('../scripts/remote-dds-public-errors.mjs');
+  const privateMarkers = [
+    'cleanup-account-id-private-marker',
+    'cleanup-api-token-private-marker',
+    'cleanup-test-key-private-marker',
+    'C:\\private\\remote-dds\\cleanup-marker',
+    'https://cleanup-private-marker.example.invalid/worker?key=secret',
+    'cleanup-stack-frame-private-marker',
+    'CLEANUP_ARBITRARY_INTERNAL_CODE_MARKER',
+    'raw cleanup deletion stage marker',
+  ];
+  const cause = new Error(privateMarkers.join(' '));
+  cause.stack = privateMarkers.join('\n');
+  Object.assign(cause, {
+    accountId: privateMarkers[0], token: privateMarkers[1], testKey: privateMarkers[2],
+    path: privateMarkers[3], url: privateMarkers[4], code: privateMarkers[6], stage: privateMarkers[7],
+  });
+
+  for (const code of NEW_CLEANUP_DIAGNOSTICS) {
+    const error = errors.diagnostic(code, cause);
+    assert.equal(errors.publicDiagnosticCode(error), code);
+    const output = errors.renderRemoteDdsCleanupFailure(error);
+    assert.equal(output, `Remote DDS cleanup failed [${code}].`);
+    for (const marker of privateMarkers) assert.equal(output.includes(marker), false, `${code}: ${marker}`);
+  }
+
+  const forged = { code: 'CLEANUP_DELETE_FAILED', cause };
+  assert.equal(errors.renderRemoteDdsCleanupFailure(forged), 'Remote DDS cleanup failed [UNKNOWN].');
+  for (const marker of privateMarkers) {
+    assert.equal(errors.renderRemoteDdsCleanupFailure(forged).includes(marker), false, marker);
+  }
+});
+
 async function fixture() {
   const identityApi = await import('../scripts/remote-dds-ci-identity.mjs');
   const { canonicalJson } = await import('../scripts/remote-dds-soak-state.mjs');

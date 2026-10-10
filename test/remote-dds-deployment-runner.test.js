@@ -35,6 +35,30 @@ const CONTEXT_ARGS = ['--repository', CONTEXT.repository, '--workflow', CONTEXT.
   '--run-attempt', CONTEXT.runAttempt, '--commit-sha', CONTEXT.commitSha];
 const SECRET_MARKERS = ['account-marker-must-not-leak', 'token-marker-must-not-leak', 'worker-name-marker-must-not-leak',
   'https://url-marker-must-not-leak.example', 'body-marker-must-not-leak', 'stack-marker-must-not-leak'];
+const NEW_DEPLOYMENT_DIAGNOSTICS = [
+  'WRANGLER_DEPLOY_FAILED',
+  'DEPLOYED_OWNERSHIP_UNVERIFIED',
+  'SECRET_UPLOAD_FAILED',
+  'POST_SECRET_OWNERSHIP_UNVERIFIED',
+  'SUBDOMAIN_LOOKUP_FAILED',
+  'IMMUTABLE_VERSION_UNVERIFIED',
+  'ENDPOINT_VERIFICATION_FAILED',
+  'TEMP_DIRECTORY_CLEANUP_FAILED',
+  'PREFLIGHT_TIMEOUT',
+  'WRANGLER_DEPLOY_TIMEOUT',
+  'DEPLOYED_OWNERSHIP_TIMEOUT',
+  'SECRET_UPLOAD_TIMEOUT',
+  'POST_SECRET_OWNERSHIP_TIMEOUT',
+  'SUBDOMAIN_LOOKUP_TIMEOUT',
+  'IMMUTABLE_VERSION_TIMEOUT',
+  'ENDPOINT_VERIFICATION_TIMEOUT',
+];
+const NEW_ROLLBACK_DIAGNOSTICS = [
+  'ROLLBACK_DISCOVERY_FAILED',
+  'ROLLBACK_CLEANUP_FAILED',
+  'ROLLBACK_DISCOVERY_TIMEOUT',
+  'ROLLBACK_CLEANUP_TIMEOUT',
+];
 function deploymentEnvironment(overrides = {}) {
   const env = { ...process.env, CLOUDFLARE_ACCOUNT_ID: SECRET_MARKERS[0], CLOUDFLARE_API_TOKEN: SECRET_MARKERS[1], DDS_REMOTE_TEST_KEY: KEY };
   for (const [key, value] of Object.entries(overrides)) {
@@ -49,6 +73,50 @@ function assertDeploymentCliFailure(result, code, markers = SECRET_MARKERS) {
   assert.equal(result.stderr, `Remote DDS deployment failed [${code}].\n`);
   for (const marker of markers) assert.equal(`${result.stdout}${result.stderr}`.includes(marker), false, marker);
 }
+
+test('every staged deployment, timeout, and rollback diagnostic has an exact leak-free public line', async () => {
+  const errors = await import('../scripts/remote-dds-public-errors.mjs');
+  const privateMarkers = [
+    'account-id-private-marker',
+    'api-token-private-marker',
+    'test-key-private-marker',
+    'C:\\private\\remote-dds\\deployment-marker',
+    'https://private-marker.example.invalid/worker?key=secret',
+    'stack-frame-private-marker',
+    'ARBITRARY_INTERNAL_CODE_MARKER',
+    'raw wrangler deployment stage marker',
+  ];
+  const cause = new Error(privateMarkers.join(' '));
+  cause.stack = privateMarkers.join('\n');
+  Object.assign(cause, {
+    accountId: privateMarkers[0], token: privateMarkers[1], testKey: privateMarkers[2],
+    path: privateMarkers[3], url: privateMarkers[4], code: privateMarkers[6], stage: privateMarkers[7],
+  });
+
+  for (const code of NEW_DEPLOYMENT_DIAGNOSTICS) {
+    const error = errors.diagnostic(code, cause);
+    assert.equal(errors.publicDiagnosticCode(error), code);
+    const output = errors.renderRemoteDdsFailure(error);
+    assert.equal(output, `Remote DDS deployment failed [${code}].`);
+    for (const marker of privateMarkers) assert.equal(output.includes(marker), false, `${code}: ${marker}`);
+  }
+
+  for (const code of NEW_ROLLBACK_DIAGNOSTICS) {
+    const error = errors.diagnostic(code, cause);
+    assert.equal(errors.publicDiagnosticCode(error), code);
+    const output = errors.renderRemoteDdsRollbackFailure(error);
+    assert.equal(output, `Remote DDS rollback also failed [${code}].`);
+    for (const marker of privateMarkers) assert.equal(output.includes(marker), false, `${code}: ${marker}`);
+  }
+
+  const forged = { code: 'ROLLBACK_CLEANUP_FAILED', cause };
+  assert.equal(errors.renderRemoteDdsFailure(forged), 'Remote DDS deployment failed [UNKNOWN].');
+  assert.equal(errors.renderRemoteDdsRollbackFailure(forged), 'Remote DDS rollback also failed [UNKNOWN].');
+  for (const renderer of [errors.renderRemoteDdsFailure, errors.renderRemoteDdsRollbackFailure]) {
+    const output = renderer(forged);
+    for (const marker of privateMarkers) assert.equal(output.includes(marker), false, marker);
+  }
+});
 function deploymentArgs(mode, input, out) { return [mode, mode === '--preflight' ? '--identity' : input, mode === '--preflight' ? input : undefined,
   ...CONTEXT_ARGS, '--out', out].filter((value) => value !== undefined); }
 const page = (items, number = 1, total = 1, perPage = 100, totalCount = (total - 1) * perPage + items.length) => ({ success: true, result: items,
