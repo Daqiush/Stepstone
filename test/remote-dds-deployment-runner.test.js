@@ -84,7 +84,8 @@ async function deploymentFixture(overrides = {}) {
     if (args[0] === '--version') return '4.33.0';
     throw new Error('Unexpected test command');
   };
-  const options = { root, accountId: 'acct', apiToken: TOKEN, remoteTestKey: KEY, context: CONTEXT, identity, fetchImpl, execFile, sleepImpl: async () => {}, ...overrides };
+  const options = { root, accountId: 'acct', apiToken: TOKEN, remoteTestKey: KEY, context: CONTEXT, identity, fetchImpl, execFile,
+    wrangler: 'wrangler-test', sleepImpl: async () => {}, ...overrides };
   const preDeploymentIdentity = await mod.preflightTemporaryWorkerIdentity({ ...options, now: () => new Date('2026-10-01T00:00:00.000Z') });
   return { mod, root, identity, events, options: { ...options, preDeploymentIdentity }, fetchImpl, execFile,
     setDeployed: (value) => { deployed = value; }, isDeleted: () => deleted };
@@ -581,6 +582,24 @@ test('Wrangler uses the same explicit account and source token as the collision 
       assert.equal(options.env?.CLOUDFLARE_API_TOKEN, TOKEN);
       return f.execFile(command, args, options);
     } });
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('default Wrangler invocation uses the project-local CLI for deploy, secret, and version', async () => {
+  const f = await deploymentFixture(); const calls = [];
+  const cliPath = join(__dirname, '../node_modules/wrangler/bin/wrangler.js');
+  try {
+    await f.mod.deployAndVerifyWorkers({ ...f.options, wrangler: undefined, execFile: (command, args, options) => {
+      calls.push({ command, args: [...args] });
+      const logicalArgs = args[0] === cliPath && args[1] !== 'secret' ? args.slice(1) : args;
+      return f.execFile(command, logicalArgs, options);
+    } });
+    assert.deepEqual(calls.map(({ command }) => command), [process.execPath, process.execPath, process.execPath]);
+    assert.deepEqual(calls.map(({ args }) => args.slice(0, 2)), [
+      [cliPath, 'deploy'],
+      [cliPath, 'secret'],
+      [cliPath, '--version'],
+    ]);
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 
@@ -1162,7 +1181,7 @@ test('preflight and deploy CLI forms atomically persist secret-free records with
     writeFileSync(input, JSON.stringify(f.identity));
     const context = ['--repository', CONTEXT.repository, '--workflow', CONTEXT.workflow, '--run-id', CONTEXT.runId, '--run-attempt', CONTEXT.runAttempt, '--commit-sha', CONTEXT.commitSha];
     const env = { CLOUDFLARE_ACCOUNT_ID: 'acct', CLOUDFLARE_API_TOKEN: TOKEN, DDS_REMOTE_TEST_KEY: KEY };
-    const dependencies = { root: f.root, fetchImpl: f.fetchImpl, execFile: f.execFile };
+    const dependencies = { root: f.root, fetchImpl: f.fetchImpl, execFile: f.execFile, wrangler: f.options.wrangler };
     const identity = await f.mod.runDeploymentCli(['--preflight', '--identity', input, ...context, '--out', pre], env, dependencies);
     assert.deepEqual(JSON.parse(require('node:fs').readFileSync(pre, 'utf8')), identity);
     assert.equal(f.events.filter((e) => e.command).length, 0);

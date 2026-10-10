@@ -118,7 +118,7 @@ async function assertDeployedOwnership(options) {
   if (!snapshot || snapshot.versionEvidence.status !== 'PRESENT' || !snapshot.versionEvidence.versions.length) throw new OwnershipRefusal('Refusing mutation: deployed immutable Worker version ownership is absent');
   return snapshot;
 }
-export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImpl = fetch, wrangler = process.platform === 'win32' ? 'wrangler.cmd' : 'wrangler',
+export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImpl = fetch, wrangler,
   root = resolve(import.meta.dirname, '..'), accountId, apiToken, remoteTestKey, context, preDeploymentIdentity,
   sleepImpl = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)) }) {
   const trusted = trustedIdentity({ accountId, apiToken, context });
@@ -139,10 +139,14 @@ export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImp
     writeFileSync(configPath, configurationBytes, 'utf8');
     const childEnvironment = { ...process.env, CLOUDFLARE_ACCOUNT_ID: accountId, CLOUDFLARE_API_TOKEN: apiToken };
     delete childEnvironment.DDS_REMOTE_TEST_KEY;
-    const childOptions = { encoding: 'utf8', cwd: root, env: childEnvironment, ...(process.platform === 'win32' ? { shell: true } : {}), stdio: ['pipe', 'pipe', 'pipe'] };
+    const childOptions = { encoding: 'utf8', cwd: root, env: childEnvironment,
+      ...(process.platform === 'win32' && wrangler ? { shell: true } : {}), stdio: ['pipe', 'pipe', 'pipe'] };
+    const runWrangler = (args) => wrangler
+      ? execFile(wrangler, args, childOptions)
+      : execFile(process.execPath, [WRANGLER_CLI_PATH, ...args], childOptions);
     const deployArgs = ['deploy', '--config', configPath, '--tag=' + ownershipTag,
       '--var', 'DDS_REMOTE_TEST:true', '--var', 'DDS_DEPLOYMENT_BUILD_ID:' + buildId];
-    try { execFile(wrangler, deployArgs, childOptions); }
+    try { runWrangler(deployArgs); }
     catch (firstError) {
       if (!/\b10007\b/.test(String(firstError.message))) throwExternalCommandFailure(firstError);
       const partial = await readOwnershipSnapshot(apiOptions);
@@ -150,7 +154,7 @@ export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImp
       apiOptions.expectedWorkerId = partial.worker.id;
       await sleepImpl(2000);
       sameOwnershipSnapshot(await readOwnershipSnapshot(apiOptions), partial);
-      try { execFile(wrangler, deployArgs, childOptions); }
+      try { runWrangler(deployArgs); }
       catch (retryError) { throwExternalCommandFailure(retryError); }
     }
     const beforeSecret = await assertDeployedOwnership(apiOptions);
@@ -166,7 +170,7 @@ export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImp
     if (!subdomainResponse.ok || subdomain.success !== true || typeof subdomain.result?.subdomain !== 'string' || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(subdomain.result.subdomain)) throw new Error('Cloudflare did not verify the workers.dev subdomain');
     const workersDevUrl = 'https://' + temporaryWorkerName + '.' + subdomain.result.subdomain + '.workers.dev';
     let wranglerVersion;
-    try { wranglerVersion = String(execFile(wrangler, ['--version'], childOptions)).trim(); }
+    try { wranglerVersion = String(runWrangler(['--version'])).trim(); }
     catch (error) { throwExternalCommandFailure(error); }
     let verified;
     try {
