@@ -671,6 +671,227 @@ test('default Wrangler invocation uses the project-local CLI for deploy, secret,
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 
+test('every Wrangler invocation uses the shared bounded UTF-8 child options', async () => {
+  const f = await deploymentFixture(); const calls = [];
+  try {
+    await f.mod.deployAndVerifyWorkers({ ...f.options, execFile: (command, args, options) => {
+      calls.push({ args: [...args], options: { ...options } });
+      return f.execFile(command, args, options);
+    } });
+    const deploy = calls.find(({ args }) => args[0] === 'deploy');
+    const secret = calls.find(({ args }) => args[1] === 'secret');
+    const version = calls.find(({ args }) => args[0] === '--version');
+    for (const call of [deploy, secret, version]) {
+      assert.equal(call.options.encoding, 'utf8');
+      assert.equal(call.options.windowsHide, true);
+      assert.equal(call.options.killSignal, 'SIGTERM');
+      assert.equal(call.options.maxBuffer, 4 * 1024 * 1024);
+    }
+    assert.equal(deploy.options.timeout, 120_000);
+    assert.equal(secret.options.timeout, 120_000);
+    assert.equal(version.options.timeout, 15_000);
+    assert.equal(Object.hasOwn(deploy.options, 'input'), false);
+    assert.equal(secret.options.input, KEY + '\n');
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('direct subdomain lookup and workers.dev verification compose bounded request signals', async () => {
+  const f = await deploymentFixture(); const direct = [];
+  try {
+    await f.mod.deployAndVerifyWorkers({ ...f.options, fetchImpl: async (url, options = {}) => {
+      const parsed = new URL(url);
+      if (parsed.pathname.endsWith('/workers/subdomain') || parsed.hostname.endsWith('.workers.dev')) {
+        direct.push({ url, signal: options.signal });
+      }
+      return f.fetchImpl(url, options);
+    } });
+    assert.equal(direct.length, 2);
+    for (const request of direct) assert.equal(request.signal instanceof AbortSignal, true, request.url);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('temporary directory cleanup failure becomes primary only after otherwise successful deployment', async () => {
+  const f = await deploymentFixture();
+  try {
+    await assertDiagnostic(() => f.mod.deployAndVerifyWorkers({ ...f.options,
+      removeDir: () => { throw new Error('private-temp-path-marker'); },
+    }), 'TEMP_DIRECTORY_CLEANUP_FAILED');
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+for (const [label, configure, code] of [
+    ['deploy failure', (f) => ({ execFile: (command, args, options) => {
+      if (args[0] === 'deploy') throw new Error('private-deploy-marker');
+      return f.execFile(command, args, options);
+    } }), 'WRANGLER_DEPLOY_FAILED'],
+    ['deploy timeout', (f) => ({ execFile: (command, args, options) => {
+      if (args[0] === 'deploy') throw Object.assign(new Error('private-timeout-marker'), { code: 'ETIMEDOUT' });
+      return f.execFile(command, args, options);
+    } }), 'WRANGLER_DEPLOY_TIMEOUT'],
+    ['secret failure', (f) => ({ execFile: (command, args, options) => {
+      if (args[1] === 'secret') throw new Error('private-secret-marker');
+      return f.execFile(command, args, options);
+    } }), 'SECRET_UPLOAD_FAILED'],
+    ['secret timeout', (f) => ({ execFile: (command, args, options) => {
+      if (args[1] === 'secret') throw Object.assign(new Error('private-timeout-marker'), { code: 'ETIMEDOUT' });
+      return f.execFile(command, args, options);
+    } }), 'SECRET_UPLOAD_TIMEOUT'],
+    ['subdomain failure', (f) => ({ fetchImpl: async (url, options) => {
+      if (new URL(url).pathname.endsWith('/workers/subdomain')) throw new Error('private-subdomain-marker');
+      return f.fetchImpl(url, options);
+    } }), 'SUBDOMAIN_LOOKUP_FAILED'],
+    ['subdomain timeout', (f) => ({ fetchImpl: async (url, options) => {
+      if (new URL(url).pathname.endsWith('/workers/subdomain')) throw new DOMException('private-timeout-marker', 'TimeoutError');
+      return f.fetchImpl(url, options);
+    } }), 'SUBDOMAIN_LOOKUP_TIMEOUT'],
+    ['version failure', (f) => ({ execFile: (command, args, options) => {
+      if (args[0] === '--version') throw new Error('private-version-marker');
+      return f.execFile(command, args, options);
+    } }), 'IMMUTABLE_VERSION_UNVERIFIED'],
+    ['version timeout', (f) => ({ execFile: (command, args, options) => {
+      if (args[0] === '--version') throw Object.assign(new Error('private-timeout-marker'), { code: 'ETIMEDOUT' });
+      return f.execFile(command, args, options);
+    } }), 'IMMUTABLE_VERSION_TIMEOUT'],
+    ['endpoint failure', (f) => ({ fetchImpl: async (url, options) => {
+      if (new URL(url).hostname.endsWith('.workers.dev')) throw new Error('private-endpoint-marker');
+      return f.fetchImpl(url, options);
+    } }), 'ENDPOINT_VERIFICATION_FAILED'],
+    ['endpoint timeout', (f) => ({ fetchImpl: async (url, options) => {
+      if (new URL(url).hostname.endsWith('.workers.dev')) throw new DOMException('private-timeout-marker', 'TimeoutError');
+      return f.fetchImpl(url, options);
+    } }), 'ENDPOINT_VERIFICATION_TIMEOUT'],
+]) test('deployment stage classification: ' + label, async () => {
+  const f = await deploymentFixture();
+  try { await assertDiagnostic(() => f.mod.deployAndVerifyWorkers({ ...f.options, ...configure(f) }), code); }
+  finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('preflight and ownership reads map nested request deadlines to their current stages', async () => {
+  const identity = await ciIdentity(); const mod = await deployment();
+  await assertDiagnostic(() => mod.preflightTemporaryWorkerIdentity({ accountId: 'acct', apiToken: TOKEN, identity, context: CONTEXT,
+    fetchImpl: async () => { throw new DOMException('private-timeout-marker', 'TimeoutError'); },
+  }), 'PREFLIGHT_TIMEOUT');
+
+  for (const afterSecret of [false, true]) {
+    const f = await deploymentFixture(); let deployed = false, uploaded = false;
+    try {
+      await assertDiagnostic(() => f.mod.deployAndVerifyWorkers({ ...f.options,
+        execFile: (command, args, options) => {
+          if (args[0] === 'deploy') deployed = true;
+          if (args[1] === 'secret') uploaded = true;
+          return f.execFile(command, args, options);
+        },
+        fetchImpl: async (url, options) => {
+          const path = new URL(url).pathname;
+          if (deployed && uploaded === afterSecret && path.endsWith('/workers/workers')) {
+            throw new DOMException('private-timeout-marker', 'TimeoutError');
+          }
+          return f.fetchImpl(url, options);
+        },
+      }), afterSecret ? 'POST_SECRET_OWNERSHIP_TIMEOUT' : 'DEPLOYED_OWNERSHIP_TIMEOUT');
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  }
+});
+
+test('deployment failure stays primary while rollback is secondary and directory cleanup is suppressed', async () => {
+  const f = await deploymentFixture(); const dir = mkdtempSync(join(tmpdir(), 'remote-dds-precedence-'));
+  try {
+    const input = join(dir, 'predeployment.json'); writeFileSync(input, JSON.stringify(f.options.preDeploymentIdentity));
+    const out = join(dir, 'deployment.json'); let stderr = '', exitCode;
+    await f.mod.runDeploymentProcess(deploymentArgs('--deploy-from-identity', input, out),
+      { CLOUDFLARE_ACCOUNT_ID: 'acct', CLOUDFLARE_API_TOKEN: TOKEN, DDS_REMOTE_TEST_KEY: KEY }, {
+        root: f.root, fetchImpl: f.fetchImpl, wrangler: f.options.wrangler,
+        execFile: (command, args, options) => {
+          if (args[0] === 'deploy') { f.setDeployed(true); throw new Error('private-primary-marker'); }
+          return f.execFile(command, args, options);
+        },
+        cleanupImpl: async () => { throw new Error('private-rollback-marker'); },
+        removeDir: () => { throw new Error('private-directory-marker'); },
+      }, { error: (value) => { stderr += value; }, setExitCode: (value) => { exitCode = value; } });
+    assert.equal(exitCode, 1);
+    assert.equal(stderr, 'Remote DDS deployment failed [WRANGLER_DEPLOY_FAILED].\n' +
+      'Remote DDS rollback also failed [ROLLBACK_CLEANUP_FAILED].\n');
+    for (const marker of ['private-primary-marker', 'private-rollback-marker', 'private-directory-marker']) {
+      assert.equal(stderr.includes(marker), false);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('rollback cleanup timeout is secondary to the original deployment failure', async () => {
+  const f = await deploymentFixture(); const dir = mkdtempSync(join(tmpdir(), 'remote-dds-rollback-timeout-'));
+  try {
+    const input = join(dir, 'predeployment.json'); writeFileSync(input, JSON.stringify(f.options.preDeploymentIdentity)); let stderr = '';
+    await f.mod.runDeploymentProcess(deploymentArgs('--deploy-from-identity', input, join(dir, 'deployment.json')),
+      { CLOUDFLARE_ACCOUNT_ID: 'acct', CLOUDFLARE_API_TOKEN: TOKEN, DDS_REMOTE_TEST_KEY: KEY }, {
+        root: f.root, fetchImpl: f.fetchImpl, wrangler: f.options.wrangler,
+        execFile: (command, args, options) => {
+          if (args[0] === 'deploy') { f.setDeployed(true); throw new Error('private-primary-marker'); }
+          return f.execFile(command, args, options);
+        },
+        cleanupImpl: async () => { throw new DOMException('private-timeout-marker', 'TimeoutError'); },
+      }, { error: (value) => { stderr += value; }, setExitCode: () => {} });
+    assert.equal(stderr, 'Remote DDS deployment failed [WRANGLER_DEPLOY_FAILED].\n' +
+      'Remote DDS rollback also failed [ROLLBACK_CLEANUP_TIMEOUT].\n');
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('deployment failure suppresses directory cleanup failure when rollback succeeds', async () => {
+  const f = await deploymentFixture(); const dir = mkdtempSync(join(tmpdir(), 'remote-dds-directory-precedence-'));
+  try {
+    const input = join(dir, 'predeployment.json'); writeFileSync(input, JSON.stringify(f.options.preDeploymentIdentity));
+    let stderr = '';
+    await f.mod.runDeploymentProcess(deploymentArgs('--deploy-from-identity', input, join(dir, 'deployment.json')),
+      { CLOUDFLARE_ACCOUNT_ID: 'acct', CLOUDFLARE_API_TOKEN: TOKEN, DDS_REMOTE_TEST_KEY: KEY }, {
+        root: f.root, fetchImpl: f.fetchImpl, wrangler: f.options.wrangler,
+        execFile: (command, args, options) => {
+          if (args[0] === 'deploy') { f.setDeployed(true); throw new Error('private-primary-marker'); }
+          return f.execFile(command, args, options);
+        },
+        cleanupImpl: async () => ({ status: 'deleted' }),
+        removeDir: () => { throw new Error('private-directory-marker'); },
+      }, { error: (value) => { stderr += value; }, setExitCode: () => {} });
+    assert.equal(stderr, 'Remote DDS deployment failed [WRANGLER_DEPLOY_FAILED].\n');
+    assert.equal(stderr.includes('private-directory-marker'), false);
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(f.root, { recursive: true, force: true }); }
+});
+
+for (const [label, rollbackFailure, rollbackCode] of [
+  ['discovery failure', new Error('private-discovery-marker'), 'ROLLBACK_DISCOVERY_FAILED'],
+  ['discovery timeout', new DOMException('private-timeout-marker', 'TimeoutError'), 'ROLLBACK_DISCOVERY_TIMEOUT'],
+]) test('rollback classification: ' + label, async () => {
+  const f = await deploymentFixture(); const dir = mkdtempSync(join(tmpdir(), 'remote-dds-rollback-stage-')); let deployed = false;
+  try {
+    const input = join(dir, 'predeployment.json'); writeFileSync(input, JSON.stringify(f.options.preDeploymentIdentity)); let stderr = '';
+    await f.mod.runDeploymentProcess(deploymentArgs('--deploy-from-identity', input, join(dir, 'deployment.json')),
+      { CLOUDFLARE_ACCOUNT_ID: 'acct', CLOUDFLARE_API_TOKEN: TOKEN, DDS_REMOTE_TEST_KEY: KEY }, {
+        root: f.root, wrangler: f.options.wrangler,
+        execFile: (command, args, options) => {
+          if (args[0] === 'deploy') { deployed = true; f.setDeployed(true); throw new Error('private-primary-marker'); }
+          return f.execFile(command, args, options);
+        },
+        fetchImpl: async (url, options) => {
+          if (deployed && new URL(url).pathname.endsWith('/workers/workers')) throw rollbackFailure;
+          return f.fetchImpl(url, options);
+        },
+      }, { error: (value) => { stderr += value; }, setExitCode: () => {} });
+    assert.equal(stderr, 'Remote DDS deployment failed [WRANGLER_DEPLOY_FAILED].\n' +
+      `Remote DDS rollback also failed [${rollbackCode}].\n`);
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test('a real timed-out synchronous Wrangler child returns control with a safe stage code', { skip: process.platform !== 'win32' }, async () => {
+  const f = await deploymentFixture(); const dir = mkdtempSync(join(tmpdir(), 'remote-dds-child-timeout-'));
+  const command = join(dir, 'slow-wrangler.cmd');
+  writeFileSync(command, `@echo off\r\n"${process.execPath}" -e "setTimeout(()=>{},5000)"\r\n`, 'utf8');
+  const started = Date.now();
+  try {
+    await assertDiagnostic(() => f.mod.deployAndVerifyWorkers({ ...f.options, wrangler: command,
+      execFile: require('node:child_process').execFileSync, wranglerOperationTimeoutMs: 50,
+    }), 'WRANGLER_DEPLOY_TIMEOUT');
+    assert.ok(Date.now() - started < 2_000, 'timed-out synchronous child did not return control promptly');
+  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test('a new collision between persisted preflight and deployment causes zero mutation', async () => {
   const f = await deploymentFixture(); f.setDeployed(true);
   try {
@@ -699,7 +920,7 @@ for (const [label, tag, versions, deletes] of [
 ]) test('failed deployment partial cleanup: ' + label, async () => {
   const f = await deploymentFixture(); let attempts = 0, deleted = false;
   try {
-    await assert.rejects(() => f.mod.deployAndVerifyWorkers({ ...f.options,
+    await assertDiagnostic(() => f.mod.deployAndVerifyWorkers({ ...f.options,
       execFile: (command, args) => {
         assert.equal(args[0], 'deploy'); attempts++; f.setDeployed(true);
         throw new Error('Worker does not exist [code: 10007]');
@@ -712,7 +933,7 @@ for (const [label, tag, versions, deletes] of [
         if (url.endsWith('/versions/deployed-v1')) return response(versionDetail(f.identity, tag === 'matching' ? f.identity.ownershipTag : tag));
         return f.fetchImpl(url, options);
       },
-    }), deletes ? /10007/ : /ownership|tag|refus/i);
+    }), deletes ? 'WRANGLER_DEPLOY_FAILED' : 'DEPLOYED_OWNERSHIP_UNVERIFIED');
     assert.equal(attempts, deletes ? 2 : 1); assert.equal(deleted, deletes);
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
@@ -721,13 +942,13 @@ test('deployment refuses mismatched remote build/version evidence before generat
   for (const field of ['buildId', 'workerVersionId']) {
     const f = await deploymentFixture();
     try {
-      await assert.rejects(() => f.mod.deployAndVerifyWorkers({ ...f.options, fetchImpl: async (url, options) => {
+      await assertDiagnostic(() => f.mod.deployAndVerifyWorkers({ ...f.options, fetchImpl: async (url, options) => {
         if (new URL(url).hostname.endsWith('.workers.dev')) {
           const payload = await (await f.fetchImpl(url, options)).json(); payload.operationResult[field] = 'wrong-' + field;
           return response(payload);
         }
         return f.fetchImpl(url, options);
-      } }), /remote.*evidence|build|version/i);
+      } }), 'ENDPOINT_VERIFICATION_FAILED');
     } finally { rmSync(f.root, { recursive: true, force: true }); }
   }
 });
@@ -1024,7 +1245,7 @@ for (const [label, status, errors, expectedCode] of unsafeAbsenceCases) {
   test('placeholder cleanup is never authorized by ' + label, async () => {
     const f = await deploymentFixture(); let attempts = 0, deletes = 0, secrets = 0;
     try {
-      await assert.rejects(() => f.mod.deployAndVerifyWorkers({ ...f.options,
+      await assertDiagnostic(() => f.mod.deployAndVerifyWorkers({ ...f.options,
         execFile: (command, args) => {
           if (args[1] === 'secret') secrets++;
           attempts++; f.setDeployed(true); throw new Error('Worker does not exist [code: 10007]');
@@ -1037,7 +1258,7 @@ for (const [label, status, errors, expectedCode] of unsafeAbsenceCases) {
           if (path.endsWith('/workers/scripts-search')) return response(page([]));
           return f.fetchImpl(url, options);
         },
-      }), /ownership|refus|Cloudflare/i);
+      }), expectedCode);
       assert.equal(attempts, 1); assert.equal(secrets, 0); assert.equal(deletes, 0);
     } finally { rmSync(f.root, { recursive: true, force: true }); }
   });
@@ -1055,7 +1276,7 @@ test('an absent versions endpoint permits cleanup only for a current exact place
   for (const legacyExists of [false, true]) {
     const f = await deploymentFixture(); let deletes = 0;
     try {
-      await assert.rejects(() => f.mod.deployAndVerifyWorkers({ ...f.options,
+      await assertDiagnostic(() => f.mod.deployAndVerifyWorkers({ ...f.options,
         execFile: () => { f.setDeployed(true); throw new Error('Worker does not exist [code: 10007]'); },
         fetchImpl: async (url, options = {}) => {
           if (options.method === 'DELETE' && !url.endsWith('/subdomain')) deletes++;
@@ -1065,7 +1286,7 @@ test('an absent versions endpoint permits cleanup only for a current exact place
           if (!legacyExists && path.endsWith('/workers/scripts-search')) return response(page([]));
           return f.fetchImpl(url, options);
         },
-      }), legacyExists ? /ownership|placeholder|refus/i : /10007/);
+      }), legacyExists ? 'DEPLOYED_OWNERSHIP_UNVERIFIED' : 'WRANGLER_DEPLOY_FAILED');
       assert.equal(deletes, legacyExists ? 0 : 1);
     } finally { rmSync(f.root, { recursive: true, force: true }); }
   }
@@ -1074,14 +1295,14 @@ test('an absent versions endpoint permits cleanup only for a current exact place
 test('PRESENT empty versions with a legacy exact script cannot authorize retry or rollback cleanup', async () => {
   const f = await deploymentFixture(); let attempts = 0, deletes = 0;
   try {
-    await assert.rejects(() => f.mod.deployAndVerifyWorkers({ ...f.options,
+    await assertDiagnostic(() => f.mod.deployAndVerifyWorkers({ ...f.options,
       execFile: () => { attempts++; f.setDeployed(true); throw new Error('Worker does not exist [code: 10007]'); },
       fetchImpl: async (url, options = {}) => {
         if (options.method === 'DELETE') deletes++;
         if (new URL(url).pathname.endsWith('/versions')) return response(versionPage([]));
         return f.fetchImpl(url, options);
       },
-    }), /ownership|placeholder|refus/i);
+    }), 'DEPLOYED_OWNERSHIP_UNVERIFIED');
     assert.equal(attempts, 1); assert.equal(deletes, 0);
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
@@ -1368,7 +1589,7 @@ test('preflight and deploy CLI forms atomically persist secret-free records with
 test('partial cleanup refuses a replacement immutable object after a code-10007 retry', async () => {
   const f = await deploymentFixture(); let currentReads = 0, deletes = 0;
   try {
-    await assert.rejects(() => f.mod.deployAndVerifyWorkers({ ...f.options,
+    await assertDiagnostic(() => f.mod.deployAndVerifyWorkers({ ...f.options,
       execFile: () => { f.setDeployed(true); throw new Error('Worker does not exist [code: 10007]'); },
       fetchImpl: async (url, options = {}) => {
         const path = new URL(url).pathname;
@@ -1380,7 +1601,7 @@ test('partial cleanup refuses a replacement immutable object after a code-10007 
         if (path.endsWith('/versions')) return response(versionPage([]));
         return f.fetchImpl(url, options);
       },
-    }), /immutable.*(changed|mismatch)|replacement|refus/i);
+    }), 'DEPLOYED_OWNERSHIP_UNVERIFIED');
     assert.equal(deletes, 0);
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
@@ -1570,7 +1791,7 @@ for (const boundary of ['after secret', 'final detail', 'partial cleanup']) {
   for (const drift of ['ownership tag', 'script ETag', 'version config']) test('observed immutable metadata refuses ' + drift + ' drift at ' + boundary, async () => {
     const f = await deploymentFixture(); let detailReads = 0, attempts = 0, secrets = 0, deletes = 0, driftSeen = false, laterMutations = 0;
     try {
-      await assert.rejects(() => f.mod.deployAndVerifyWorkers({ ...f.options,
+      await assertDiagnostic(() => f.mod.deployAndVerifyWorkers({ ...f.options,
         execFile: (command, args, options) => {
           if (driftSeen && (args[0] === 'deploy' || args[1] === 'secret')) laterMutations++;
           if (args[0] === 'deploy') {
@@ -1597,7 +1818,8 @@ for (const boundary of ['after secret', 'final detail', 'partial cleanup']) {
           }
           return f.fetchImpl(url, options);
         },
-      }), /ownership|immutable|metadata|refus|changed/i);
+      }), boundary === 'partial cleanup' ? 'WRANGLER_DEPLOY_FAILED'
+        : boundary === 'after secret' ? 'POST_SECRET_OWNERSHIP_UNVERIFIED' : 'IMMUTABLE_VERSION_UNVERIFIED');
       assert.equal(driftSeen, true);
       assert.equal(detailReads, boundary === 'after secret' ? 2 : 3);
       assert.equal(attempts, boundary === 'partial cleanup' ? 2 : 1);
@@ -1611,7 +1833,7 @@ for (const boundary of ['after secret', 'final detail', 'partial cleanup']) {
 for (const drift of ['missing tag', 'foreign tag', 'script ETag', 'version config']) test('final exact-version detail refuses ' + drift + ' drift without cleanup', async () => {
   const f = await deploymentFixture(); let detailReads = 0, deletes = 0;
   try {
-    await assert.rejects(() => f.mod.deployAndVerifyWorkers({ ...f.options, fetchImpl: async (url, options = {}) => {
+    await assertDiagnostic(() => f.mod.deployAndVerifyWorkers({ ...f.options, fetchImpl: async (url, options = {}) => {
       if (options.method === 'DELETE') deletes++;
       if (new URL(url).pathname.endsWith('/versions/deployed-v1')) {
         detailReads++;
@@ -1623,7 +1845,7 @@ for (const drift of ['missing tag', 'foreign tag', 'script ETag', 'version confi
         }
       }
       return f.fetchImpl(url, options);
-    } }), /ownership|immutable|metadata|refus|changed/i);
+    } }), 'IMMUTABLE_VERSION_UNVERIFIED');
     assert.equal(deletes, 0);
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });

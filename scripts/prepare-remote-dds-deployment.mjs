@@ -9,12 +9,17 @@ import { writeReportCheckpoint } from './worker-dds-checkpoint.mjs';
 import { deriveCiIdentity, assertGithubContext, assertCiIdentity, createPreDeploymentIdentity, assertPreDeploymentIdentity, createDeploymentRecord, assertDeploymentRecord } from './remote-dds-ci-identity.mjs';
 import { readWorkerVersions, confirmExactAbsence, OwnershipRefusal, observeImmutableVersions, readOwnershipSnapshot, sameOwnershipSnapshot } from './cloudflare-temporary-worker-api.mjs';
 import { cleanupRemoteDdsDeployment } from './cleanup-remote-dds-deployment.mjs';
-import { diagnostic, publicDiagnosticCode, renderRemoteDdsFailure } from './remote-dds-public-errors.mjs';
+import { diagnostic, publicDiagnosticCode, renderRemoteDdsFailure, renderRemoteDdsRollbackFailure } from './remote-dds-public-errors.mjs';
+import { deadlineSignal, isTimeoutError, MANAGEMENT_API_TIMEOUT_MS, ENDPOINT_PROBE_TIMEOUT_MS } from './remote-dds-timeouts.mjs';
 
 export const DEPLOYMENT_MANIFEST_VERSION = 2;
 export const WASM_PATH = 'workers/vendor/bridge-dds/dds-worker.wasm';
 export const TEMPORARY_WORKER_PREFIX = 'ss-dds-soak-';
 const WRANGLER_CLI_PATH = resolve(import.meta.dirname, '../node_modules/wrangler/bin/wrangler.js');
+const WRANGLER_OPERATION_TIMEOUT_MS = 120_000;
+const WRANGLER_VERSION_TIMEOUT_MS = 15_000;
+const WRANGLER_MAX_BUFFER = 4 * 1024 * 1024;
+const ROLLBACK_FAILURES = new WeakMap();
 export function harnessPaths(root) {
   const sourceRoot = resolve(root, 'workers/src');
   if (!existsSync(sourceRoot)) throw new Error('Missing harness source directory: workers/src');
@@ -52,6 +57,33 @@ function classifyDeploymentBoundaryError(error) {
   if (error instanceof OwnershipRefusal) return preserveNestedDiagnostic(error);
   if (error instanceof ExternalCommandFailure) return diagnostic(externalCommandCode(error), error);
   return error;
+}
+function stagedDiagnostic(error, failureCode, timeoutCode, { preserveDiagnostic = true } = {}) {
+  if (isTimeoutError(error)) return diagnostic(timeoutCode, error);
+  if (preserveDiagnostic) {
+    const directCode = publicDiagnosticCode(error);
+    if (directCode !== 'UNKNOWN') return error;
+    const nested = preserveNestedDiagnostic(error);
+    if (nested !== error) return nested;
+  }
+  return diagnostic(failureCode, error);
+}
+async function deploymentStage(operation, failureCode, timeoutCode, options) {
+  try { return await operation(); }
+  catch (error) { throw stagedDiagnostic(error, failureCode, timeoutCode, options); }
+}
+function deploymentStageSync(operation, failureCode, timeoutCode, options) {
+  try { return operation(); }
+  catch (error) { throw stagedDiagnostic(error, failureCode, timeoutCode, options); }
+}
+function hasCause(error, Type) {
+  const seen = new Set();
+  for (let current = error; current && typeof current === 'object'; current = current.cause) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    if (current instanceof Type) return true;
+  }
+  return false;
 }
 function asset(root, path, label) {
   const absolute = resolve(root, path);
@@ -98,16 +130,17 @@ function trustedIdentity({ accountId, apiToken, context }) {
   if (!accountId || !apiToken) throw new Error('Temporary Workers preflight requires account and token');
   return deriveCiIdentity({ ...context, secret: apiToken });
 }
-export async function preflightTemporaryWorkerIdentity({ fetchImpl = fetch, accountId, apiToken, context, identity, now = () => new Date() }) {
+export async function preflightTemporaryWorkerIdentity({ fetchImpl = fetch, accountId, apiToken, context, identity, signal, now = () => new Date() }) {
   const trusted = trustedIdentity({ accountId, apiToken, context });
   const supplied = assertCiIdentity(identity, { context });
   if (canonicalJson(supplied) !== canonicalJson(trusted)) throw new Error('Predeployment identity does not match derived ownership');
-  await confirmExactAbsence({ fetchImpl, accountId, apiToken, temporaryWorkerName: trusted.workerName });
+  await deploymentStage(() => confirmExactAbsence({ fetchImpl, accountId, apiToken, temporaryWorkerName: trusted.workerName, signal }),
+    'API_REQUEST_FAILED', 'PREFLIGHT_TIMEOUT');
   return createPreDeploymentIdentity({ identity: trusted, noCollisionVerifiedAt: now().toISOString() });
 }
-export async function verifyWorkersDeployment({ fetchImpl = fetch, accountId, scriptName, apiToken, expectedVersionId, ownershipTag, wranglerVersion }) {
+export async function verifyWorkersDeployment({ fetchImpl = fetch, accountId, scriptName, apiToken, expectedVersionId, ownershipTag, wranglerVersion, signal }) {
   if (!accountId || !apiToken || !expectedVersionId || !wranglerVersion || !/^[A-Za-z0-9_-]{43}$/.test(ownershipTag ?? '')) throw new Error('Workers API verification requires account, script, token, version, ownership tag, and Wrangler version');
-  const result = await readWorkerVersions({ fetchImpl, accountId, apiToken, temporaryWorkerName: assertTemporaryWorkerName(scriptName), versionId: expectedVersionId });
+  const result = await readWorkerVersions({ fetchImpl, accountId, apiToken, temporaryWorkerName: assertTemporaryWorkerName(scriptName), versionId: expectedVersionId, signal });
   if (result.status !== 'PRESENT') throw new Error('Cloudflare immutable version is absent');
   const [version] = result.versions;
   if (version.ownershipTag !== ownershipTag) throw new Error('Immutable Worker version ownership tag does not match');
@@ -120,14 +153,19 @@ async function assertDeployedOwnership(options) {
 }
 export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImpl = fetch, wrangler,
   root = resolve(import.meta.dirname, '..'), accountId, apiToken, remoteTestKey, context, preDeploymentIdentity,
+  signal, removeDir = rmSync, cleanupImpl = cleanupRemoteDdsDeployment,
+  wranglerOperationTimeoutMs = WRANGLER_OPERATION_TIMEOUT_MS, wranglerVersionTimeoutMs = WRANGLER_VERSION_TIMEOUT_MS,
   sleepImpl = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)) }) {
   const trusted = trustedIdentity({ accountId, apiToken, context });
   const identity = assertPreDeploymentIdentity(preDeploymentIdentity, { trustedIdentity: trusted, context });
   if (!/^[A-Za-z0-9_-]{43}$/.test(remoteTestKey ?? '')) throw new Error('Remote test key must be a 32-byte base64url value');
+  for (const timeout of [wranglerOperationTimeoutMs, wranglerVersionTimeoutMs]) {
+    if (!Number.isSafeInteger(timeout) || timeout <= 0) throw new TypeError('Wrangler timeout must be a positive safe integer');
+  }
   const temporaryWorkerName = assertTemporaryWorkerName(trusted.workerName), ownershipTag = trusted.ownershipTag;
-  const apiOptions = { fetchImpl, accountId, apiToken, temporaryWorkerName, ownershipTag, observedVersions: new Map() };
+  const apiOptions = { fetchImpl, accountId, apiToken, temporaryWorkerName, ownershipTag, observedVersions: new Map(), signal };
   // A persisted no-collision record is evidence, not authority to choose a name.
-  await confirmExactAbsence(apiOptions);
+  await deploymentStage(() => confirmExactAbsence(apiOptions), 'API_REQUEST_FAILED', 'PREFLIGHT_TIMEOUT');
   const assets = deploymentAssets(root);
   const buildId = sha256(canonicalJson({ version: DEPLOYMENT_MANIFEST_VERSION, assets }));
   const configuration = createTemporaryWorkersConfig({ root, temporaryWorkerName });
@@ -135,68 +173,118 @@ export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImp
   const localConfigurationSha256 = sha256(configurationBytes);
   const configDir = mkdtempSync(join(tmpdir(), 'stepstone-dds-soak-'));
   const configPath = join(configDir, 'wrangler.json');
+  let result;
+  let primaryError;
+  let rollbackError;
+  let directoryError;
+  let mutationAttempted = false;
   try {
     writeFileSync(configPath, configurationBytes, 'utf8');
     const childEnvironment = { ...process.env, CLOUDFLARE_ACCOUNT_ID: accountId, CLOUDFLARE_API_TOKEN: apiToken };
     delete childEnvironment.DDS_REMOTE_TEST_KEY;
-    const childOptions = { encoding: 'utf8', cwd: root, env: childEnvironment,
-      ...(process.platform === 'win32' && wrangler ? { shell: true } : {}), stdio: ['pipe', 'pipe', 'pipe'] };
-    const runWrangler = (args) => wrangler
-      ? execFile(wrangler, args, childOptions)
-      : execFile(process.execPath, [WRANGLER_CLI_PATH, ...args], childOptions);
+    const childOptions = Object.freeze({ encoding: 'utf8', cwd: root, env: childEnvironment, windowsHide: true,
+      killSignal: 'SIGTERM', maxBuffer: WRANGLER_MAX_BUFFER, stdio: ['pipe', 'pipe', 'pipe'] });
+    const runWrangler = (args, { timeout, input, forceLocal = false } = {}) => {
+      const useLocal = forceLocal || !wrangler;
+      const command = useLocal ? process.execPath : wrangler;
+      const commandArgs = useLocal ? [WRANGLER_CLI_PATH, ...args] : args;
+      const options = { ...childOptions, timeout,
+        ...(!useLocal && process.platform === 'win32' ? { shell: true } : {}),
+        ...(input === undefined ? {} : { input }) };
+      return execFile(command, commandArgs, options);
+    };
     const deployArgs = ['deploy', '--config', configPath, '--tag=' + ownershipTag,
       '--var', 'DDS_REMOTE_TEST:true', '--var', 'DDS_DEPLOYMENT_BUILD_ID:' + buildId];
-    try { runWrangler(deployArgs); }
+    mutationAttempted = true;
+    try { runWrangler(deployArgs, { timeout: wranglerOperationTimeoutMs }); }
     catch (firstError) {
-      if (!/\b10007\b/.test(String(firstError.message))) throwExternalCommandFailure(firstError);
-      const partial = await readOwnershipSnapshot(apiOptions);
-      if (partial === null) throw firstError;
+      if (!/\b10007\b/.test(String(firstError.message))) {
+        throw stagedDiagnostic(firstError, 'WRANGLER_DEPLOY_FAILED', 'WRANGLER_DEPLOY_TIMEOUT');
+      }
+      const partial = await deploymentStage(() => readOwnershipSnapshot(apiOptions),
+        'DEPLOYED_OWNERSHIP_UNVERIFIED', 'DEPLOYED_OWNERSHIP_TIMEOUT');
+      if (partial === null) throw stagedDiagnostic(firstError, 'WRANGLER_DEPLOY_FAILED', 'WRANGLER_DEPLOY_TIMEOUT');
       apiOptions.expectedWorkerId = partial.worker.id;
       await sleepImpl(2000);
-      sameOwnershipSnapshot(await readOwnershipSnapshot(apiOptions), partial);
-      try { runWrangler(deployArgs); }
-      catch (retryError) { throwExternalCommandFailure(retryError); }
+      const reread = await deploymentStage(() => readOwnershipSnapshot(apiOptions),
+        'DEPLOYED_OWNERSHIP_UNVERIFIED', 'DEPLOYED_OWNERSHIP_TIMEOUT');
+      deploymentStageSync(() => sameOwnershipSnapshot(reread, partial),
+        'DEPLOYED_OWNERSHIP_UNVERIFIED', 'DEPLOYED_OWNERSHIP_TIMEOUT');
+      deploymentStageSync(() => runWrangler(deployArgs, { timeout: wranglerOperationTimeoutMs }),
+        'WRANGLER_DEPLOY_FAILED', 'WRANGLER_DEPLOY_TIMEOUT');
     }
-    const beforeSecret = await assertDeployedOwnership(apiOptions);
+    const beforeSecret = await deploymentStage(() => assertDeployedOwnership(apiOptions),
+      'DEPLOYED_OWNERSHIP_UNVERIFIED', 'DEPLOYED_OWNERSHIP_TIMEOUT');
     apiOptions.expectedWorkerId = beforeSecret.worker.id;
-    try {
-      execFile(process.execPath, [WRANGLER_CLI_PATH, 'secret', 'put', 'DDS_REMOTE_TEST_KEY', '--config', configPath],
-        { encoding: 'utf8', cwd: root, env: childEnvironment, input: remoteTestKey + '\n', stdio: ['pipe', 'pipe', 'pipe'] });
-    } catch (error) { throwExternalCommandFailure(error); }
-    const afterSecret = await assertDeployedOwnership(apiOptions);
+    deploymentStageSync(() => runWrangler(['secret', 'put', 'DDS_REMOTE_TEST_KEY', '--config', configPath],
+      { timeout: wranglerOperationTimeoutMs, input: remoteTestKey + '\n', forceLocal: true }),
+    'SECRET_UPLOAD_FAILED', 'SECRET_UPLOAD_TIMEOUT');
+    const afterSecret = await deploymentStage(() => assertDeployedOwnership(apiOptions),
+      'POST_SECRET_OWNERSHIP_UNVERIFIED', 'POST_SECRET_OWNERSHIP_TIMEOUT');
     const versions = afterSecret.versionEvidence.versions;
-    const subdomainResponse = await fetchImpl('https://api.cloudflare.com/client/v4/accounts/' + encodeURIComponent(accountId) + '/workers/subdomain', { headers: { authorization: 'Bearer ' + apiToken } });
-    const subdomain = await subdomainResponse.json();
-    if (!subdomainResponse.ok || subdomain.success !== true || typeof subdomain.result?.subdomain !== 'string' || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(subdomain.result.subdomain)) throw new Error('Cloudflare did not verify the workers.dev subdomain');
+    const subdomain = await deploymentStage(async () => {
+      const subdomainResponse = await fetchImpl('https://api.cloudflare.com/client/v4/accounts/' + encodeURIComponent(accountId) + '/workers/subdomain', {
+        headers: { authorization: 'Bearer ' + apiToken }, signal: deadlineSignal({ signal, timeoutMs: MANAGEMENT_API_TIMEOUT_MS }),
+      });
+      const payload = await subdomainResponse.json();
+      if (!subdomainResponse.ok || payload.success !== true || typeof payload.result?.subdomain !== 'string'
+          || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(payload.result.subdomain)) throw new Error('Cloudflare did not verify the workers.dev subdomain');
+      return payload;
+    }, 'SUBDOMAIN_LOOKUP_FAILED', 'SUBDOMAIN_LOOKUP_TIMEOUT');
     const workersDevUrl = 'https://' + temporaryWorkerName + '.' + subdomain.result.subdomain + '.workers.dev';
-    let wranglerVersion;
-    try { wranglerVersion = String(runWrangler(['--version'])).trim(); }
-    catch (error) { throwExternalCommandFailure(error); }
-    let verified;
-    try {
-      verified = await verifyWorkersDeployment({ fetchImpl, accountId, scriptName: temporaryWorkerName, apiToken, expectedVersionId: versions[0].id, ownershipTag, wranglerVersion });
-      const currentMetadata = { id: verified.versionId, ownershipTag: verified.ownershipTag, scriptETag: verified.scriptETag, versionConfigurationSha256: verified.versionConfigurationSha256 };
-      observeImmutableVersions([currentMetadata], apiOptions.observedVersions);
-    } catch (error) {
-      if (error instanceof OwnershipRefusal) throw error;
-      throw new OwnershipRefusal('Refusing mutation: final immutable version ownership metadata could not be verified', { cause: error });
-    }
+    const wranglerVersion = deploymentStageSync(() => String(runWrangler(['--version'], { timeout: wranglerVersionTimeoutMs })).trim(),
+      'IMMUTABLE_VERSION_UNVERIFIED', 'IMMUTABLE_VERSION_TIMEOUT');
+    const verified = await deploymentStage(async () => {
+      try {
+        const value = await verifyWorkersDeployment({ fetchImpl, accountId, scriptName: temporaryWorkerName, apiToken,
+          expectedVersionId: versions[0].id, ownershipTag, wranglerVersion, signal });
+        const currentMetadata = { id: value.versionId, ownershipTag: value.ownershipTag, scriptETag: value.scriptETag, versionConfigurationSha256: value.versionConfigurationSha256 };
+        observeImmutableVersions([currentMetadata], apiOptions.observedVersions);
+        return value;
+      } catch (error) {
+        if (error instanceof OwnershipRefusal) throw error;
+        throw new OwnershipRefusal('Refusing mutation: final immutable version ownership metadata could not be verified', { cause: error });
+      }
+    }, 'IMMUTABLE_VERSION_UNVERIFIED', 'IMMUTABLE_VERSION_TIMEOUT');
     const route = '/__dds/metrics', body = '{}';
-    const remote = await fetchImpl(workersDevUrl + route, { method: 'POST', body, headers: {
-      'content-type': 'application/json', 'x-dds-test-key': remoteTestKey, 'x-dds-run-id': systemRandomUUID(),
-      'x-dds-operation-id': 'deployment.verify.000001', 'x-dds-request-hash': requestHash(route, body), 'x-dds-shard': '0',
-    } });
-    const evidence = await remote.json();
-    if (!remote.ok || evidence?.operationResult?.buildId !== buildId || evidence?.operationResult?.workerVersionId !== verified.versionId) throw new Error('Remote deployment evidence did not verify the build and immutable version');
-    return assertVerifiedDeployment({ ...verified, workerId: afterSecret.worker.id, workersDevUrl, temporaryWorkerName, identity, localConfigurationSha256 });
+    await deploymentStage(async () => {
+      const remote = await fetchImpl(workersDevUrl + route, { method: 'POST', body,
+        signal: deadlineSignal({ signal, timeoutMs: ENDPOINT_PROBE_TIMEOUT_MS }), headers: {
+          'content-type': 'application/json', 'x-dds-test-key': remoteTestKey, 'x-dds-run-id': systemRandomUUID(),
+          'x-dds-operation-id': 'deployment.verify.000001', 'x-dds-request-hash': requestHash(route, body), 'x-dds-shard': '0',
+        } });
+      const evidence = await remote.json();
+      if (!remote.ok || evidence?.operationResult?.buildId !== buildId || evidence?.operationResult?.workerVersionId !== verified.versionId) {
+        throw new Error('Remote deployment evidence did not verify the build and immutable version');
+      }
+    }, 'ENDPOINT_VERIFICATION_FAILED', 'ENDPOINT_VERIFICATION_TIMEOUT');
+    result = assertVerifiedDeployment({ ...verified, workerId: afterSecret.worker.id, workersDevUrl, temporaryWorkerName, identity, localConfigurationSha256 });
   } catch (error) {
+    primaryError = error;
     // An ownership refusal is final for this attempt, even if a later read would
     // appear owned again. It never grants authority for rollback mutations.
-    if (error instanceof OwnershipRefusal) throw error;
-    const partial = await readOwnershipSnapshot(apiOptions);
-    if (partial) await cleanupRemoteDdsDeployment({ ...apiOptions, context, preDeploymentIdentity: identity, initialOwnershipSnapshot: partial });
-    throw error;
-  } finally { rmSync(configDir, { recursive: true, force: true }); }
+    if (!hasCause(error, OwnershipRefusal) && mutationAttempted) {
+      let partial;
+      try {
+        partial = await deploymentStage(() => readOwnershipSnapshot(apiOptions),
+          'ROLLBACK_DISCOVERY_FAILED', 'ROLLBACK_DISCOVERY_TIMEOUT', { preserveDiagnostic: false });
+      } catch (failure) { rollbackError = failure; }
+      if (partial && !rollbackError) {
+        try {
+          await deploymentStage(() => cleanupImpl({ ...apiOptions, context, preDeploymentIdentity: identity, initialOwnershipSnapshot: partial }),
+            'ROLLBACK_CLEANUP_FAILED', 'ROLLBACK_CLEANUP_TIMEOUT', { preserveDiagnostic: false });
+        } catch (failure) { rollbackError = failure; }
+      }
+    }
+  }
+  try { removeDir(configDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); }
+  catch (error) { directoryError = diagnostic('TEMP_DIRECTORY_CLEANUP_FAILED', error); }
+  if (primaryError) {
+    if (rollbackError) ROLLBACK_FAILURES.set(primaryError, rollbackError);
+    throw primaryError;
+  }
+  if (directoryError) throw directoryError;
+  return result;
 }
 function deploymentAssets(root) {
   return { wasm: asset(root, WASM_PATH, 'Wasm'), harness: Object.fromEntries(harnessPaths(root).map((path) => [path, asset(root, path, 'harness')])) };
@@ -285,6 +373,8 @@ export async function runDeploymentProcess(args, env = process.env, dependencies
   catch (error) {
     const renderedError = classifyDeploymentBoundaryError(error);
     writeError(`${renderRemoteDdsFailure(renderedError)}\n`);
+    const rollbackError = ROLLBACK_FAILURES.get(error);
+    if (rollbackError) writeError(`${renderRemoteDdsRollbackFailure(rollbackError)}\n`);
     setExitCode(1);
     return undefined;
   }
