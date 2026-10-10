@@ -13,6 +13,19 @@ const response = (payload, status = 200) => ({ ok: status >= 200 && status < 300
 const notFound = () => response({ success: false, errors: [{ code: 10007, message: 'Worker not found' }] }, 404);
 const page = (items, number = 1, total = 1, capacity = 100, count = items.length) => ({ success: true, result: items, result_info: { page: number, total_pages: total, per_page: capacity, count: items.length, total_count: count } });
 const versionPage = (items, ...args) => ({ ...page(items, ...args), result: { items } });
+async function assertCleanupDiagnostic(thunk, expectedCode, expected = {}) {
+  const { publicDiagnosticCode } = await import('../scripts/remote-dds-public-errors.mjs');
+  await assert.rejects(thunk, (error) => {
+    assert.equal(publicDiagnosticCode(error), expectedCode);
+    assert.equal(error.cleanupResult?.version, 2);
+    assert.equal(error.cleanupResult?.status, 'failed');
+    assert.equal(error.cleanupResult?.failureCode, expectedCode);
+    assert.equal(error.cleanupResult?.currentAbsent, false);
+    assert.equal(error.cleanupResult?.legacyAbsent, false);
+    for (const [key, value] of Object.entries(expected)) assert.equal(error.cleanupResult?.[key], value, key);
+    return true;
+  });
+}
 
 const NEW_CLEANUP_DIAGNOSTICS = [
   'CLEANUP_IDENTITY_INVALID',
@@ -114,8 +127,8 @@ async function fixture() {
 test('fully attested cleanup reads all ownership evidence, disables the exact mapping, probes, revalidates, deletes ID, then proves absence', async () => {
   const m = await mod(), f = await fixture();
   const result = await m.cleanupRemoteDdsDeployment(f.options);
-  assert.deepEqual(result, { version: 1, status: 'deleted', ...CONTEXT, workerName: f.identity.workerName,
-    subdomainDisabled: true, objectDeleted: true, currentAbsent: true, legacyAbsent: true });
+  assert.deepEqual(result, { version: 2, status: 'deleted', ...CONTEXT, workerName: f.identity.workerName,
+    subdomainDisabled: true, objectDeleted: true, currentAbsent: true, legacyAbsent: true, failureCode: null });
   const mutations = f.mutations(); assert.equal(mutations.length, 2);
   const disable = f.calls.indexOf(mutations[0]), deletion = f.calls.indexOf(mutations[1]);
   const probe = f.calls.findIndex(({ url }) => url === f.endpoint);
@@ -128,6 +141,67 @@ test('fully attested cleanup reads all ownership evidence, disables the exact ma
   assert.ok(f.calls.slice(deletion + 1).some(({ url }) => new URL(url).pathname.endsWith('/scripts-search')));
   assert.equal(mutations[0].method, 'DELETE'); assert.ok(mutations[0].url.endsWith(`/scripts/${f.identity.workerName}/subdomain`));
   assert.ok(mutations[1].url.endsWith('/workers/' + WORKER_ID));
+});
+
+test('cleanup direct account lookup and former-endpoint probe receive composed signals', async () => {
+  const m = await mod(), f = await fixture();
+  await m.cleanupRemoteDdsDeployment(f.options);
+  const direct = f.calls.filter(({ url }) => new URL(url).pathname.endsWith('/workers/subdomain') || url === f.endpoint);
+  assert.ok(direct.length >= 3);
+  for (const call of direct) assert.equal(call.init.signal instanceof AbortSignal, true, call.url);
+});
+
+test('cleanup identity failure is classified before any network request', async () => {
+  const m = await mod(), f = await fixture();
+  await assertCleanupDiagnostic(() => m.cleanupRemoteDdsDeployment({ ...f.options, accountId: '' }), 'CLEANUP_IDENTITY_INVALID');
+  assert.equal(f.calls.length, 0);
+});
+
+for (const [label, configure, code, evidence] of [
+  ['initial ownership read', (f) => f.intercept(async ({ parsed, method }) => {
+    if (method === 'GET' && parsed.pathname.endsWith('/workers/workers')) throw new DOMException('private-timeout', 'TimeoutError');
+  }), 'CLEANUP_OWNERSHIP_READ_TIMEOUT', { subdomainDisabled: false, objectDeleted: false }],
+  ['subdomain lookup', (f) => f.intercept(async ({ parsed, method }) => {
+    if (method === 'GET' && parsed.pathname.endsWith('/workers/subdomain')) throw new DOMException('private-timeout', 'TimeoutError');
+  }), 'CLEANUP_SUBDOMAIN_LOOKUP_TIMEOUT', { subdomainDisabled: false, objectDeleted: false }],
+  ['subdomain disable', (f) => f.intercept(async ({ parsed, method }) => {
+    if (method === 'DELETE' && parsed.pathname.endsWith('/subdomain')) throw new DOMException('private-timeout', 'TimeoutError');
+  }), 'CLEANUP_SUBDOMAIN_DISABLE_TIMEOUT', { subdomainDisabled: false, objectDeleted: false }],
+  ['endpoint probe', (_f) => ({ probeImpl: async () => { throw new DOMException('private-timeout', 'TimeoutError'); } }),
+    'CLEANUP_ENDPOINT_PROBE_TIMEOUT', { subdomainDisabled: true, objectDeleted: false }],
+  ['ownership reverify', (f) => { let reads = 0; f.intercept(async ({ parsed, method }) => {
+    if (method === 'GET' && parsed.pathname.endsWith('/workers/workers') && ++reads === 2) throw new DOMException('private-timeout', 'TimeoutError');
+  }); }, 'CLEANUP_REVERIFY_TIMEOUT', { subdomainDisabled: true, objectDeleted: false }],
+  ['delete', (f) => f.intercept(async ({ parsed, method }) => {
+    if (method === 'DELETE' && !parsed.pathname.endsWith('/subdomain')) throw new DOMException('private-timeout', 'TimeoutError');
+  }), 'CLEANUP_DELETE_TIMEOUT', { subdomainDisabled: true, objectDeleted: false }],
+  ['final absence', (f) => f.intercept(async ({ parsed, method, state }) => {
+    if (method === 'GET' && !state.present && parsed.pathname.endsWith('/workers/workers')) throw new DOMException('private-timeout', 'TimeoutError');
+  }), 'CLEANUP_FINAL_ABSENCE_TIMEOUT', { subdomainDisabled: true, objectDeleted: true }],
+]) test('cleanup timeout classification: ' + label, async () => {
+  const m = await mod(), f = await fixture();
+  const changes = configure(f) ?? {};
+  await assertCleanupDiagnostic(() => m.cleanupRemoteDdsDeployment({ ...f.options, ...changes }), code, evidence);
+});
+
+test('cleanup mutation and final-absence failures retain only confirmed evidence', async () => {
+  const m = await mod();
+  {
+    const f = await fixture();
+    f.intercept(async ({ parsed, method }) => {
+      if (method === 'DELETE' && !parsed.pathname.endsWith('/subdomain')) throw new Error('private-delete-marker');
+    });
+    await assertCleanupDiagnostic(() => m.cleanupRemoteDdsDeployment(f.options), 'CLEANUP_DELETE_FAILED',
+      { subdomainDisabled: true, objectDeleted: false });
+  }
+  {
+    const f = await fixture();
+    f.intercept(async ({ parsed, method, state }) => {
+      if (method === 'GET' && !state.present && parsed.pathname.endsWith('/workers/workers')) return response(page([{ id: WORKER_ID, name: f.identity.workerName }]));
+    });
+    await assertCleanupDiagnostic(() => m.cleanupRemoteDdsDeployment(f.options), 'CLEANUP_ABSENCE_UNVERIFIED',
+      { subdomainDisabled: true, objectDeleted: true });
+  }
 });
 
 for (const shape of ['owned versions', 'empty versions', 'absent version endpoint']) test('predeployment-only recovery accepts ' + shape, async () => {
@@ -315,8 +389,11 @@ for (const [label, makeReply] of invalidDisableReplies) {
     const worker = flow === 'shared helper' ? await api.findExactWorker(options) : undefined;
     f.intercept(async ({ parsed, method }) => method === 'DELETE' && parsed.pathname.endsWith('/subdomain') ? makeReply() : undefined);
     const action = flow === 'shared helper' ? () => api.disableWorkersDevSubdomain({ ...options, worker }) : () => m.cleanupRemoteDdsDeployment(f.options);
-    await assert.rejects(action, (error) => error instanceof api.OwnershipRefusal
-      && (flow === 'shared helper' || (error.cleanupResult?.subdomainDisabled === false && error.cleanupResult.objectDeleted === false)));
+    const { publicDiagnosticCode } = await import('../scripts/remote-dds-public-errors.mjs');
+    await assert.rejects(action, (error) => flow === 'shared helper'
+      ? error instanceof api.OwnershipRefusal
+      : publicDiagnosticCode(error) === 'CLEANUP_SUBDOMAIN_DISABLE_FAILED'
+        && error.cleanupResult?.subdomainDisabled === false && error.cleanupResult.objectDeleted === false);
     assert.equal(f.mutations().filter(({ url }) => !url.endsWith('/subdomain')).length, 0);
     assert.equal(f.calls.filter(({ url }) => url === f.endpoint).length, 0);
   });
@@ -394,7 +471,7 @@ test('cleanup CLI rejects unknown, missing, duplicate, and deployment-mode argum
   }
 });
 
-test('cleanup CLI atomically persists only schema-v1 safe success or failed results and returns nonzero on failure', async () => {
+test('cleanup CLI atomically persists only schema-v2 safe success or failed results and returns nonzero on failure', async () => {
   const m = await mod(), f = await fixture(); const dir = mkdtempSync(join(tmpdir(), 'dds-cleanup-'));
   try {
     const identity = join(dir, 'pre.json'), deployment = join(dir, 'deployment.json'), out = join(dir, 'cleanup.json');
@@ -406,10 +483,31 @@ test('cleanup CLI atomically persists only schema-v1 safe success or failed resu
     await assert.rejects(() => m.runCleanupCli(args, env, { fetchImpl: f.fetchImpl }));
     const failed = JSON.parse(readFileSync(out, 'utf8'));
     assert.equal(failed.status, 'failed'); assert.equal(failed.subdomainDisabled, true); assert.equal(failed.objectDeleted, false);
-    assert.deepEqual(Object.keys(failed).sort(), ['version', 'status', ...Object.keys(CONTEXT), 'workerName', 'subdomainDisabled', 'objectDeleted', 'currentAbsent', 'legacyAbsent'].sort());
+    assert.equal(failed.failureCode, 'CLEANUP_ENDPOINT_UNVERIFIED');
+    assert.deepEqual(Object.keys(failed).sort(), ['version', 'status', ...Object.keys(CONTEXT), 'workerName', 'subdomainDisabled', 'objectDeleted', 'currentAbsent', 'legacyAbsent', 'failureCode'].sort());
     assert.equal(readFileSync(out, 'utf8').includes(TOKEN), false); assert.equal(readdirSync(dir).some((name) => name.endsWith('.tmp')), false);
     const result = spawnSync(process.execPath, [join(__dirname, '../scripts/cleanup-remote-dds-deployment.mjs'), ...args], { encoding: 'utf8', env: { ...process.env, CLOUDFLARE_API_TOKEN: '' } });
     assert.notEqual(result.status, 0); assert.equal((result.stdout + result.stderr).includes(TOKEN), false); assert.equal(result.stderr.includes(' at '), false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('cleanup process keeps the stage diagnostic first when safe result persistence also fails', async () => {
+  const m = await mod(), f = await fixture(); const dir = mkdtempSync(join(tmpdir(), 'dds-cleanup-write-failure-'));
+  try {
+    const identity = join(dir, 'pre.json'), deployment = join(dir, 'deployment.json'), out = join(dir, 'cleanup.json');
+    writeFileSync(identity, JSON.stringify(f.identity)); writeFileSync(deployment, JSON.stringify(f.record));
+    f.state.probeStatus = 200;
+    const args = ['--identity', identity, '--deployment-record', deployment, ...contextArgs, '--out', out];
+    let stderr = '', exitCode;
+    await m.runCleanupProcess(args, { CLOUDFLARE_ACCOUNT_ID: 'fake-account', CLOUDFLARE_API_TOKEN: TOKEN }, {
+      fetchImpl: f.fetchImpl,
+      writeReportCheckpoint: () => { throw new Error('private-result-path-marker'); },
+    }, { error: (value) => { stderr += value; }, setExitCode: (value) => { exitCode = value; } });
+    assert.equal(exitCode, 1);
+    assert.equal(stderr, 'Remote DDS cleanup failed [CLEANUP_ENDPOINT_UNVERIFIED].\n' +
+      'Remote DDS cleanup failed [CLEANUP_RESULT_WRITE_FAILED].\n');
+    assert.equal(stderr.includes('private-result-path-marker'), false);
+    assert.equal(stderr.includes(TOKEN), false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

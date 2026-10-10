@@ -276,7 +276,7 @@ export async function disableWorkersDevSubdomain(options) {
     payload = await jsonRequest(client, `${client.base}/scripts/${encodeURIComponent(client.name)}/subdomain`, { method: 'DELETE' }, { allowNotFound: true });
   } catch (error) {
     if (error instanceof OwnershipRefusal) throw error;
-    throw new OwnershipRefusal('Refusing object deletion: workers.dev mapping disable response could not be verified');
+    throw new OwnershipRefusal('Refusing object deletion: workers.dev mapping disable response could not be verified', { cause: error });
   }
   if (payload === null) return { disabled: false, absent: true };
   const result = payload.result;
