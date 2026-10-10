@@ -75,9 +75,9 @@ jobs:
           $directory = "$env:RUNNER_TEMP\remote-dds-cleanup-result"
           New-Item -ItemType Directory -Force $directory | Out-Null
           [ordered]@{
-            version = 1; status = 'no-deployment-authorized'; repository = '${{ github.event.repository.full_name }}'; workflow = 'Remote DDS Soak'
+            version = 2; status = 'no-deployment-authorized'; repository = '${{ github.event.repository.full_name }}'; workflow = 'Remote DDS Soak'
             runId = '${{ github.event.workflow_run.id }}'; runAttempt = '${{ github.event.workflow_run.run_attempt }}'; commitSha = '${{ github.event.workflow_run.head_sha }}'
-            workerName = $null; subdomainDisabled = $false; objectDeleted = $false; currentAbsent = $true; legacyAbsent = $true
+            workerName = $null; subdomainDisabled = $false; objectDeleted = $false; currentAbsent = $true; legacyAbsent = $true; failureCode = $null
           } | ConvertTo-Json | Set-Content -Encoding utf8 "$directory\cleanup-result.json"
 
       - name: Check out trusted default-branch cleanup code
@@ -170,22 +170,30 @@ jobs:
         run: |
           $directory = "$env:RUNNER_TEMP\remote-dds-cleanup-result"
           $path = "$directory\cleanup-result.json"
-          $fields = @('version', 'status', 'repository', 'workflow', 'runId', 'runAttempt', 'commitSha', 'workerName', 'subdomainDisabled', 'objectDeleted', 'currentAbsent', 'legacyAbsent')
+          $fields = @('version', 'status', 'repository', 'workflow', 'runId', 'runAttempt', 'commitSha', 'workerName', 'subdomainDisabled', 'objectDeleted', 'currentAbsent', 'legacyAbsent', 'failureCode')
+          $failureCodes = @(
+            'CLEANUP_IDENTITY_INVALID', 'CLEANUP_OWNERSHIP_UNVERIFIED', 'CLEANUP_ENDPOINT_UNVERIFIED',
+            'CLEANUP_SUBDOMAIN_DISABLE_FAILED', 'CLEANUP_DELETE_FAILED', 'CLEANUP_ABSENCE_UNVERIFIED',
+            'CLEANUP_RESULT_WRITE_FAILED', 'CLEANUP_OWNERSHIP_READ_TIMEOUT', 'CLEANUP_SUBDOMAIN_LOOKUP_TIMEOUT',
+            'CLEANUP_SUBDOMAIN_DISABLE_TIMEOUT', 'CLEANUP_ENDPOINT_PROBE_TIMEOUT', 'CLEANUP_REVERIFY_TIMEOUT',
+            'CLEANUP_DELETE_TIMEOUT', 'CLEANUP_FINAL_ABSENCE_TIMEOUT'
+          )
           function Write-FailedResult {
             New-Item -ItemType Directory -Force $directory | Out-Null
             [ordered]@{
-              version = 1; status = 'failed'; repository = '${{ github.event.repository.full_name }}'; workflow = 'Remote DDS Soak'
+              version = 2; status = 'failed'; repository = '${{ github.event.repository.full_name }}'; workflow = 'Remote DDS Soak'
               runId = '${{ github.event.workflow_run.id }}'; runAttempt = '${{ github.event.workflow_run.run_attempt }}'; commitSha = '${{ github.event.workflow_run.head_sha }}'
               workerName = $null; subdomainDisabled = $false; objectDeleted = $false; currentAbsent = $false; legacyAbsent = $false
+              failureCode = 'CLEANUP_RESULT_WRITE_FAILED'
             } | ConvertTo-Json | Set-Content -Encoding utf8 $path
           }
-          if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { Write-FailedResult; return }
+          if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { Write-FailedResult }
           try {
             $result = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
             $actualFields = @($result.PSObject.Properties.Name | Sort-Object)
             $expectedFields = @($fields | Sort-Object)
             if (Compare-Object $actualFields $expectedFields) { throw 'Cleanup result fields are not exact.' }
-            if ($result.version -ne 1 -or $result.status -notin @('no-deployment-authorized', 'failed', 'deleted', 'already-absent')) { throw 'Cleanup result version or status is invalid.' }
+            if ($result.version -ne 2 -or $result.status -notin @('no-deployment-authorized', 'failed', 'deleted', 'already-absent')) { throw 'Cleanup result version or status is invalid.' }
             if ($result.repository -cne '${{ github.event.repository.full_name }}' -or $result.workflow -cne 'Remote DDS Soak' -or
                 [string]$result.runId -cne '${{ github.event.workflow_run.id }}' -or [string]$result.runAttempt -cne '${{ github.event.workflow_run.run_attempt }}' -or
                 $result.commitSha -cne '${{ github.event.workflow_run.head_sha }}') { throw 'Cleanup result context is not the triggering event.' }
@@ -193,7 +201,12 @@ jobs:
               if ($result.$field -isnot [bool]) { throw "Cleanup result $field is not boolean." }
             }
             if ($null -ne $result.workerName -and $result.workerName -isnot [string]) { throw 'Cleanup result workerName is invalid.' }
+            if ($result.status -eq 'failed') {
+              if ($result.failureCode -isnot [string] -or $result.failureCode -notin $failureCodes -or $result.currentAbsent -or $result.legacyAbsent) { throw 'Failed cleanup result is inconsistent.' }
+            } elseif ($null -ne $result.failureCode) { throw 'Successful cleanup result cannot contain a failure code.' }
             if ($result.status -eq 'no-deployment-authorized' -and ($null -ne $result.workerName -or $result.subdomainDisabled -or $result.objectDeleted -or -not $result.currentAbsent -or -not $result.legacyAbsent)) { throw 'No-deployment result has unsafe values.' }
+            if ($result.status -eq 'already-absent' -and (($result.workerName -isnot [string]) -or $result.subdomainDisabled -or $result.objectDeleted -or -not $result.currentAbsent -or -not $result.legacyAbsent)) { throw 'Already-absent result is inconsistent.' }
+            if ($result.status -eq 'deleted' -and (($result.workerName -isnot [string]) -or -not $result.subdomainDisabled -or -not $result.objectDeleted -or -not $result.currentAbsent -or -not $result.legacyAbsent)) { throw 'Deleted result is inconsistent.' }
           } catch {
             Write-FailedResult
             throw 'Cleanup result validation failed; uploaded a failed fallback.'

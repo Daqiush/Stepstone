@@ -280,16 +280,23 @@ test('cleanup lists artifacts before secret use and covers authorized and absent
   const secretIndexes = steps(cleanup).flatMap((step, index) => step.env?.CLOUDFLARE_API_TOKEN === expression('secrets.CLOUDFLARE_API_TOKEN') ? [index] : []);
   assert.ok(secretIndexes.length > 0 && secretIndexes.every((index) => index > listIndex));
   const absent = findRun(cleanup, /no-deployment-authorized/);
-  for (const field of ['version', 'status', 'repository', 'workflow', 'runId', 'runAttempt', 'commitSha', 'workerName', 'subdomainDisabled', 'objectDeleted', 'currentAbsent', 'legacyAbsent']) assert.match(absent.run, new RegExp(`['\"]?${field}['\"]?\\s*=`));
+  for (const field of ['version', 'status', 'repository', 'workflow', 'runId', 'runAttempt', 'commitSha', 'workerName', 'subdomainDisabled', 'objectDeleted', 'currentAbsent', 'legacyAbsent', 'failureCode']) assert.match(absent.run, new RegExp(`['\"]?${field}['\"]?\\s*=`));
+  assert.match(absent.run, /version\s*=\s*2/);
   assert.match(absent.run, /workerName\s*=\s*\$null/);
   assert.match(absent.run, /subdomainDisabled\s*=\s*\$false/);
   assert.match(absent.run, /objectDeleted\s*=\s*\$false/);
   assert.match(absent.run, /currentAbsent\s*=\s*\$true/);
   assert.match(absent.run, /legacyAbsent\s*=\s*\$true/);
+  assert.match(absent.run, /failureCode\s*=\s*\$null/);
   const cleanupCli = findRun(cleanup, /cleanup-remote-dds-deployment\.mjs/);
   exactContext(cleanupCli.run);
   assert.equal(cleanupCli['continue-on-error'], true);
-  for (const field of ['repository', 'workflow', 'runId', 'runAttempt', 'commitSha', 'workerName', 'subdomainDisabled', 'objectDeleted', 'currentAbsent', 'legacyAbsent']) assert.match(runText(findRun(cleanup, /Ensure cleanup result/)), new RegExp(`['\"]?${field}['\"]?\\s*=`));
+  const resultText = runText(findRun(cleanup, /Ensure cleanup result/));
+  for (const field of ['version', 'status', 'repository', 'workflow', 'runId', 'runAttempt', 'commitSha', 'workerName', 'subdomainDisabled', 'objectDeleted', 'currentAbsent', 'legacyAbsent', 'failureCode']) assert.match(resultText, new RegExp(`['\"]?${field}['\"]?`));
+  assert.match(resultText, /Compare-Object/);
+  assert.match(resultText, /version\s*-ne\s*2/);
+  assert.match(resultText, /CLEANUP_RESULT_WRITE_FAILED/);
+  assert.match(resultText, /CLEANUP_FINAL_ABSENCE_TIMEOUT/);
   const upload = steps(cleanup).find((step) => step.uses === UPLOAD);
   assert.equal(upload.if, expression('always()'));
   assert.deepEqual(upload.with, { name: artifact('primary-cleanup'), path: 'cleanup/cleanup-result.json', 'if-no-files-found': 'error', 'retention-days': 30 });
@@ -517,11 +524,11 @@ test('backstop inventory derives exact current-attempt authorization and no-depl
   assert.equal(absent.env?.CLOUDFLARE_API_TOKEN, undefined);
   assert.equal(absent.env?.CLOUDFLARE_ACCOUNT_ID, undefined);
   for (const [field, value] of [
-    ['version', '1'], ['status', "'no-deployment-authorized'"], ['repository', `'${cleanupExpression('github.event.repository.full_name')}'`],
+    ['version', '2'], ['status', "'no-deployment-authorized'"], ['repository', `'${cleanupExpression('github.event.repository.full_name')}'`],
     ['workflow', "'Remote DDS Soak'"], ['runId', `'${cleanupExpression('github.event.workflow_run.id')}'`],
     ['runAttempt', `'${cleanupExpression('github.event.workflow_run.run_attempt')}'`],
     ['commitSha', `'${cleanupExpression('github.event.workflow_run.head_sha')}'`], ['workerName', '$null'],
-    ['subdomainDisabled', '$false'], ['objectDeleted', '$false'], ['currentAbsent', '$true'], ['legacyAbsent', '$true'],
+    ['subdomainDisabled', '$false'], ['objectDeleted', '$false'], ['currentAbsent', '$true'], ['legacyAbsent', '$true'], ['failureCode', '$null'],
   ]) assert.ok(runText(absent).includes(`${field} = ${value}`), `no-deployment result has wrong ${field}`);
 });
 
@@ -646,9 +653,13 @@ test('backstop always publishes a validated result and re-propagates every opera
   assert.equal(result['continue-on-error'], true);
   assert.equal(result.env.DDS_REMOTE_TEST_KEY, '');
   assert.match(runText(result), /status\s*=\s*'failed'/);
-  for (const field of ['version', 'status', 'repository', 'workflow', 'runId', 'runAttempt', 'commitSha', 'workerName', 'subdomainDisabled', 'objectDeleted', 'currentAbsent', 'legacyAbsent']) {
+  for (const field of ['version', 'status', 'repository', 'workflow', 'runId', 'runAttempt', 'commitSha', 'workerName', 'subdomainDisabled', 'objectDeleted', 'currentAbsent', 'legacyAbsent', 'failureCode']) {
     assert.match(runText(result), new RegExp(`['"]?${field}['"]?`));
   }
+  assert.match(runText(result), /version\s*=\s*2/);
+  assert.match(runText(result), /failureCode\s*=\s*'CLEANUP_RESULT_WRITE_FAILED'/);
+  assert.match(runText(result), /Compare-Object/);
+  assert.match(runText(result), /CLEANUP_FINAL_ABSENCE_TIMEOUT/);
   assert.match(runText(result), /github\.event\.workflow_run\.head_sha/);
   assert.match(runText(result), /ConvertFrom-Json/);
   assert.equal(upload.if, cleanupExpression('always()'));
