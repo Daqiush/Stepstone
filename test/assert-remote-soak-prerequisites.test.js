@@ -1,9 +1,11 @@
 const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
-const { mkdtempSync, mkdirSync, rmSync, writeFileSync } = require('node:fs');
+const { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { dirname, join } = require('node:path');
 const test = require('node:test');
+
+const ROOT = join(__dirname, '..');
 
 const REQUIRED_PATHS = [
   'workers/wrangler.jsonc',
@@ -33,6 +35,7 @@ function createBaselineRepo() {
   git(repo, 'config', 'user.email', 'test@example.invalid');
   git(repo, 'config', 'user.name', 'Prerequisite Test');
   git(repo, 'config', 'core.autocrlf', 'false');
+  write(repo, '.gitattributes', readFileSync(join(ROOT, '.gitattributes'), 'utf8'));
   for (const [index, path] of REQUIRED_PATHS.entries()) {
     write(repo, path, `baseline ${index}\n`);
   }
@@ -51,6 +54,23 @@ test('compares prerequisite contents byte-for-byte independently of hash reporti
   assert.equal(sameBytes(Buffer.from([0x00, 0x61]), Buffer.from([0x00, 0x61])), true);
   assert.equal(sameBytes(Buffer.from([0x00, 0x61]), Buffer.from([0x00, 0x62])), false);
   assert.equal(sameBytes(Buffer.from([0x00, 0x61]), Buffer.from([0x00, 0x61, 0x00])), false);
+});
+
+test('Git normalization restores LF baseline bytes after simulated CRLF materialization', async () => {
+  const { assertRemoteSoakPrerequisites } = await loadChecker();
+  const { repo, baseline } = createBaselineRepo();
+  try {
+    git(repo, 'config', 'core.autocrlf', 'true');
+    for (const [index, path] of REQUIRED_PATHS.entries()) write(repo, path, `baseline ${index}\r\n`);
+    git(repo, 'add', '.');
+    for (const path of REQUIRED_PATHS) rmSync(join(repo, path));
+    git(repo, 'checkout-index', '--force', '--all');
+
+    assert.doesNotThrow(() => assertRemoteSoakPrerequisites({ repoRoot: repo, baseline }));
+    for (const path of REQUIRED_PATHS) assert.equal(readFileSync(join(repo, path)).includes(Buffer.from('\r\n')), false, `${path} was not restored to LF`);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
 });
 
 test('rejects a missing required prerequisite and reports expected/current hashes', async () => {

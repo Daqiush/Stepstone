@@ -1,5 +1,5 @@
 # Preserve generated runtime artifacts and upstream license text byte-for-byte.
 dds-worker.mjs -text -whitespace
 dds-worker.wasm -text -whitespace
-LICENSE.bridge-dds -whitespace
-LICENSE.dds -whitespace
+LICENSE.bridge-dds -text -whitespace
+LICENSE.dds -text -whitespace
