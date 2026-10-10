@@ -12,15 +12,17 @@ const ROOT = resolve(__dirname, '..');
 const WORKFLOW_PATH = resolve(ROOT, '.github/workflows/remote-dds-soak.yml');
 const CLEANUP_WORKFLOW_PATH = resolve(ROOT, '.github/workflows/remote-dds-soak-cleanup.yml');
 const WINDOWS_DDS_BUILD_PATH = resolve(ROOT, 'scripts/build-windows-dds.ps1');
-const SETUP_NODE = 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020';
+const CHECKOUT = 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1';
+const SETUP_NODE = 'actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1';
+const UPLOAD = 'actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9';
+const DOWNLOAD = 'actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333';
+const POWERSHELL = 'pwsh';
 const APPROVED_ACTIONS = new Set([
-  'actions/checkout@11d5960a326750d5838078e36cf38b85af677262',
+  CHECKOUT,
   SETUP_NODE,
-  'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02',
-  'actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093',
+  UPLOAD,
+  DOWNLOAD,
 ]);
-const UPLOAD = 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02';
-const DOWNLOAD = 'actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093';
 const expression = (body) => '${{ ' + body + ' }}';
 const artifact = (kind, suffix = '') => `remote-dds-${kind}-${expression('github.run_id')}-${expression('github.run_attempt')}${suffix}`;
 
@@ -77,13 +79,15 @@ test('manual entry point, permissions, concurrency, and action pins are locked d
   assert.equal(workflow['run-name'], `Remote DDS Soak ${expression('inputs.request_id')}`);
   assert.deepEqual(Object.keys(workflow.on), ['workflow_dispatch']);
   assert.deepEqual(workflow.on.workflow_dispatch, { inputs: { request_id: { description: 'Unique request identifier', required: true, type: 'string' } } });
-  assert.deepEqual(workflow.concurrency, { group: 'stepstone-remote-dds-soak', 'cancel-in-progress': false });
+  assert.deepEqual(workflow.concurrency, { group: 'stepstone-remote-dds-soak', 'cancel-in-progress': false, queue: 'max' });
   assert.deepEqual(workflow.permissions, { contents: 'read', actions: 'read' });
   for (const job of Object.values(workflow.jobs)) {
     assert.equal(job['runs-on'], 'windows-2022');
     assert.equal(job.permissions, undefined, 'jobs may not broaden workflow permissions');
     for (const step of steps(job)) if (step.uses !== undefined) assert.ok(APPROVED_ACTIONS.has(step.uses), `unapproved action: ${step.uses}`);
   }
+  assert.equal(workflow.jobs.prepare['timeout-minutes'], 30);
+  assert.equal(workflow.jobs.cleanup['timeout-minutes'], 20);
 });
 
 test('all remote soak jobs use the Wrangler-supported Node.js 22 runtime', () => {
@@ -103,13 +107,18 @@ test('all remote soak jobs use the Wrangler-supported Node.js 22 runtime', () =>
   }
 });
 
+test('embedded workflow contract harnesses execute under PowerShell 7', () => {
+  assert.equal(POWERSHELL, 'pwsh');
+  assert.doesNotMatch(readFileSync(__filename, 'utf8'), /powershell\.exe/i);
+});
+
 test('native DDS jobs initialize the pinned submodule and build both CLI baselines before use', () => {
   const { workflow } = loadWorkflow();
   const nativeJobs = ['prepare', ...Array.from({ length: 6 }, (_, index) => `segment-${index + 1}`)];
 
   for (const jobName of nativeJobs) {
     const job = workflow.jobs[jobName];
-    const checkout = steps(job).find((step) => step.uses === 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262');
+    const checkout = steps(job).find((step) => step.uses === CHECKOUT);
     assert.equal(checkout?.with?.submodules, 'recursive', `${jobName} must initialize the pinned DDS submodule`);
 
     const install = stepIndex(job, /^npm ci$/m);
@@ -243,8 +252,7 @@ test('final-evidence builder preserves every available file before reporting mis
       mkdirSync(dirname(absolute), { recursive: true });
       writeFileSync(absolute, `evidence:${path}`);
     }
-    const shell = process.platform === 'win32' ? 'powershell.exe' : 'pwsh';
-    const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-Command', build.run], { cwd: root, encoding: 'utf8' });
+    const result = spawnSync(POWERSHELL, ['-NoProfile', '-NonInteractive', '-Command', build.run], { cwd: root, encoding: 'utf8' });
     assert.notEqual(result.status, 0, result.stdout + result.stderr);
     for (const path of available) {
       const copied = join(root, 'final-evidence', ...path.split('/'));
@@ -396,7 +404,6 @@ function cleanupStep(job, id) {
 function executeCleanupInventory(inventory, { runId, runAttempt, artifactNames }) {
   const root = mkdtempSync(join(tmpdir(), 'remote-dds-backstop-inventory-'));
   const output = join(root, 'github-output.txt');
-  const shell = process.platform === 'win32' ? 'powershell.exe' : 'pwsh';
   const script = runText(inventory)
     .replaceAll(cleanupExpression('github.event.workflow_run.id'), runId)
     .replaceAll(cleanupExpression('github.event.workflow_run.run_attempt'), runAttempt);
@@ -409,7 +416,7 @@ function global:Invoke-RestMethod {
 }
 ${script}`;
   try {
-    const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-Command', harness], {
+    const result = spawnSync(POWERSHELL, ['-NoProfile', '-NonInteractive', '-Command', harness], {
       cwd: root,
       encoding: 'utf8',
       env: {
@@ -454,7 +461,8 @@ test('backstop is completed-workflow-only with minimum permissions and pinned ac
   for (const forbidden of ['push', 'pull_request', 'schedule', 'workflow_dispatch']) assert.equal(workflow.on[forbidden], undefined);
   assert.deepEqual(workflow.permissions, { actions: 'read', contents: 'read' });
   const job = cleanupJob(workflow);
-  assert.equal(job['runs-on'], 'windows-latest');
+  assert.equal(job['runs-on'], 'windows-2022');
+  assert.equal(job['timeout-minutes'], 20);
   assert.equal(job.permissions, undefined, 'job may not broaden workflow permissions');
   for (const step of steps(job)) {
     if (step.uses !== undefined) assert.ok(APPROVED_ACTIONS.has(step.uses), `unapproved action: ${step.uses}`);
@@ -465,7 +473,7 @@ test('backstop inventories first and isolates trusted code from untrusted artifa
   const { source, workflow } = loadCleanupWorkflow();
   const job = cleanupJob(workflow);
   const inventory = cleanupStep(job, 'inventory');
-  const checkoutIndex = steps(job).findIndex((step) => step.uses === 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262');
+  const checkoutIndex = steps(job).findIndex((step) => step.uses === CHECKOUT);
   const moveIndex = steps(job).findIndex((step) => /Move-Item/.test(runText(step)) && /remote-dds-trusted/.test(runText(step)));
   const downloadIndexes = steps(job).flatMap((step, index) => step.uses === DOWNLOAD ? [index] : []);
   assert.equal(steps(job).indexOf(inventory), 0, 'token-free inventory must be the first step');

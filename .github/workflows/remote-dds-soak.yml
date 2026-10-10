@@ -12,6 +12,7 @@ on:
 concurrency:
   group: stepstone-remote-dds-soak
   cancel-in-progress: false
+  queue: max
 
 permissions:
   contents: read
@@ -20,12 +21,13 @@ permissions:
 jobs:
   prepare:
     runs-on: windows-2022
+    timeout-minutes: 30
     steps:
       - name: Check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with: { submodules: recursive }
       - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: 22
           cache: npm
@@ -54,7 +56,7 @@ jobs:
           New-Item -ItemType Directory -Force identity | Out-Null
           node scripts/prepare-remote-dds-deployment.mjs --preflight --identity "$env:RUNNER_TEMP\remote-dds-trusted-identity.json" --repository "${{ github.repository }}" --workflow "Remote DDS Soak" --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}" --commit-sha "${{ github.sha }}" --out "identity\predeployment-identity.json"
       - name: Upload deployment identity
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         env: { DDS_REMOTE_TEST_KEY: '' }
         with:
           name: 'remote-dds-identity-${{ github.run_id }}-${{ github.run_attempt }}'
@@ -69,7 +71,7 @@ jobs:
           New-Item -ItemType Directory -Force deployment | Out-Null
           node scripts/prepare-remote-dds-deployment.mjs --deploy-from-identity "identity\predeployment-identity.json" --repository "${{ github.repository }}" --workflow "Remote DDS Soak" --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}" --commit-sha "${{ github.sha }}" --out "deployment\deployment.json"
       - name: Upload deployment record
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         env: { DDS_REMOTE_TEST_KEY: '' }
         with:
           name: 'remote-dds-deployment-${{ github.run_id }}-${{ github.run_attempt }}'
@@ -80,7 +82,7 @@ jobs:
         env: { DDS_REMOTE_TEST_KEY: '' }
         run: node scripts/remote-dds-ci-state.mjs --create-ready --trusted-identity "$env:RUNNER_TEMP\remote-dds-trusted-identity.json" --identity "identity\predeployment-identity.json" --deployment "deployment\deployment.json" --repository "${{ github.repository }}" --workflow "Remote DDS Soak" --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}" --commit-sha "${{ github.sha }}" --out "state-0"
       - name: Upload state-0
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         env: { DDS_REMOTE_TEST_KEY: '' }
         with:
           name: 'remote-dds-state-${{ github.run_id }}-${{ github.run_attempt }}-0'
@@ -94,9 +96,9 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 355
     steps:
-      - { name: Check out repository, uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, with: { submodules: recursive } }
+      - { name: Check out repository, uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1, with: { submodules: recursive } }
       - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with: { node-version: 22, cache: npm }
       - { name: Install dependencies, run: npm ci }
       - { name: Build native DDS baseline, run: ./scripts/build-windows-dds.ps1 }
@@ -105,15 +107,15 @@ jobs:
         env: { CLOUDFLARE_API_TOKEN: '${{ secrets.CLOUDFLARE_API_TOKEN }}' }
         run: node scripts/remote-dds-ci-identity.mjs --derive --repository "${{ github.repository }}" --workflow "Remote DDS Soak" --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}" --commit-sha "${{ github.sha }}" --github-env "$env:GITHUB_ENV" --identity-out "$env:RUNNER_TEMP\remote-dds-trusted-identity.json"
       - name: Download deployment identity
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         env: { DDS_REMOTE_TEST_KEY: '' }
         with: { name: 'remote-dds-identity-${{ github.run_id }}-${{ github.run_attempt }}', path: identity }
       - name: Download deployment record
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         env: { DDS_REMOTE_TEST_KEY: '' }
         with: { name: 'remote-dds-deployment-${{ github.run_id }}-${{ github.run_attempt }}', path: deployment }
       - name: Download predecessor state
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         env: { DDS_REMOTE_TEST_KEY: '' }
         with: { name: 'remote-dds-state-${{ github.run_id }}-${{ github.run_attempt }}-0', path: state-0 }
       - name: Validate state-0 for segment 1
@@ -131,7 +133,7 @@ jobs:
         run: node scripts/remote-dds-ci-state.mjs --finalize --trusted-identity "$env:RUNNER_TEMP\remote-dds-trusted-identity.json" --identity "identity\predeployment-identity.json" --deployment "deployment\deployment.json" --repository "${{ github.repository }}" --workflow "Remote DDS Soak" --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}" --commit-sha "${{ github.sha }}" --state-in "state-0" --run-dir "segment-run" --segment 1 --out "state-1"
       - name: Upload state-1
         if: '${{ always() }}'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         env: { DDS_REMOTE_TEST_KEY: '' }
         with: { name: 'remote-dds-state-${{ github.run_id }}-${{ github.run_attempt }}-1', path: state-1, if-no-files-found: error, retention-days: 7 }
       - name: Re-propagate segment 1 failure
@@ -145,9 +147,9 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 355
     steps:
-      - { name: Check out repository, uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, with: { submodules: recursive } }
+      - { name: Check out repository, uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1, with: { submodules: recursive } }
       - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with: { node-version: 22, cache: npm }
       - { name: Install dependencies, run: npm ci }
       - { name: Build native DDS baseline, run: ./scripts/build-windows-dds.ps1 }
@@ -156,15 +158,15 @@ jobs:
         env: { CLOUDFLARE_API_TOKEN: '${{ secrets.CLOUDFLARE_API_TOKEN }}' }
         run: node scripts/remote-dds-ci-identity.mjs --derive --repository "${{ github.repository }}" --workflow "Remote DDS Soak" --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}" --commit-sha "${{ github.sha }}" --github-env "$env:GITHUB_ENV" --identity-out "$env:RUNNER_TEMP\remote-dds-trusted-identity.json"
       - name: Download deployment identity
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         env: { DDS_REMOTE_TEST_KEY: '' }
         with: { name: 'remote-dds-identity-${{ github.run_id }}-${{ github.run_attempt }}', path: identity }
       - name: Download deployment record
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         env: { DDS_REMOTE_TEST_KEY: '' }
         with: { name: 'remote-dds-deployment-${{ github.run_id }}-${{ github.run_attempt }}', path: deployment }
       - name: Download predecessor state
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         env: { DDS_REMOTE_TEST_KEY: '' }
         with: { name: 'remote-dds-state-${{ github.run_id }}-${{ github.run_attempt }}-1', path: state-1 }
       - name: Validate state-1 for segment 2
@@ -183,7 +185,7 @@ jobs:
         run: node scripts/remote-dds-ci-state.mjs --finalize --trusted-identity "$env:RUNNER_TEMP\remote-dds-trusted-identity.json" --identity "identity\predeployment-identity.json" --deployment "deployment\deployment.json" --repository "${{ github.repository }}" --workflow "Remote DDS Soak" --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}" --commit-sha "${{ github.sha }}" --state-in "state-1" --run-dir "segment-run" --segment 2 --out "state-2"
       - name: Upload state-2
         if: '${{ always() }}'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         env: { DDS_REMOTE_TEST_KEY: '' }
         with: { name: 'remote-dds-state-${{ github.run_id }}-${{ github.run_attempt }}-2', path: state-2, if-no-files-found: error, retention-days: 7 }
       - name: Re-propagate segment 2 failure
@@ -197,9 +199,9 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 355
     steps:
-      - { name: Check out repository, uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, with: { submodules: recursive } }
+      - { name: Check out repository, uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1, with: { submodules: recursive } }
       - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with: { node-version: 22, cache: npm }
       - { name: Install dependencies, run: npm ci }
       - { name: Build native DDS baseline, run: ./scripts/build-windows-dds.ps1 }
@@ -208,15 +210,15 @@ jobs:
         env: { CLOUDFLARE_API_TOKEN: '${{ secrets.CLOUDFLARE_API_TOKEN }}' }
         run: node scripts/remote-dds-ci-identity.mjs --derive --repository "${{ github.repository }}" --workflow "Remote DDS Soak" --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}" --commit-sha "${{ github.sha }}" --github-env "$env:GITHUB_ENV" --identity-out "$env:RUNNER_TEMP\remote-dds-trusted-identity.json"
       - name: Download deployment identity
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         env: { DDS_REMOTE_TEST_KEY: '' }
         with: { name: 'remote-dds-identity-${{ github.run_id }}-${{ github.run_attempt }}', path: identity }
       - name: Download deployment record
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         env: { DDS_REMOTE_TEST_KEY: '' }
         with: { name: 'remote-dds-deployment-${{ github.run_id }}-${{ github.run_attempt }}', path: deployment }
       - name: Download predecessor state
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         env: { DDS_REMOTE_TEST_KEY: '' }
         with: { name: 'remote-dds-state-${{ github.run_id }}-${{ github.run_attempt }}-2', path: state-2 }
       - name: Validate state-2 for segment 3
@@ -235,7 +237,7 @@ jobs:
         run: node scripts/remote-dds-ci-state.mjs --finalize --trusted-identity "$env:RUNNER_TEMP\remote-dds-trusted-identity.json" --identity "identity\predeployment-identity.json" --deployment "deployment\deployment.json" --repository "${{ github.repository }}" --workflow "Remote DDS Soak" --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}" --commit-sha "${{ github.sha }}" --state-in "state-2" --run-dir "segment-run" --segment 3 --out "state-3"
       - name: Upload state-3
         if: '${{ always() }}'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         env: { DDS_REMOTE_TEST_KEY: '' }
         with: { name: 'remote-dds-state-${{ github.run_id }}-${{ github.run_attempt }}-3', path: state-3, if-no-files-found: error, retention-days: 7 }
       - name: Re-propagate segment 3 failure
@@ -249,9 +251,9 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 355
     steps:
-      - { name: Check out repository, uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, with: { submodules: recursive } }
+      - { name: Check out repository, uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1, with: { submodules: recursive } }
       - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with: { node-version: 22, cache: npm }
       - { name: Install dependencies, run: npm ci }
       - { name: Build native DDS baseline, run: ./scripts/build-windows-dds.ps1 }
@@ -260,15 +262,15 @@ jobs:
         env: { CLOUDFLARE_API_TOKEN: '${{ secrets.CLOUDFLARE_API_TOKEN }}' }
         run: node scripts/remote-dds-ci-identity.mjs --derive --repository "${{ github.repository }}" --workflow "Remote DDS Soak" --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}" --commit-sha "${{ github.sha }}" --github-env "$env:GITHUB_ENV" --identity-out "$env:RUNNER_TEMP\remote-dds-trusted-identity.json"
       - name: Download deployment identity
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         env: { DDS_REMOTE_TEST_KEY: '' }
         with: { name: 'remote-dds-identity-${{ github.run_id }}-${{ github.run_attempt }}', path: identity }
       - name: Download deployment record
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         env: { DDS_REMOTE_TEST_KEY: '' }
         with: { name: 'remote-dds-deployment-${{ github.run_id }}-${{ github.run_attempt }}', path: deployment }
       - name: Download predecessor state
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         env: { DDS_REMOTE_TEST_KEY: '' }
         with: { name: 'remote-dds-state-${{ github.run_id }}-${{ github.run_attempt }}-3', path: state-3 }
       - name: Validate state-3 for segment 4
@@ -287,7 +289,7 @@ jobs:
         run: node scripts/remote-dds-ci-state.mjs --finalize --trusted-identity "$env:RUNNER_TEMP\remote-dds-trusted-identity.json" --identity "identity\predeployment-identity.json" --deployment "deployment\deployment.json" --repository "${{ github.repository }}" --workflow "Remote DDS Soak" --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}" --commit-sha "${{ github.sha }}" --state-in "state-3" --run-dir "segment-run" --segment 4 --out "state-4"
       - name: Upload state-4
         if: '${{ always() }}'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         env: { DDS_REMOTE_TEST_KEY: '' }
         with: { name: 'remote-dds-state-${{ github.run_id }}-${{ github.run_attempt }}-4', path: state-4, if-no-files-found: error, retention-days: 7 }
       - name: Re-propagate segment 4 failure
@@ -301,9 +303,9 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 355
     steps:
-      - { name: Check out repository, uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, with: { submodules: recursive } }
+      - { name: Check out repository, uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1, with: { submodules: recursive } }
       - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with: { node-version: 22, cache: npm }
       - { name: Install dependencies, run: npm ci }
       - { name: Build native DDS baseline, run: ./scripts/build-windows-dds.ps1 }
@@ -312,15 +314,15 @@ jobs:
         env: { CLOUDFLARE_API_TOKEN: '${{ secrets.CLOUDFLARE_API_TOKEN }}' }
         run: node scripts/remote-dds-ci-identity.mjs --derive --repository "${{ github.repository }}" --workflow "Remote DDS Soak" --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}" --commit-sha "${{ github.sha }}" --github-env "$env:GITHUB_ENV" --identity-out "$env:RUNNER_TEMP\remote-dds-trusted-identity.json"
       - name: Download deployment identity
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         env: { DDS_REMOTE_TEST_KEY: '' }
         with: { name: 'remote-dds-identity-${{ github.run_id }}-${{ github.run_attempt }}', path: identity }
       - name: Download deployment record
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         env: { DDS_REMOTE_TEST_KEY: '' }
         with: { name: 'remote-dds-deployment-${{ github.run_id }}-${{ github.run_attempt }}', path: deployment }
       - name: Download predecessor state
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         env: { DDS_REMOTE_TEST_KEY: '' }
         with: { name: 'remote-dds-state-${{ github.run_id }}-${{ github.run_attempt }}-4', path: state-4 }
       - name: Validate state-4 for segment 5
@@ -339,7 +341,7 @@ jobs:
         run: node scripts/remote-dds-ci-state.mjs --finalize --trusted-identity "$env:RUNNER_TEMP\remote-dds-trusted-identity.json" --identity "identity\predeployment-identity.json" --deployment "deployment\deployment.json" --repository "${{ github.repository }}" --workflow "Remote DDS Soak" --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}" --commit-sha "${{ github.sha }}" --state-in "state-4" --run-dir "segment-run" --segment 5 --out "state-5"
       - name: Upload state-5
         if: '${{ always() }}'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         env: { DDS_REMOTE_TEST_KEY: '' }
         with: { name: 'remote-dds-state-${{ github.run_id }}-${{ github.run_attempt }}-5', path: state-5, if-no-files-found: error, retention-days: 7 }
       - name: Re-propagate segment 5 failure
@@ -353,9 +355,9 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 355
     steps:
-      - { name: Check out repository, uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, with: { submodules: recursive } }
+      - { name: Check out repository, uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1, with: { submodules: recursive } }
       - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with: { node-version: 22, cache: npm }
       - { name: Install dependencies, run: npm ci }
       - { name: Build native DDS baseline, run: ./scripts/build-windows-dds.ps1 }
@@ -364,15 +366,15 @@ jobs:
         env: { CLOUDFLARE_API_TOKEN: '${{ secrets.CLOUDFLARE_API_TOKEN }}' }
         run: node scripts/remote-dds-ci-identity.mjs --derive --repository "${{ github.repository }}" --workflow "Remote DDS Soak" --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}" --commit-sha "${{ github.sha }}" --github-env "$env:GITHUB_ENV" --identity-out "$env:RUNNER_TEMP\remote-dds-trusted-identity.json"
       - name: Download deployment identity
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         env: { DDS_REMOTE_TEST_KEY: '' }
         with: { name: 'remote-dds-identity-${{ github.run_id }}-${{ github.run_attempt }}', path: identity }
       - name: Download deployment record
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         env: { DDS_REMOTE_TEST_KEY: '' }
         with: { name: 'remote-dds-deployment-${{ github.run_id }}-${{ github.run_attempt }}', path: deployment }
       - name: Download predecessor state
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         env: { DDS_REMOTE_TEST_KEY: '' }
         with: { name: 'remote-dds-state-${{ github.run_id }}-${{ github.run_attempt }}-5', path: state-5 }
       - name: Validate state-5 for segment 6
@@ -391,7 +393,7 @@ jobs:
         run: node scripts/remote-dds-ci-state.mjs --finalize --trusted-identity "$env:RUNNER_TEMP\remote-dds-trusted-identity.json" --identity "identity\predeployment-identity.json" --deployment "deployment\deployment.json" --repository "${{ github.repository }}" --workflow "Remote DDS Soak" --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}" --commit-sha "${{ github.sha }}" --state-in "state-5" --run-dir "segment-run" --segment 6 --out "state-6"
       - name: Upload state-6
         if: '${{ always() }}'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         env: { DDS_REMOTE_TEST_KEY: '' }
         with: { name: 'remote-dds-state-${{ github.run_id }}-${{ github.run_attempt }}-6', path: state-6, if-no-files-found: error, retention-days: 7 }
       - name: Re-propagate segment 6 failure
@@ -404,16 +406,16 @@ jobs:
     if: "${{ needs['segment-6'].result == 'success' }}"
     runs-on: windows-2022
     steps:
-      - { name: Check out repository, uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 }
+      - { name: Check out repository, uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 }
       - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with: { node-version: 22, cache: npm }
       - { name: Install dependencies, run: npm ci }
       - name: Download deployment record
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with: { name: 'remote-dds-deployment-${{ github.run_id }}-${{ github.run_attempt }}', path: deployment }
       - name: Download state-6
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with: { name: 'remote-dds-state-${{ github.run_id }}-${{ github.run_attempt }}-6', path: state-6 }
       - name: Build room simulator report
         run: |
@@ -461,7 +463,7 @@ jobs:
       - name: Upload final evidence
         id: upload_evidence
         if: '${{ always() }}'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: 'remote-dds-final-evidence-${{ github.run_id }}-${{ github.run_attempt }}'
           path: final-evidence
@@ -475,6 +477,7 @@ jobs:
     needs: [prepare, segment-1, segment-2, segment-3, segment-4, segment-5, segment-6, gate]
     if: '${{ always() }}'
     runs-on: windows-2022
+    timeout-minutes: 20
     steps:
       - name: List exact current-run artifacts without Cloudflare credentials
         id: inventory
@@ -521,21 +524,21 @@ jobs:
           } | ConvertTo-Json | Set-Content -Encoding utf8 "cleanup\cleanup-result.json"
       - name: Check out repository
         if: "${{ steps.inventory.outputs.identity-count == '1' && steps.inventory.outputs.deployment-count <= '1' }}"
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Set up Node.js
         if: "${{ steps.inventory.outputs.identity-count == '1' && steps.inventory.outputs.deployment-count <= '1' }}"
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with: { node-version: 22, cache: npm }
       - name: Install dependencies
         if: "${{ steps.inventory.outputs.identity-count == '1' && steps.inventory.outputs.deployment-count <= '1' }}"
         run: npm ci
       - name: Download cleanup identity
         if: "${{ steps.inventory.outputs.identity-count == '1' && steps.inventory.outputs.deployment-count <= '1' }}"
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with: { name: 'remote-dds-identity-${{ github.run_id }}-${{ github.run_attempt }}', path: identity }
       - name: Download optional cleanup deployment record
         if: "${{ steps.inventory.outputs.identity-count == '1' && steps.inventory.outputs.deployment-count == '1' }}"
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with: { name: 'remote-dds-deployment-${{ github.run_id }}-${{ github.run_attempt }}', path: deployment }
       - name: Derive trusted cleanup identity
         id: cleanup_identity
@@ -606,7 +609,7 @@ jobs:
       - name: Upload primary cleanup result
         id: upload_cleanup
         if: '${{ always() }}'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         env: { DDS_REMOTE_TEST_KEY: '' }
         with:
           name: 'remote-dds-primary-cleanup-${{ github.run_id }}-${{ github.run_attempt }}'

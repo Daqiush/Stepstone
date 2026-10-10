@@ -12,7 +12,8 @@ permissions:
 
 jobs:
   cleanup:
-    runs-on: windows-latest
+    runs-on: windows-2022
+    timeout-minutes: 20
     steps:
       - name: Inventory exact triggering-run artifacts without Cloudflare credentials
         id: inventory
@@ -84,7 +85,7 @@ jobs:
         id: checkout
         if: "${{ steps.inventory.outcome == 'success' && steps.authorize.outcome == 'success' && steps.inventory.outputs.identity-count == '1' && steps.inventory.outputs.deployment-count <= '1' && steps.inventory.outputs.unexpected-count == '0' }}"
         continue-on-error: true
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: '${{ github.event.repository.default_branch }}'
           path: remote-dds-trusted-staging
@@ -104,7 +105,7 @@ jobs:
         id: setup_node
         if: "${{ steps.move_checkout.outcome == 'success' }}"
         continue-on-error: true
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: 22
 
@@ -119,7 +120,7 @@ jobs:
         id: download_identity
         if: "${{ steps.install.outcome == 'success' && steps.inventory.outputs.identity-count == '1' }}"
         continue-on-error: true
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: 'remote-dds-identity-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}'
           path: '${{ runner.temp }}/remote-dds-untrusted/${{ github.event.workflow_run.id }}/${{ github.event.workflow_run.run_attempt }}/identity'
@@ -130,7 +131,7 @@ jobs:
         id: download_deployment
         if: "${{ steps.install.outcome == 'success' && steps.inventory.outputs.identity-count == '1' && steps.inventory.outputs.deployment-count == '1' }}"
         continue-on-error: true
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: 'remote-dds-deployment-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}'
           path: '${{ runner.temp }}/remote-dds-untrusted/${{ github.event.workflow_run.id }}/${{ github.event.workflow_run.run_attempt }}/deployment'
@@ -216,7 +217,7 @@ jobs:
         id: upload_cleanup
         if: '${{ always() }}'
         continue-on-error: true
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         env:
           DDS_REMOTE_TEST_KEY: ''
         with:
