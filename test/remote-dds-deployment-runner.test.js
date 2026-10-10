@@ -889,7 +889,13 @@ test('a real timed-out synchronous Wrangler child returns control with a safe st
       execFile: require('node:child_process').execFileSync, wranglerOperationTimeoutMs: 50,
     }), 'WRANGLER_DEPLOY_TIMEOUT');
     assert.ok(Date.now() - started < 2_000, 'timed-out synchronous child did not return control promptly');
-  } finally { rmSync(dir, { recursive: true, force: true }); rmSync(f.root, { recursive: true, force: true }); }
+  } finally {
+    // On hosted Windows runners, killing a timed-out .cmd process can leave its
+    // descendant alive just long enough to hold the batch file open. Node's
+    // recursive remover retries EBUSY/EPERM/ENOTEMPTY with linear backoff.
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    rmSync(f.root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
 });
 
 test('a new collision between persisted preflight and deployment causes zero mutation', async () => {
