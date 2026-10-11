@@ -144,12 +144,31 @@ export async function verifyWorkersDeployment({ fetchImpl = fetch, accountId, sc
   if (result.status !== 'PRESENT') throw new Error('Cloudflare immutable version is absent');
   const [version] = result.versions;
   if (version.ownershipTag !== ownershipTag) throw new Error('Immutable Worker version ownership tag does not match');
-  return { versionId: version.id, ownershipTag, scriptETag: version.scriptETag, versionConfigurationSha256: version.versionConfigurationSha256, apiVerified: true, wranglerVersion: String(wranglerVersion).trim() };
+  return { versionId: version.id, ownershipTag, scriptETag: version.scriptETag, versionConfigurationSha256: version.versionConfigurationSha256,
+    hasRemoteTestSecret: version.hasRemoteTestSecret, remoteTestSecretBindingCount: version.remoteTestSecretBindingCount,
+    configurationWithoutRemoteTestSecretSha256: version.configurationWithoutRemoteTestSecretSha256,
+    apiVerified: true, wranglerVersion: String(wranglerVersion).trim() };
 }
 async function assertDeployedOwnership(options) {
   const snapshot = await readOwnershipSnapshot(options);
   if (!snapshot || snapshot.versionEvidence.status !== 'PRESENT' || !snapshot.versionEvidence.versions.length) throw new OwnershipRefusal('Refusing mutation: deployed immutable Worker version ownership is absent');
   return snapshot;
+}
+function assertSecretVersionTransition(before, after) {
+  if (before.worker.id !== after.worker.id) throw new OwnershipRefusal('Refusing mutation: immutable Worker object changed during secret upload');
+  const beforeIds = new Set(before.versionEvidence.versions.map((version) => version.id));
+  const created = after.versionEvidence.versions.filter((version) => !beforeIds.has(version.id));
+  const secretVersion = created[0];
+  if (created.length !== 1 || after.versionEvidence.versions[0]?.id !== secretVersion?.id
+      || after.versionEvidence.versions.length !== before.versionEvidence.versions.length + 1
+      || secretVersion.hasRemoteTestSecret !== true || secretVersion.remoteTestSecretBindingCount !== 1
+      || !before.versionEvidence.versions.some((version) => version.hasRemoteTestSecret === false
+        && version.scriptETag === secretVersion.scriptETag
+        && version.configurationWithoutRemoteTestSecretSha256 !== null
+        && version.configurationWithoutRemoteTestSecretSha256 === secretVersion.configurationWithoutRemoteTestSecretSha256)) {
+    throw new OwnershipRefusal('Refusing mutation: secret-created immutable version transition is not exact');
+  }
+  return secretVersion;
 }
 export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImpl = fetch, wrangler,
   root = resolve(import.meta.dirname, '..'), accountId, apiToken, remoteTestKey, context, preDeploymentIdentity,
@@ -216,12 +235,20 @@ export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImp
     const beforeSecret = await deploymentStage(() => assertDeployedOwnership(apiOptions),
       'DEPLOYED_OWNERSHIP_UNVERIFIED', 'DEPLOYED_OWNERSHIP_TIMEOUT');
     apiOptions.expectedWorkerId = beforeSecret.worker.id;
-    deploymentStageSync(() => runWrangler(['secret', 'put', 'DDS_REMOTE_TEST_KEY', '--config', configPath],
+    deploymentStageSync(() => runWrangler(['versions', 'secret', 'put', 'DDS_REMOTE_TEST_KEY', '--tag=' + ownershipTag, '--config', configPath],
       { timeout: wranglerOperationTimeoutMs, input: remoteTestKey + '\n', forceLocal: true }),
     'SECRET_UPLOAD_FAILED', 'SECRET_UPLOAD_TIMEOUT');
     const afterSecret = await deploymentStage(() => assertDeployedOwnership(apiOptions),
       'POST_SECRET_OWNERSHIP_UNVERIFIED', 'POST_SECRET_OWNERSHIP_TIMEOUT');
-    const versions = afterSecret.versionEvidence.versions;
+    const secretVersion = deploymentStageSync(() => assertSecretVersionTransition(beforeSecret, afterSecret),
+      'POST_SECRET_OWNERSHIP_UNVERIFIED', 'POST_SECRET_OWNERSHIP_TIMEOUT');
+    deploymentStageSync(() => runWrangler(['versions', 'deploy', '--version-id', secretVersion.id, '--percentage', '100', '--yes', '--config', configPath],
+      { timeout: wranglerOperationTimeoutMs, forceLocal: true }),
+    'SECRET_VERSION_DEPLOY_FAILED', 'SECRET_VERSION_DEPLOY_TIMEOUT');
+    const afterSecretDeploy = await deploymentStage(() => assertDeployedOwnership(apiOptions),
+      'POST_SECRET_OWNERSHIP_UNVERIFIED', 'POST_SECRET_OWNERSHIP_TIMEOUT');
+    deploymentStageSync(() => sameOwnershipSnapshot(afterSecretDeploy, afterSecret),
+      'POST_SECRET_OWNERSHIP_UNVERIFIED', 'POST_SECRET_OWNERSHIP_TIMEOUT');
     const subdomain = await deploymentStage(async () => {
       const subdomainResponse = await fetchImpl('https://api.cloudflare.com/client/v4/accounts/' + encodeURIComponent(accountId) + '/workers/subdomain', {
         headers: { authorization: 'Bearer ' + apiToken }, signal: deadlineSignal({ signal, timeoutMs: MANAGEMENT_API_TIMEOUT_MS }),
@@ -237,8 +264,11 @@ export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImp
     const verified = await deploymentStage(async () => {
       try {
         const value = await verifyWorkersDeployment({ fetchImpl, accountId, scriptName: temporaryWorkerName, apiToken,
-          expectedVersionId: versions[0].id, ownershipTag, wranglerVersion, signal });
-        const currentMetadata = { id: value.versionId, ownershipTag: value.ownershipTag, scriptETag: value.scriptETag, versionConfigurationSha256: value.versionConfigurationSha256 };
+          expectedVersionId: secretVersion.id, ownershipTag, wranglerVersion, signal });
+        const currentMetadata = { id: value.versionId, ownershipTag: value.ownershipTag, scriptETag: value.scriptETag,
+          versionConfigurationSha256: value.versionConfigurationSha256, hasRemoteTestSecret: value.hasRemoteTestSecret,
+          remoteTestSecretBindingCount: value.remoteTestSecretBindingCount,
+          configurationWithoutRemoteTestSecretSha256: value.configurationWithoutRemoteTestSecretSha256 };
         observeImmutableVersions([currentMetadata], apiOptions.observedVersions);
         return value;
       } catch (error) {
@@ -258,7 +288,7 @@ export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImp
         throw new Error('Remote deployment evidence did not verify the build and immutable version');
       }
     }, 'ENDPOINT_VERIFICATION_FAILED', 'ENDPOINT_VERIFICATION_TIMEOUT');
-    result = assertVerifiedDeployment({ ...verified, workerId: afterSecret.worker.id, workersDevUrl, temporaryWorkerName, identity, localConfigurationSha256 });
+    result = assertVerifiedDeployment({ ...verified, workerId: afterSecretDeploy.worker.id, workersDevUrl, temporaryWorkerName, identity, localConfigurationSha256 });
   } catch (error) {
     primaryError = error;
     // An ownership refusal is final for this attempt, even if a later read would

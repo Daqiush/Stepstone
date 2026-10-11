@@ -491,6 +491,41 @@ test('cleanup CLI atomically persists only schema-v2 safe success or failed resu
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('predeployment-only recovery accepts the one untagged version produced by legacy secret put', async () => {
+  const m = await mod(), f = await fixture();
+  const tagged = structuredClone(f.state.details[0]);
+  const secretSuccessor = structuredClone(tagged);
+  secretSuccessor.id = 'secret-v2';
+  secretSuccessor.annotations = {};
+  secretSuccessor.resources.bindings.push({ type: 'secret_text', name: 'DDS_REMOTE_TEST_KEY' });
+  f.state.details = [secretSuccessor, tagged];
+  const result = await m.cleanupRemoteDdsDeployment({ ...f.options, deploymentRecord: undefined });
+  assert.equal(result.status, 'deleted');
+  assert.equal(f.mutations().length, 2);
+});
+
+for (const drift of ['missing secret', 'wrong secret type', 'changed script', 'changed base configuration', 'second untagged version']) {
+  test('legacy secret recovery refuses ' + drift + ' before mutation', async () => {
+    const m = await mod(), f = await fixture();
+    const tagged = structuredClone(f.state.details[0]);
+    const secretSuccessor = structuredClone(tagged);
+    secretSuccessor.id = 'secret-v2';
+    secretSuccessor.annotations = {};
+    secretSuccessor.resources.bindings.push({ type: 'secret_text', name: 'DDS_REMOTE_TEST_KEY' });
+    if (drift === 'missing secret') secretSuccessor.resources.bindings.pop();
+    if (drift === 'wrong secret type') secretSuccessor.resources.bindings.at(-1).type = 'plain_text';
+    if (drift === 'changed script') secretSuccessor.resources.script.etag = 'other-etag';
+    if (drift === 'changed base configuration') secretSuccessor.resources.script_runtime.compatibility_date = '2026-10-01';
+    f.state.details = [secretSuccessor, tagged];
+    if (drift === 'second untagged version') {
+      const other = structuredClone(secretSuccessor); other.id = 'secret-v3'; f.state.details.unshift(other);
+    }
+    await assertCleanupDiagnostic(() => m.cleanupRemoteDdsDeployment({ ...f.options, deploymentRecord: undefined }),
+      'CLEANUP_OWNERSHIP_UNVERIFIED');
+    assert.equal(f.mutations().length, 0);
+  });
+}
+
 test('cleanup process keeps the stage diagnostic first when safe result persistence also fails', async () => {
   const m = await mod(), f = await fixture(); const dir = mkdtempSync(join(tmpdir(), 'dds-cleanup-write-failure-'));
   try {

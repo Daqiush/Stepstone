@@ -58,6 +58,7 @@ const NEW_DEPLOYMENT_DIAGNOSTICS = [
   'WRANGLER_DEPLOY_FAILED',
   'DEPLOYED_OWNERSHIP_UNVERIFIED',
   'SECRET_UPLOAD_FAILED',
+  'SECRET_VERSION_DEPLOY_FAILED',
   'POST_SECRET_OWNERSHIP_UNVERIFIED',
   'SUBDOMAIN_LOOKUP_FAILED',
   'IMMUTABLE_VERSION_UNVERIFIED',
@@ -67,6 +68,7 @@ const NEW_DEPLOYMENT_DIAGNOSTICS = [
   'WRANGLER_DEPLOY_TIMEOUT',
   'DEPLOYED_OWNERSHIP_TIMEOUT',
   'SECRET_UPLOAD_TIMEOUT',
+  'SECRET_VERSION_DEPLOY_TIMEOUT',
   'POST_SECRET_OWNERSHIP_TIMEOUT',
   'SUBDOMAIN_LOOKUP_TIMEOUT',
   'IMMUTABLE_VERSION_TIMEOUT',
@@ -148,27 +150,40 @@ async function ciIdentity(secret = TOKEN) { return (await import('../scripts/rem
 function versionDetail(identity, tag = identity.ownershipTag) {
   return { success: true, result: { id: 'deployed-v1', annotations: tag === null ? {} : { 'workers/tag': tag }, resources: { script: { etag: 'script-etag-1' }, bindings: [{ type: 'plain_text', name: 'DDS_REMOTE_TEST', text: 'true' }], script_runtime: { compatibility_date: '2026-09-22' } } } };
 }
+function secretVersionDetail(identity, tag = identity.ownershipTag) {
+  const detail = versionDetail(identity, tag);
+  detail.result.id = 'deployed-v2';
+  detail.result.resources.bindings.push({ type: 'secret_text', name: 'DDS_REMOTE_TEST_KEY' });
+  return detail;
+}
 async function deploymentFixture(overrides = {}) {
   const mod = await deployment(); const identity = await ciIdentity(overrides.apiToken ?? TOKEN); const root = repo();
-  const events = []; let deployed = false, deleted = false, buildId;
+  const events = []; let deployed = false, deleted = false, buildId, secretVersionCreated = false, activeVersionId = 'deployed-v1';
   const fetchImpl = async (url, options = {}) => {
     const parsed = new URL(url); events.push({ url, method: options.method ?? 'GET' });
-    if (parsed.hostname.endsWith('.workers.dev')) return parsed.pathname === '/' ? response({}, 404) : response({ operationResult: { buildId, workerVersionId: 'deployed-v1' } });
+    if (parsed.hostname.endsWith('.workers.dev')) return parsed.pathname === '/' ? response({}, 404) : response({ operationResult: { buildId, workerVersionId: activeVersionId } });
     if (options.method === 'DELETE' && parsed.pathname.endsWith('/subdomain')) return response({ success: true, result: { enabled: false, previews_enabled: false }, errors: [], messages: [] });
     if (options.method === 'DELETE') { deleted = true; return response({ success: true }); }
     if (parsed.pathname.endsWith(`/workers/scripts/${identity.workerName}`)) return deployed && !deleted ? response({}) : notFound();
     if (parsed.pathname.endsWith('/workers/workers')) return response(page(deployed && !deleted ? [{ id: WORKER_ID, name: identity.workerName }] : []));
     if (parsed.pathname.endsWith('/workers/scripts-search')) return response(page(deployed && !deleted ? [{ script_name: identity.workerName }] : []));
-    if (parsed.pathname.endsWith('/versions')) return response(versionPage(deployed && !deleted ? [{ id: 'deployed-v1' }] : []));
+    if (parsed.pathname.endsWith('/versions')) return response(versionPage(deployed && !deleted
+      ? secretVersionCreated ? [{ id: 'deployed-v2' }, { id: 'deployed-v1' }] : [{ id: 'deployed-v1' }]
+      : []));
+    if (parsed.pathname.endsWith('/versions/deployed-v2')) {
+      return response(secretVersionDetail(identity));
+    }
     if (parsed.pathname.endsWith('/versions/deployed-v1')) return response(versionDetail(identity));
     if (parsed.pathname.endsWith('/workers/subdomain')) return response({ success: true, result: { subdomain: 'example' } });
     throw new Error(`Unexpected test request: ${url}`);
   };
   const execFile = (command, args, options = {}) => {
-    events.push({ command, args: [...args], input: options.input });
-    if (args[0] === 'deploy') { deployed = true; buildId = args.find((arg) => arg.startsWith('DDS_DEPLOYMENT_BUILD_ID:'))?.split(':')[1]; return ''; }
-    if (args[1] === 'secret') return '';
-    if (args[0] === '--version') return '4.33.0';
+    const logicalArgs = /(?:^|[\\/])wrangler\.js$/.test(args[0] ?? '') ? args.slice(1) : args;
+    events.push({ command, args: [...logicalArgs], input: options.input });
+    if (logicalArgs[0] === 'deploy') { deployed = true; buildId = logicalArgs.find((arg) => arg.startsWith('DDS_DEPLOYMENT_BUILD_ID:'))?.split(':')[1]; return ''; }
+    if (logicalArgs[0] === 'versions' && logicalArgs[1] === 'secret') { secretVersionCreated = true; return ''; }
+    if (logicalArgs[0] === 'versions' && logicalArgs[1] === 'deploy') { activeVersionId = 'deployed-v2'; return ''; }
+    if (logicalArgs[0] === '--version') return '4.33.0';
     throw new Error('Unexpected test command');
   };
   const options = { root, accountId: 'acct', apiToken: TOKEN, remoteTestKey: KEY, context: CONTEXT, identity, fetchImpl, execFile,
@@ -194,7 +209,7 @@ test('deployment manifest binds ownership, configuration, exact endpoint, immuta
     assert.equal(manifest.localConfigurationSha256, verified.localConfigurationSha256);
     assert.equal(manifest.scriptETag, 'script-etag-1');
     assert.match(manifest.versionConfigurationSha256, /^[a-f0-9]{64}$/);
-    assert.equal(manifest.workerVersionId, 'deployed-v1');
+    assert.equal(manifest.workerVersionId, 'deployed-v2');
     assert.equal(manifest.workerId, WORKER_ID);
     assert.equal(manifest.verifiedDeployment.workerId, WORKER_ID);
     assert.throws(() => mod.assertVerifiedDeployment({ ...verified, workerId: new String(WORKER_ID) }), /immutable Worker ID/i);
@@ -264,7 +279,7 @@ test('Wrangler child processes do not inherit the exported remote test key', asy
     });
     assert.ok(children.length >= 3);
     for (const child of children) assert.equal(Object.hasOwn(child.env, 'DDS_REMOTE_TEST_KEY'), false, `key leaked to ${child.args.join(' ')}`);
-    assert.equal(children.find((child) => child.args[1] === 'secret').input, KEY + '\n');
+    assert.equal(children.find((child) => child.args.includes('secret')).input, KEY + '\n');
   } finally {
     if (previous === undefined) delete process.env.DDS_REMOTE_TEST_KEY;
     else process.env.DDS_REMOTE_TEST_KEY = previous;
@@ -449,6 +464,20 @@ for (const [label, payload] of [
   assert.equal(mutations, 0);
 });
 
+test('the secret is created as a tagged version before that exact version is deployed', async () => {
+  const f = await deploymentFixture();
+  try {
+    await f.mod.deployAndVerifyWorkers(f.options);
+    const commands = f.events.filter((event) => event.command).map((event) => event.args);
+    const secretIndex = commands.findIndex((args) => args[0] === 'versions' && args[1] === 'secret' && args[2] === 'put');
+    const versionDeployIndex = commands.findIndex((args) => args[0] === 'versions' && args[1] === 'deploy');
+    assert.ok(secretIndex >= 0, 'the secret must be uploaded with the version-aware command');
+    assert.ok(commands[secretIndex].includes('--tag=' + f.identity.ownershipTag), 'the secret-created version must carry the ownership tag');
+    assert.ok(versionDeployIndex > secretIndex, 'the verified secret-created version must be deployed only after upload');
+    assert.equal(commands[versionDeployIndex].includes('--yes'), true);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test('Wrangler deployment failures are classified without exposing command diagnostics', async () => {
   const mod = await deployment(); let stderr = '', exitCode;
   const failure = new mod.ExternalCommandFailure(new Error('Wrangler API request failed: token-marker account-marker'));
@@ -617,13 +646,13 @@ test('deployment repeats collision checks before mutation and passes the same va
     });
     assert.equal(attempts, 2);
     assert.deepEqual(configs[1], configs[0]);
-    assert.equal(verified.versionId, 'deployed-v1');
+    assert.equal(verified.versionId, 'deployed-v2');
     assert.equal(verified.temporaryWorkerName, f.identity.workerName);
     const firstDeploy = f.events.findIndex((e) => e.args?.[0] === 'deploy');
     for (const suffix of ['/workers/workers', '/workers/scripts-search']) {
       assert.ok(f.events.slice(0, firstDeploy).filter((e) => e.url && new URL(e.url).pathname.endsWith(suffix)).length >= 2);
     }
-    const secret = f.events.find((e) => e.args?.[1] === 'secret');
+    const secret = f.events.find((e) => e.args?.includes('secret'));
     assert.equal(secret.input, KEY + '\n');
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
@@ -681,10 +710,11 @@ test('default Wrangler invocation uses the project-local CLI for deploy, secret,
       const logicalArgs = args[0] === cliPath && args[1] !== 'secret' ? args.slice(1) : args;
       return f.execFile(command, logicalArgs, options);
     } });
-    assert.deepEqual(calls.map(({ command }) => command), [process.execPath, process.execPath, process.execPath]);
+    assert.deepEqual(calls.map(({ command }) => command), [process.execPath, process.execPath, process.execPath, process.execPath]);
     assert.deepEqual(calls.map(({ args }) => args.slice(0, 2)), [
       [cliPath, 'deploy'],
-      [cliPath, 'secret'],
+      [cliPath, 'versions'],
+      [cliPath, 'versions'],
       [cliPath, '--version'],
     ]);
   } finally { rmSync(f.root, { recursive: true, force: true }); }
@@ -698,7 +728,7 @@ test('every Wrangler invocation uses the shared bounded UTF-8 child options', as
       return f.execFile(command, args, options);
     } });
     const deploy = calls.find(({ args }) => args[0] === 'deploy');
-    const secret = calls.find(({ args }) => args[1] === 'secret');
+    const secret = calls.find(({ args }) => args.includes('secret'));
     const version = calls.find(({ args }) => args[0] === '--version');
     for (const call of [deploy, secret, version]) {
       assert.equal(call.options.encoding, 'utf8');
@@ -748,13 +778,21 @@ for (const [label, configure, code] of [
       return f.execFile(command, args, options);
     } }), 'WRANGLER_DEPLOY_TIMEOUT'],
     ['secret failure', (f) => ({ execFile: (command, args, options) => {
-      if (args[1] === 'secret') throw new Error('private-secret-marker');
+      if (args.includes('secret')) throw new Error('private-secret-marker');
       return f.execFile(command, args, options);
     } }), 'SECRET_UPLOAD_FAILED'],
     ['secret timeout', (f) => ({ execFile: (command, args, options) => {
-      if (args[1] === 'secret') throw Object.assign(new Error('private-timeout-marker'), { code: 'ETIMEDOUT' });
+      if (args.includes('secret')) throw Object.assign(new Error('private-timeout-marker'), { code: 'ETIMEDOUT' });
       return f.execFile(command, args, options);
     } }), 'SECRET_UPLOAD_TIMEOUT'],
+    ['secret version deploy failure', (f) => ({ execFile: (command, args, options) => {
+      if (args.includes('versions') && args.includes('deploy')) throw new Error('private-version-deploy-marker');
+      return f.execFile(command, args, options);
+    } }), 'SECRET_VERSION_DEPLOY_FAILED'],
+    ['secret version deploy timeout', (f) => ({ execFile: (command, args, options) => {
+      if (args.includes('versions') && args.includes('deploy')) throw Object.assign(new Error('private-timeout-marker'), { code: 'ETIMEDOUT' });
+      return f.execFile(command, args, options);
+    } }), 'SECRET_VERSION_DEPLOY_TIMEOUT'],
     ['subdomain failure', (f) => ({ fetchImpl: async (url, options) => {
       if (new URL(url).pathname.endsWith('/workers/subdomain')) throw new Error('private-subdomain-marker');
       return f.fetchImpl(url, options);
@@ -797,7 +835,7 @@ test('preflight and ownership reads map nested request deadlines to their curren
       await assertDiagnostic(() => f.mod.deployAndVerifyWorkers({ ...f.options,
         execFile: (command, args, options) => {
           if (args[0] === 'deploy') deployed = true;
-          if (args[1] === 'secret') uploaded = true;
+          if (args.includes('secret')) uploaded = true;
           return f.execFile(command, args, options);
         },
         fetchImpl: async (url, options) => {
@@ -1292,7 +1330,7 @@ for (const [label, status, errors, expectedCode] of unsafeAbsenceCases) {
     try {
       await assertDiagnostic(() => f.mod.deployAndVerifyWorkers({ ...f.options,
         execFile: (command, args) => {
-          if (args[1] === 'secret') secrets++;
+          if (args.includes('secret')) secrets++;
           attempts++; f.setDeployed(true); throw new Error('Worker does not exist [code: 10007]');
         },
         fetchImpl: async (url, options = {}) => {
@@ -1695,7 +1733,7 @@ test('retry refuses Worker replacement during the sleep window with no second de
       sleepImpl: async () => { sleepingComplete = true; },
       execFile: (command, args) => {
         if (args[0] === 'deploy') { attempts++; f.setDeployed(true); if (attempts === 1) throw new Error('Worker does not exist [code: 10007]'); return ''; }
-        if (args[1] === 'secret') { secrets++; return ''; }
+        if (args.includes('secret')) { secrets++; return ''; }
         return '4.33.0';
       },
       fetchImpl: async (url, options = {}) => {
@@ -1715,7 +1753,7 @@ test('retry refuses ownership-state drift during sleep even if immutable Worker 
       sleepImpl: async () => { afterSleep = true; },
       execFile: (command, args) => {
         if (args[0] === 'deploy') { attempts++; f.setDeployed(true); throw new Error('Worker does not exist [code: 10007]'); }
-        if (args[1] === 'secret') secrets++;
+        if (args.includes('secret')) secrets++;
         return '';
       },
       fetchImpl: async (url, options = {}) => {
@@ -1734,7 +1772,7 @@ for (const tag of [null, 'b'.repeat(43)]) test('successful Wrangler deploy with 
   const f = await deploymentFixture(); let secrets = 0, deletes = 0;
   try {
     await assert.rejects(() => f.mod.deployAndVerifyWorkers({ ...f.options,
-      execFile: (command, args, options) => { if (args[1] === 'secret') secrets++; return f.execFile(command, args, options); },
+      execFile: (command, args, options) => { if (args.includes('secret')) secrets++; return f.execFile(command, args, options); },
       fetchImpl: async (url, options = {}) => {
         if (options.method === 'DELETE') deletes++;
         if (new URL(url).pathname.endsWith('/versions/deployed-v1')) return response(versionDetail(f.identity, tag));
@@ -1759,7 +1797,7 @@ test('secret upload is bracketed by complete exact object, legacy, and immutable
   const f = await deploymentFixture(); let uploaded = false, boundary;
   try {
     await f.mod.deployAndVerifyWorkers({ ...f.options, execFile: (command, args, options) => {
-      if (args[1] === 'secret') {
+      if (args.includes('secret')) {
         const deployedAt = f.events.findLastIndex((e) => e.args?.[0] === 'deploy');
         const before = f.events.slice(deployedAt + 1);
         for (const suffix of ['/workers/workers', '/workers/scripts-search', '/workers/scripts/' + f.identity.workerName, '/versions/deployed-v1']) {
@@ -1781,7 +1819,7 @@ test('a replaced immutable Worker after secret upload is refused without cleanup
   const f = await deploymentFixture(); let uploaded = false, deletes = 0;
   try {
     await assert.rejects(() => f.mod.deployAndVerifyWorkers({ ...f.options,
-      execFile: (command, args, options) => { if (args[1] === 'secret') uploaded = true; return f.execFile(command, args, options); },
+      execFile: (command, args, options) => { if (args.includes('secret')) uploaded = true; return f.execFile(command, args, options); },
       fetchImpl: async (url, options = {}) => {
         if (options.method === 'DELETE') deletes++;
         if (uploaded && new URL(url).pathname.endsWith('/workers/workers')) return response(page([{ id: 'c'.repeat(32), name: f.identity.workerName }]));
@@ -1796,7 +1834,7 @@ for (const tag of [null, 'b'.repeat(43)]) test('post-secret ownership refusal ca
   const f = await deploymentFixture(); let uploaded = false, rejectedOnce = false, deletes = 0;
   try {
     await assert.rejects(() => f.mod.deployAndVerifyWorkers({ ...f.options,
-      execFile: (command, args, options) => { if (args[1] === 'secret') uploaded = true; return f.execFile(command, args, options); },
+      execFile: (command, args, options) => { if (args.includes('secret')) uploaded = true; return f.execFile(command, args, options); },
       fetchImpl: async (url, options = {}) => {
         if (options.method === 'DELETE') deletes++;
         if (uploaded && !rejectedOnce && new URL(url).pathname.endsWith('/versions/deployed-v1')) {
@@ -1811,11 +1849,10 @@ for (const tag of [null, 'b'.repeat(43)]) test('post-secret ownership refusal ca
 
 test('a secret-created immutable version is reverified and supplies the final id, ETag, and configuration fingerprint', async () => {
   const f = await deploymentFixture(); let uploaded = false;
-  const finalDetail = versionDetail(f.identity); finalDetail.result.id = 'deployed-v2'; finalDetail.result.resources.script.etag = 'script-etag-2';
-  finalDetail.result.resources.bindings.push({ type: 'secret_text', name: 'DDS_REMOTE_TEST_KEY' });
+  const finalDetail = secretVersionDetail(f.identity);
   try {
     const verified = await f.mod.deployAndVerifyWorkers({ ...f.options,
-      execFile: (command, args, options) => { if (args[1] === 'secret') uploaded = true; return f.execFile(command, args, options); },
+      execFile: (command, args, options) => { if (args.includes('secret')) uploaded = true; return f.execFile(command, args, options); },
       fetchImpl: async (url, options = {}) => {
         const path = new URL(url).pathname;
         if (uploaded && path.endsWith('/versions')) return response(versionPage([{ id: 'deployed-v2' }, { id: 'deployed-v1' }]));
@@ -1826,7 +1863,7 @@ test('a secret-created immutable version is reverified and supplies the final id
         return f.fetchImpl(url, options);
       },
     });
-    assert.equal(verified.versionId, 'deployed-v2'); assert.equal(verified.scriptETag, 'script-etag-2');
+    assert.equal(verified.versionId, 'deployed-v2'); assert.equal(verified.scriptETag, 'script-etag-1');
     const { canonicalJson } = await import('../scripts/remote-dds-soak-state.mjs');
     assert.equal(verified.versionConfigurationSha256, require('node:crypto').createHash('sha256').update(canonicalJson({ bindings: finalDetail.result.resources.bindings, script_runtime: finalDetail.result.resources.script_runtime })).digest('hex'));
   } finally { rmSync(f.root, { recursive: true, force: true }); }
@@ -1838,7 +1875,7 @@ for (const boundary of ['after secret', 'final detail', 'partial cleanup']) {
     try {
       await assertDiagnostic(() => f.mod.deployAndVerifyWorkers({ ...f.options,
         execFile: (command, args, options) => {
-          if (driftSeen && (args[0] === 'deploy' || args[1] === 'secret')) laterMutations++;
+          if (driftSeen && (args[0] === 'deploy' || args.includes('secret'))) laterMutations++;
           if (args[0] === 'deploy') {
             attempts++;
             if (boundary === 'partial cleanup') {
@@ -1846,16 +1883,20 @@ for (const boundary of ['after secret', 'final detail', 'partial cleanup']) {
               throw new Error(attempts === 1 ? 'Worker does not exist [code: 10007]' : 'Second deployment failed');
             }
           }
-          if (args[1] === 'secret') secrets++;
+          if (args.includes('secret')) secrets++;
           return f.execFile(command, args, options);
         },
         fetchImpl: async (url, options = {}) => {
           if (options.method === 'DELETE') { deletes++; if (driftSeen) laterMutations++; }
-          if (new URL(url).pathname.endsWith('/versions/deployed-v1')) {
+          const versionPath = new URL(url).pathname;
+          const targetVersion = boundary === 'final detail' ? 'deployed-v2' : 'deployed-v1';
+          if (versionPath.endsWith('/versions/' + targetVersion)) {
             detailReads++;
             if ((boundary === 'after secret' && detailReads >= 2) || (boundary !== 'after secret' && detailReads === 3)) {
               driftSeen = true;
-              const detail = versionDetail(f.identity, drift === 'ownership tag' ? 'b'.repeat(43) : f.identity.ownershipTag);
+              const detail = targetVersion === 'deployed-v2'
+                ? secretVersionDetail(f.identity, drift === 'ownership tag' ? 'b'.repeat(43) : f.identity.ownershipTag)
+                : versionDetail(f.identity, drift === 'ownership tag' ? 'b'.repeat(43) : f.identity.ownershipTag);
               if (drift === 'script ETag') detail.result.resources.script.etag = 'changed-etag';
               if (drift === 'version config') detail.result.resources.script_runtime.compatibility_date = '2026-09-30';
               return response(detail);
@@ -1880,10 +1921,10 @@ for (const drift of ['missing tag', 'foreign tag', 'script ETag', 'version confi
   try {
     await assertDiagnostic(() => f.mod.deployAndVerifyWorkers({ ...f.options, fetchImpl: async (url, options = {}) => {
       if (options.method === 'DELETE') deletes++;
-      if (new URL(url).pathname.endsWith('/versions/deployed-v1')) {
+      if (new URL(url).pathname.endsWith('/versions/deployed-v2')) {
         detailReads++;
         if (detailReads === 3) {
-          const detail = versionDetail(f.identity, drift === 'missing tag' ? null : drift === 'foreign tag' ? 'b'.repeat(43) : f.identity.ownershipTag);
+          const detail = secretVersionDetail(f.identity, drift === 'missing tag' ? null : drift === 'foreign tag' ? 'b'.repeat(43) : f.identity.ownershipTag);
           if (drift === 'script ETag') detail.result.resources.script.etag = 'changed-etag';
           if (drift === 'version config') detail.result.resources.script_runtime.compatibility_date = '2026-09-30';
           return response(detail);

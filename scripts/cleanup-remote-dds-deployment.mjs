@@ -72,7 +72,8 @@ export async function cleanupRemoteDdsDeployment({ accountId, apiToken, context,
       if (record && workersDevUrl !== record.endpoint) throw new OwnershipRefusal('Refusing mutation: supplied endpoint does not match attested deployment');
     }
     const apiOptions = { accountId, apiToken, temporaryWorkerName: trustedIdentity.workerName, ownershipTag: trustedIdentity.ownershipTag,
-      fetchImpl, observedVersions, signal, expectedWorkerId: record?.workerId ?? initialOwnershipSnapshot?.worker.id };
+      fetchImpl, observedVersions, signal, expectedWorkerId: record?.workerId ?? initialOwnershipSnapshot?.worker.id,
+      allowLegacySecretSuccessor: record === undefined };
     const before = await cleanupStage(() => readOwnershipSnapshot(apiOptions), 'CLEANUP_OWNERSHIP_UNVERIFIED', 'CLEANUP_OWNERSHIP_READ_TIMEOUT', result);
     await cleanupStage(() => {
       if (initialOwnershipSnapshot !== undefined) sameOwnershipSnapshot(before, initialOwnershipSnapshot);

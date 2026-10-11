@@ -251,8 +251,16 @@ function normalizedVersion(result, expectedId) {
       || !(Array.isArray(bindings) || isRecord(bindings))
       || !resources.script_runtime || typeof resources.script_runtime !== 'object' || Array.isArray(resources.script_runtime)) throw invalidResponse('Cloudflare immutable version resource metadata is missing or malformed');
   const tag = result.annotations?.['workers/tag'];
+  const bindingList = Array.isArray(bindings) ? bindings : null;
+  const remoteTestSecretBindings = bindingList?.filter((binding) => binding?.name === 'DDS_REMOTE_TEST_KEY') ?? [];
+  const hasRemoteTestSecret = remoteTestSecretBindings.length === 1 && remoteTestSecretBindings[0]?.type === 'secret_text';
+  const configurationWithoutRemoteTestSecretSha256 = bindingList === null ? null : createHash('sha256').update(canonicalJson({
+    bindings: bindingList.filter((binding) => binding?.name !== 'DDS_REMOTE_TEST_KEY'),
+    script_runtime: resources.script_runtime,
+  })).digest('hex');
   return { id: result.id, ownershipTag: typeof tag === 'string' ? tag : null, scriptETag: resources.script.etag,
-    versionConfigurationSha256: createHash('sha256').update(canonicalJson({ bindings: resources.bindings, script_runtime: resources.script_runtime })).digest('hex') };
+    versionConfigurationSha256: createHash('sha256').update(canonicalJson({ bindings: resources.bindings, script_runtime: resources.script_runtime })).digest('hex'),
+    hasRemoteTestSecret, remoteTestSecretBindingCount: remoteTestSecretBindings.length, configurationWithoutRemoteTestSecretSha256 };
 }
 export async function readWorkerVersions(options) {
   const client = inputs(options); const path = `scripts/${encodeURIComponent(client.name)}/versions`;
@@ -331,7 +339,19 @@ export async function readOwnershipSnapshot(options) {
     const versionEvidence = await readWorkerVersions(options);
     observeImmutableVersions(versionEvidence.versions, options.observedVersions ?? new Map());
     if (versionEvidence.versions.length === 0 && legacy) throw new OwnershipRefusal('Refusing mutation: empty version evidence with an existing legacy script does not prove an undeployed placeholder');
-    if (versionEvidence.versions.some((version) => version.ownershipTag !== options.ownershipTag)) throw new OwnershipRefusal('Refusing mutation: immutable Worker version ownership tag is missing or mismatched');
+    const mismatched = versionEvidence.versions.filter((version) => version.ownershipTag !== options.ownershipTag);
+    if (mismatched.length) {
+      const [latest, ...older] = versionEvidence.versions;
+      const legacySecretSuccessor = options.allowLegacySecretSuccessor === true
+        && mismatched.length === 1 && mismatched[0] === latest && latest?.ownershipTag === null
+        && latest.hasRemoteTestSecret === true && latest.remoteTestSecretBindingCount === 1
+        && older.length > 0 && older.every((version) => version.ownershipTag === options.ownershipTag)
+        && older.some((version) => version.hasRemoteTestSecret === false
+          && version.scriptETag === latest.scriptETag
+          && version.configurationWithoutRemoteTestSecretSha256 !== null
+          && version.configurationWithoutRemoteTestSecretSha256 === latest.configurationWithoutRemoteTestSecretSha256);
+      if (!legacySecretSuccessor) throw new OwnershipRefusal('Refusing mutation: immutable Worker version ownership tag is missing or mismatched');
+    }
     return { worker, legacy, versionEvidence };
   } catch (error) {
     if (error instanceof OwnershipRefusal) throw error;
