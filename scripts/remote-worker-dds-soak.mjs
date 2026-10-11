@@ -221,7 +221,7 @@ async function runFixtureChecks({ endpoint, key, runId, fixtures, buildId, evide
     if (JSON.stringify(normalizeDdsResult(kind, worker)) !== JSON.stringify(normalizeDdsResult(kind, native))) throw new Error(`Fixture native parity mismatch: ${item.id}`);
     if (JSON.stringify(normalizeDdsResult(kind, native)) !== JSON.stringify(normalizeDdsResult(kind, expected))) throw new Error(`Fixture corpus drift: ${item.id}`);
     if (index === 0 && remote.operationResult.buildId !== undefined) assertEndpointBuild(remote.operationResult, buildId);
-    const fixtureEvidence = { id: item.id, route, input: JSON.parse(body), nativeBaseline: native, remote: remote.operationResult,
+    const fixtureEvidence = { id: item.id, kind, route, input: JSON.parse(body), nativeBaseline: native, remote: remote.operationResult,
       accounting: remote.accounting, accountingActivationId: remote.accountingActivationId, replayed: remote.replayed };
     state.recordAuxiliaryResponse({ operationId, route, replayed: remote.replayed, response: remote.operationResult,
       accountingActivationId: remote.accountingActivationId,

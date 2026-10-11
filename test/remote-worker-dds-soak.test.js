@@ -318,6 +318,19 @@ test('fixture validation uses the injected remote dispatch and native baseline',
   assert.equal(h.events.some(([kind]) => kind === 'failure'), false);
 });
 
+test('runner persists the fixture kind in checkpoint evidence', async (t) => {
+  const h = await segmentHarness(t, { count: 1 });
+  const table = Array.from({ length: 5 }, () => [0, 0, 0, 0]);
+  h.dependencies.fixtures = [{ id: 'fixture-table', kind: 'table', hands: {}, expected: table }];
+  const checkpoints = [];
+  h.dependencies.writeCheckpoint = (file, value) => {
+    if (file.endsWith('evidence.json')) checkpoints.push(structuredClone(value));
+  };
+  const result = await h.runner.runRemoteSoak(h.options, h.dependencies);
+  assert.equal(result.disposition, 'COMPLETE');
+  assert.equal(checkpoints.at(-1).fixtures[0].kind, 'table');
+});
+
 test('a durable recovered intent completes before writing an expired deadline disposition', async (t) => {
   const h = await segmentHarness(t);
   h.options.deadlineMs = 10;

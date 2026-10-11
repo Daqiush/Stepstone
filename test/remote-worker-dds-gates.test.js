@@ -137,6 +137,46 @@ test('a complete, version-bound remote soak report passes every gate', async () 
   for (const name of ['corpus', 'journal', 'deployment', 'wasm-bundle', 'heap', 'p99-wasm-elapsed', 'max-wasm-elapsed', 'queue-delay', 'worker-inbound', 'queued-do-commands', 'sqlite', 'room-simulator']) assert.match(result.stdout, new RegExp(`PASS ${name}`));
 });
 
+test('gate checker treats canonically reordered recovered evidence as semantically identical', async () => {
+  const { canonicalJson } = await import('../scripts/remote-dds-soak-state.mjs');
+  const run = await validRun();
+  run.evidence = JSON.parse(canonicalJson(run.evidence));
+  run.journal = run.journal.map((entry) => JSON.parse(canonicalJson(entry)));
+  const result = check(run);
+  assert.equal(result.status, 0, result.stderr + result.stdout);
+  assert.match(result.stdout, /PASS corpus/);
+  assert.match(result.stdout, /PASS fixture-first/);
+});
+
+test('gate checker accepts legacy fixture evidence whose route proves the fixture kind', async () => {
+  const { canonicalJson, sha256Utf8 } = await import('../scripts/remote-dds-soak-state.mjs');
+  const run = await validRun();
+  for (const [index, fixture] of run.evidence.fixtures.entries()) {
+    const physical = run.journal.find((entry) => entry.type === 'physical' && entry.operationId === `fixture.${String(index).padStart(6, '0')}`);
+    fixture.route = physical.route;
+    delete fixture.kind;
+    physical.evidenceHash = sha256Utf8(canonicalJson(fixture));
+  }
+  const result = check(run);
+  assert.equal(result.status, 0, result.stderr + result.stdout);
+  assert.match(result.stdout, /PASS fixture-first/);
+});
+
+for (const route of ['/__dds/ordered-probe', '/__dds/table-typo']) {
+  test(`gate checker rejects fixture evidence whose table kind contradicts route ${route}`, async () => {
+    const { canonicalJson, sha256Utf8 } = await import('../scripts/remote-dds-soak-state.mjs');
+    const run = await validRun();
+    const fixture = run.evidence.fixtures.find((item) => item.kind === 'table');
+    const index = run.evidence.fixtures.indexOf(fixture);
+    fixture.route = route;
+    const physical = run.journal.find((entry) => entry.type === 'physical' && entry.operationId === `fixture.${String(index).padStart(6, '0')}`);
+    physical.evidenceHash = sha256Utf8(canonicalJson(fixture));
+    const result = check(run);
+    assert.notEqual(result.status, 0, result.stdout);
+    assert.match(result.stdout, /FAIL fixture-first/);
+  });
+}
+
 test('gate checker atomically writes a complete versioned passing result', async () => {
   const result = check(await validRun(), { output: true });
   assert.equal(result.status, 0, result.stderr + result.stdout);

@@ -17,7 +17,7 @@ const ACCOUNTING_LIMITS = { workerInbound: 25000, queuedDoCommands: 50000, sqlit
 const ROOM_LIMITS = { writes: 70000, reads: 250000 };
 const ACTIVATION = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const hash = (path) => createHash('sha256').update(readFileSync(path)).digest('hex');
-const canonical = (value) => JSON.stringify(value);
+const canonical = canonicalJson;
 
 function readJson(path, label) {
   if (!existsSync(path)) throw new Error(`Missing ${label}: ${path}`);
@@ -60,6 +60,14 @@ function bindsEvidence(record, evidence, route, shard) {
     && equal(record.response, evidence.remote);
 }
 function remoteDdsResult(kind, remote) { return kind === 'table' ? remote?.result : remote?.solveResponse?.result; }
+function fixtureEvidenceKind(item) {
+  const hasRoute = item !== null && typeof item === 'object' && Object.hasOwn(item, 'route');
+  const routeKind = item?.route === '/__dds/table' ? 'table' : item?.route === '/__dds/ordered-probe' ? 'solve' : null;
+  if (hasRoute && routeKind === null) return null;
+  if (item?.kind !== undefined && item.kind !== 'table' && item.kind !== 'solve') return null;
+  if (item?.kind !== undefined && routeKind !== null && item.kind !== routeKind) return null;
+  return item?.kind ?? routeKind;
+}
 function validatesDdsPayload(kind, native, remote, deal) {
   try {
     const worker = remoteDdsResult(kind, remote);
@@ -133,11 +141,12 @@ function validateFixtures({ evidence, journal }) {
   if (!Array.isArray(evidence?.fixtures) || evidence.fixtures.length !== expected.length || evidence.fixtureHash !== hash(resolve(ROOT, 'workers/test/fixtures/dds-parity.json'))) return false;
   if (!expected.every((fixture, index) => {
     const item = evidence.fixtures[index];
+    const kind = fixtureEvidenceKind(item);
     const metrics = item?.remoteMetrics ?? item?.remote?.metrics ?? item?.remote?.solveResponse?.metrics;
     const input = fixture.kind === 'table' ? { hands: fixture.hands } : { deal: fixture.deal ?? { trump: fixture.trump, trickLeader: fixture.trickLeader, trickPlayed: fixture.trickPlayed, hands: fixture.hands } };
     const native = fixture.expected?.table ?? fixture.expected;
     const deal = fixture.kind === 'solve' ? input.deal : null;
-    return item?.id === fixture.id && item?.kind === fixture.kind && equal(item.input, input) && equal(item.nativeBaseline, native) && item.remote?.ok === true && metrics && validatesDdsPayload(fixture.kind, item.nativeBaseline, item.remote, deal)
+    return item?.id === fixture.id && kind === fixture.kind && equal(item.input, input) && equal(item.nativeBaseline, native) && item.remote?.ok === true && metrics && validatesDdsPayload(fixture.kind, item.nativeBaseline, item.remote, deal)
       && !item.parityMismatch && !item.networkError && !item.protocolError && !item.error && ACTIVATION.test(item.remote?.activationId ?? '');
   })) return false;
   const physical = journal.filter((entry) => entry.type === 'physical');
@@ -146,9 +155,10 @@ function validateFixtures({ evidence, journal }) {
   if (!(firstRandom > 0 && fixtures.length >= expected.length && physical.slice(0, firstRandom).filter((entry) => /^fixture\.\d{6}$/.test(entry.operationId)).length >= expected.length)) return false;
   for (let index = 0; index < expected.length; index++) {
     const id = `fixture.${String(index).padStart(6, '0')}`, indexes = physical.map((entry, physicalIndex) => entry.operationId === id ? physicalIndex : -1).filter((physicalIndex) => physicalIndex >= 0), records = indexes.map((physicalIndex) => physical[physicalIndex]), fixture = evidence.fixtures[index];
+    const kind = fixtureEvidenceKind(fixture);
     if (!(records.length === 1 || records.length === 2) || records[0].replayed !== false || (records[1] && records[1].replayed !== true)) return false;
     if (records.length === 2 && indexes[1] !== indexes[0] + 1) return false;
-    if (!bindsEvidence(records.at(-1), fixture, fixture.kind === 'table' ? '/__dds/table' : '/__dds/ordered-probe', 0)) return false;
+    if (kind !== expected[index].kind || !bindsEvidence(records.at(-1), fixture, kind === 'table' ? '/__dds/table' : '/__dds/ordered-probe', 0)) return false;
   }
   return true;
 }
