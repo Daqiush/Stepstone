@@ -19,6 +19,11 @@ const WRANGLER_CLI_PATH = resolve(import.meta.dirname, '../node_modules/wrangler
 const WRANGLER_OPERATION_TIMEOUT_MS = 120_000;
 const WRANGLER_VERSION_TIMEOUT_MS = 15_000;
 const WRANGLER_MAX_BUFFER = 4 * 1024 * 1024;
+// Cloudflare documents a short global version-availability delay and up to about
+// one minute of transient 523s for a newly created workers.dev hostname.
+const ENDPOINT_READINESS_TIMEOUT_MS = 75_000;
+const ENDPOINT_READINESS_RETRY_DELAY_MS = 4_000;
+const ENDPOINT_READINESS_MAX_ATTEMPTS = 16;
 const ROLLBACK_FAILURES = new WeakMap();
 export function harnessPaths(root) {
   const sourceRoot = resolve(root, 'workers/src');
@@ -278,14 +283,28 @@ export async function deployAndVerifyWorkers({ execFile = execFileSync, fetchImp
     }, 'IMMUTABLE_VERSION_UNVERIFIED', 'IMMUTABLE_VERSION_TIMEOUT');
     const route = '/__dds/metrics', body = '{}';
     await deploymentStage(async () => {
-      const remote = await fetchImpl(workersDevUrl + route, { method: 'POST', body,
-        signal: deadlineSignal({ signal, timeoutMs: ENDPOINT_PROBE_TIMEOUT_MS }), headers: {
-          'content-type': 'application/json', 'x-dds-test-key': remoteTestKey, 'x-dds-run-id': systemRandomUUID(),
-          'x-dds-operation-id': 'deployment.verify.000001', 'x-dds-request-hash': requestHash(route, body), 'x-dds-shard': '0',
-        } });
-      const evidence = await remote.json();
-      if (!remote.ok || evidence?.operationResult?.buildId !== buildId || evidence?.operationResult?.workerVersionId !== verified.versionId) {
-        throw new Error('Remote deployment evidence did not verify the build and immutable version');
+      const readinessSignal = deadlineSignal({ signal, timeoutMs: ENDPOINT_READINESS_TIMEOUT_MS });
+      const headers = {
+        'content-type': 'application/json', 'x-dds-test-key': remoteTestKey, 'x-dds-run-id': systemRandomUUID(),
+        'x-dds-operation-id': 'deployment.verify.000001', 'x-dds-request-hash': requestHash(route, body), 'x-dds-shard': '0',
+        'cloudflare-workers-version-overrides': `${temporaryWorkerName}="${verified.versionId}"`,
+      };
+      let lastFailure;
+      for (let attempt = 1; attempt <= ENDPOINT_READINESS_MAX_ATTEMPTS; attempt++) {
+        try {
+          const remote = await fetchImpl(workersDevUrl + route, { method: 'POST', body,
+            signal: deadlineSignal({ signal: readinessSignal, timeoutMs: ENDPOINT_PROBE_TIMEOUT_MS }), headers });
+          const evidence = await remote.json();
+          if (remote.ok && evidence?.operationResult?.buildId === buildId
+              && evidence?.operationResult?.workerVersionId === verified.versionId) return;
+          lastFailure = new Error('Remote deployment evidence did not verify the build and immutable version');
+        } catch (error) {
+          lastFailure = error;
+        }
+        if (readinessSignal.aborted) throw readinessSignal.reason ?? lastFailure;
+        if (attempt === ENDPOINT_READINESS_MAX_ATTEMPTS) throw lastFailure;
+        await sleepImpl(ENDPOINT_READINESS_RETRY_DELAY_MS);
+        if (readinessSignal.aborted) throw readinessSignal.reason ?? lastFailure;
       }
     }, 'ENDPOINT_VERIFICATION_FAILED', 'ENDPOINT_VERIFICATION_TIMEOUT');
     result = assertVerifiedDeployment({ ...verified, workerId: afterSecretDeploy.worker.id, workersDevUrl, temporaryWorkerName, identity, localConfigurationSha256 });

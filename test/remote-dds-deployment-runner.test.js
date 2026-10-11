@@ -759,6 +759,27 @@ test('direct subdomain lookup and workers.dev verification compose bounded reque
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 
+test('endpoint verification waits for the exact deployed version to become globally ready', async () => {
+  const f = await deploymentFixture(); let probes = 0; const sleeps = [];
+  try {
+    const verified = await f.mod.deployAndVerifyWorkers({ ...f.options,
+      sleepImpl: async (delayMs) => { sleeps.push(delayMs); },
+      fetchImpl: async (url, options = {}) => {
+        if (new URL(url).hostname.endsWith('.workers.dev')) {
+          probes++;
+          assert.equal(options.headers?.['cloudflare-workers-version-overrides'], `${f.identity.workerName}="deployed-v2"`);
+          if (probes === 1) return response({}, 523);
+          if (probes === 2) return response({ operationResult: { buildId: 'stale-build', workerVersionId: 'deployed-v1' } });
+        }
+        return f.fetchImpl(url, options);
+      },
+    });
+    assert.equal(verified.versionId, 'deployed-v2');
+    assert.equal(probes, 3);
+    assert.deepEqual(sleeps, [4_000, 4_000]);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test('temporary directory cleanup failure becomes primary only after otherwise successful deployment', async () => {
   const f = await deploymentFixture();
   try {
