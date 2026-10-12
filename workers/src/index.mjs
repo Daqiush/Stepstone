@@ -19,7 +19,12 @@ class LobbyRegistry extends DurableObject {
   markReleasePending(input) { return this.implementation.markReleasePending(input); }
   release(input) { return this.implementation.release(input); }
   alarm() { return this.implementation.alarm(); }
+  testAllocateAt(input) { return this.implementation.testAllocateAt(input); }
+  testActivateAt(input) { return this.implementation.testActivateAt(input); }
+  testMarkReleasePendingAt(input) { return this.implementation.testMarkReleasePendingAt(input); }
+  testReleaseAt(input) { return this.implementation.testReleaseAt(input); }
   testReconcile(input) { return this.implementation.testReconcile(input); }
+  testRecoverAlarmAt(input) { return this.implementation.testRecoverAlarmAt(input); }
   testInspect() { return this.implementation.testInspect(); }
   testSeedCapacity(input) { return this.implementation.testSeedCapacity(input); }
 }

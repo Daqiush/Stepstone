@@ -2,6 +2,7 @@ import { LIMITS } from './constants.mjs';
 
 const REGISTRY_LEASE_MS = 60_000;
 const RECONCILE_RETRY_MS = 1_000;
+const NONTERMINAL_EXPIRES_AT = Number.MAX_SAFE_INTEGER;
 const REQUEST_ID = /^[A-Za-z0-9_-]{16,64}$/u;
 const REQUEST_HASH = /^[0-9a-f]{64}$/u;
 const ROOM_CODE = /^\d{3}$/u;
@@ -27,12 +28,17 @@ function rows(cursor) {
 }
 
 function assertRequest(requestId, requestHash) {
-  if (!REQUEST_ID.test(requestId) || !REQUEST_HASH.test(requestHash)) return false;
-  return true;
+  return typeof requestId === 'string' && REQUEST_ID.test(requestId)
+    && typeof requestHash === 'string' && REQUEST_HASH.test(requestHash);
 }
 
 function assertCodeIncarnation(code, incarnation) {
-  return ROOM_CODE.test(code) && Number.isSafeInteger(incarnation) && incarnation >= 1;
+  return typeof code === 'string' && ROOM_CODE.test(code)
+    && Number.isSafeInteger(incarnation) && incarnation >= 1;
+}
+
+function assertLeaseId(leaseId) {
+  return typeof leaseId === 'string' && REQUEST_ID.test(leaseId);
 }
 
 function exactInspectionShape(inspection, initialized) {
@@ -44,33 +50,32 @@ function exactInspectionShape(inspection, initialized) {
     && keys.every((key, index) => key === expected[index]);
 }
 
-function safeResponseJson(value) {
-  const seen = new Set();
-  const visit = (current) => {
-    if (current === null || typeof current === 'boolean' || typeof current === 'string') return;
-    if (typeof current === 'number' && Number.isFinite(current)) return;
-    if (Array.isArray(current)) {
-      if (seen.has(current)) throw new TypeError('cyclic response');
-      seen.add(current);
-      for (const item of current) visit(item);
-      seen.delete(current);
-      return;
-    }
-    if (typeof current !== 'object') throw new TypeError('invalid response');
-    if (seen.has(current)) throw new TypeError('cyclic response');
-    seen.add(current);
-    for (const [key, item] of Object.entries(current)) {
-      if (key.toLowerCase().includes('token')) throw new TypeError('secret response field');
-      visit(item);
-    }
-    seen.delete(current);
-  };
-  visit(value);
-  const serialized = JSON.stringify(value);
-  if (new TextEncoder().encode(serialized).byteLength > LIMITS.httpJsonBytes) {
-    throw new TypeError('response too large');
+function normalizeCreateResponse(response, { requestId, code, incarnation }) {
+  if (response === null || typeof response !== 'object' || Array.isArray(response)) return null;
+  const keys = Object.keys(response).sort();
+  const expected = [
+    'incarnation', 'requestId', 'role', 'roomCode', 'seat', 'sessionId', 'v',
+  ];
+  if (keys.length !== expected.length || !keys.every((key, index) => key === expected[index])) {
+    return null;
   }
-  return serialized;
+  if (response.v !== 1
+    || response.requestId !== requestId
+    || response.roomCode !== code
+    || response.incarnation !== incarnation
+    || typeof response.sessionId !== 'string'
+    || !REQUEST_ID.test(response.sessionId)
+    || response.role !== 'OWNER'
+    || response.seat !== 'N') return null;
+  return {
+    v: 1,
+    requestId,
+    roomCode: code,
+    incarnation,
+    sessionId: response.sessionId,
+    role: 'OWNER',
+    seat: 'N',
+  };
 }
 
 export class LobbyRegistry {
@@ -114,17 +119,21 @@ export class LobbyRegistry {
       "SELECT MIN(lease_expires_at) AS due_at FROM room_codes WHERE status = 'PROVISIONING'",
     ))?.due_at;
     const request = row(this.sql.exec(
-      'SELECT MIN(expires_at) AS due_at FROM creation_requests',
+      "SELECT MIN(expires_at) AS due_at FROM creation_requests WHERE status IN ('ACTIVE', 'FAILED')",
     ))?.due_at;
     const candidates = [lease, request].filter((value) => value !== null && value !== undefined);
     return candidates.length === 0 ? null : Math.min(...candidates);
   }
 
   async recoverAlarm() {
-    const current = await this.ctx.storage.getAlarm();
     const now = Date.now();
+    await this.recoverAlarmAt(now, now);
+  }
+
+  async recoverAlarmAt(now, alarmNow) {
+    const current = await this.ctx.storage.getAlarm();
     if (current !== null && current <= now) {
-      await this.ctx.storage.setAlarm(now);
+      await this.ctx.storage.setAlarm(alarmNow);
       return;
     }
     const next = this.nextDue();
@@ -134,7 +143,7 @@ export class LobbyRegistry {
       || (next <= now && current <= now + RECONCILE_RETRY_MS))) {
       return;
     } else if (current !== next) {
-      await this.ctx.storage.setAlarm(Math.max(next, now));
+      await this.ctx.storage.setAlarm(Math.max(next, alarmNow));
     }
   }
 
@@ -198,13 +207,20 @@ export class LobbyRegistry {
     return null;
   }
 
-  async allocate({ requestId, requestHash, now = Date.now() } = {}) {
+  allocate({ requestId, requestHash } = {}) {
+    return this.allocateAt({ requestId, requestHash, now: Date.now() });
+  }
+
+  async allocateAt({ requestId, requestHash, now } = {}) {
     if (!assertRequest(requestId, requestHash) || !validTime(now)) return failure('INVALID_REQUEST');
     const leaseId = crypto.randomUUID();
     const leaseExpiresAt = now + REGISTRY_LEASE_MS;
 
     return this.ctx.storage.transaction(async () => {
-      this.sql.exec('DELETE FROM creation_requests WHERE expires_at <= ?', now);
+      this.sql.exec(
+        "DELETE FROM creation_requests WHERE status IN ('ACTIVE', 'FAILED') AND expires_at <= ?",
+        now,
+      );
       const stored = row(this.sql.exec(
         'SELECT * FROM creation_requests WHERE request_id = ?', requestId,
       ));
@@ -239,7 +255,7 @@ export class LobbyRegistry {
           (request_id, request_hash, code, incarnation, lease_id, status, response_json, expires_at)
          VALUES (?, ?, ?, ?, ?, 'PROVISIONING', NULL, ?)`,
         requestId, requestHash, available.code, incarnation, leaseId,
-        now + LIMITS.creationReplayTtlMs,
+        NONTERMINAL_EXPIRES_AT,
       );
       await this.scheduleAlarm();
       return result({
@@ -249,14 +265,19 @@ export class LobbyRegistry {
     });
   }
 
-  async activate({
-    requestId, code, incarnation, leaseId, response, now = Date.now(),
-  } = {}) {
-    if (!REQUEST_ID.test(requestId) || !assertCodeIncarnation(code, incarnation)
-      || typeof leaseId !== 'string' || !validTime(now)) return failure('INVALID_REQUEST');
-    let responseJson;
-    try { responseJson = safeResponseJson(response); }
-    catch { return failure('INVALID_REQUEST'); }
+  activate({ requestId, code, incarnation, leaseId, response } = {}) {
+    return this.activateAt({
+      requestId, code, incarnation, leaseId, response, now: Date.now(),
+    });
+  }
+
+  async activateAt({ requestId, code, incarnation, leaseId, response, now } = {}) {
+    if (typeof requestId !== 'string' || !REQUEST_ID.test(requestId)
+      || !assertCodeIncarnation(code, incarnation)
+      || !assertLeaseId(leaseId) || !validTime(now)) return failure('INVALID_REQUEST');
+    const normalizedResponse = normalizeCreateResponse(response, { requestId, code, incarnation });
+    if (normalizedResponse === null) return failure('INVALID_REQUEST');
+    const responseJson = JSON.stringify(normalizedResponse);
 
     return this.ctx.storage.transaction(async () => {
       const request = row(this.sql.exec(
@@ -286,11 +307,15 @@ export class LobbyRegistry {
         responseJson, now + LIMITS.creationReplayTtlMs, requestId,
       );
       await this.scheduleAlarm();
-      return result({ status: 'ACTIVE', response, replayed: false });
+      return result({ status: 'ACTIVE', response: normalizedResponse, replayed: false });
     });
   }
 
-  markReleasePending({ code, incarnation, now = Date.now() } = {}) {
+  markReleasePending({ code, incarnation } = {}) {
+    return this.markReleasePendingAt({ code, incarnation, now: Date.now() });
+  }
+
+  markReleasePendingAt({ code, incarnation, now } = {}) {
     if (!assertCodeIncarnation(code, incarnation) || !validTime(now)) return failure('INVALID_REQUEST');
     return this.ctx.storage.transactionSync(() => {
       const current = row(this.sql.exec('SELECT * FROM room_codes WHERE code = ?', code));
@@ -305,7 +330,11 @@ export class LobbyRegistry {
     });
   }
 
-  release({ code, incarnation, now = Date.now() } = {}) {
+  release({ code, incarnation } = {}) {
+    return this.releaseAt({ code, incarnation, now: Date.now() });
+  }
+
+  releaseAt({ code, incarnation, now } = {}) {
     if (!assertCodeIncarnation(code, incarnation) || !validTime(now)) return failure('INVALID_REQUEST');
     return this.ctx.storage.transactionSync(() => {
       const current = row(this.sql.exec('SELECT * FROM room_codes WHERE code = ?', code));
@@ -326,8 +355,16 @@ export class LobbyRegistry {
   async reconcile(now = Date.now()) {
     if (!validTime(now)) return failure('INVALID_REQUEST');
     const expired = rows(this.sql.exec(
-      `SELECT code, incarnation, lease_id, lease_expires_at FROM room_codes
-       WHERE status = 'PROVISIONING' AND lease_expires_at <= ? ORDER BY code`,
+      `SELECT rooms.code, rooms.incarnation, rooms.lease_id, rooms.lease_expires_at,
+        requests.request_id
+       FROM room_codes AS rooms
+       LEFT JOIN creation_requests AS requests
+         ON requests.code = rooms.code
+         AND requests.incarnation = rooms.incarnation
+         AND requests.lease_id = rooms.lease_id
+         AND requests.status = 'PROVISIONING'
+       WHERE rooms.status = 'PROVISIONING' AND rooms.lease_expires_at <= ?
+       ORDER BY rooms.code`,
       now,
     ));
     const decisions = [];
@@ -340,12 +377,16 @@ export class LobbyRegistry {
         if (exactInspectionShape(inspection, false)) {
           decisions.push({ ...item, outcome: 'ABSENT' });
         } else if (exactInspectionShape(inspection, true)) {
-          let responseJson;
-          try { responseJson = safeResponseJson(inspection.response ?? null); }
-          catch {
+          const normalizedResponse = normalizeCreateResponse(inspection.response, {
+            requestId: item.request_id,
+            code: item.code,
+            incarnation: item.incarnation,
+          });
+          if (normalizedResponse === null) {
             decisions.push({ ...item, outcome: 'RETRY' });
             continue;
           }
+          const responseJson = JSON.stringify(normalizedResponse);
           decisions.push({ ...item, outcome: 'ACTIVE', responseJson });
         } else {
           decisions.push({ ...item, outcome: 'RETRY' });
@@ -391,7 +432,10 @@ export class LobbyRegistry {
           );
         }
       }
-      this.sql.exec('DELETE FROM creation_requests WHERE expires_at <= ?', now);
+      this.sql.exec(
+        "DELETE FROM creation_requests WHERE status IN ('ACTIVE', 'FAILED') AND expires_at <= ?",
+        now,
+      );
       await this.scheduleAlarm(retryNeeded ? Date.now() + RECONCILE_RETRY_MS : null);
     });
     return result({ reconciled: decisions.length });
@@ -404,6 +448,42 @@ export class LobbyRegistry {
   testReconcile({ now } = {}) {
     if (this.env.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
     return this.reconcile(now);
+  }
+
+  async testRecoverAlarmAt({ now } = {}) {
+    if (this.env.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
+    if (!validTime(now)) return failure('INVALID_REQUEST');
+    const beforeAlarmAt = await this.ctx.storage.getAlarm();
+    const wallClockNow = Date.now();
+    await this.recoverAlarmAt(now, wallClockNow);
+    const afterAlarmAt = await this.ctx.storage.getAlarm();
+    await this.reconcile(now);
+    return result({
+      beforeAlarmAt,
+      afterAlarmAt,
+      recoveryNow: now,
+      wallClockNow,
+    });
+  }
+
+  testAllocateAt(input) {
+    if (this.env.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
+    return this.allocateAt(input);
+  }
+
+  testActivateAt(input) {
+    if (this.env.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
+    return this.activateAt(input);
+  }
+
+  testMarkReleasePendingAt(input) {
+    if (this.env.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
+    return this.markReleasePendingAt(input);
+  }
+
+  testReleaseAt(input) {
+    if (this.env.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
+    return this.releaseAt(input);
   }
 
   async testInspect() {

@@ -30,7 +30,12 @@ async function registryTestBridge(request, env) {
     case 'activate': rpcResult = await registry.activate(input); break;
     case 'markReleasePending': rpcResult = await registry.markReleasePending(input); break;
     case 'release': rpcResult = await registry.release(input); break;
+    case 'allocateAt': rpcResult = await registry.testAllocateAt(input); break;
+    case 'activateAt': rpcResult = await registry.testActivateAt(input); break;
+    case 'markReleasePendingAt': rpcResult = await registry.testMarkReleasePendingAt(input); break;
+    case 'releaseAt': rpcResult = await registry.testReleaseAt(input); break;
     case 'reconcile': rpcResult = await registry.testReconcile(input); break;
+    case 'recoverAlarmAt': rpcResult = await registry.testRecoverAlarmAt(input); break;
     case 'inspect': rpcResult = await registry.testInspect(); break;
     case 'seedCapacity': rpcResult = await registry.testSeedCapacity(input); break;
     case 'setRoomInitialization': {
