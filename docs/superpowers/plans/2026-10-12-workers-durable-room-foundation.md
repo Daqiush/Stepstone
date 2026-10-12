@@ -116,7 +116,9 @@ git commit -m "feat: add durable room allocation registry"
 
 **Files:**
 - Create: `workers/src/room-foundation/stepstone-room.mjs`
+- Modify: `workers/src/room-foundation/lobby-registry.mjs`
 - Modify: `workers/src/room-foundation/router.mjs`
+- Modify: `workers/src/index.mjs`
 - Test: `workers/test/room-bootstrap.integration.test.mjs`
 
 - [ ] **Step 1: Write failing integration tests**
@@ -129,7 +131,7 @@ Run: `node --test workers/test/room-bootstrap.integration.test.mjs`
 
 - [ ] **Step 3: Implement room schema and router orchestration**
 
-Persist owner/join bootstrap request IDs, fingerprints, non-secret responses, and only token hashes. Create becomes allocate → initialize → activate and returns only after activation. Compensate by lease reconciliation, never by freeing a code directly.
+Persist owner/join bootstrap request IDs, fingerprints, non-secret responses, and only token hashes. Move the temporary StepstoneRoom inspection stub into the real room class and update Worker exports. Create becomes allocate → initialize → activate and returns only after activation. Compensate by lease reconciliation, never by freeing a code directly.
 
 - [ ] **Step 4: Verify GREEN and inspect persisted behavior across runtime restart**
 
@@ -138,7 +140,7 @@ Run the focused test with a fresh and then reused persistence directory.
 - [ ] **Step 5: Commit**
 
 ```powershell
-git add workers/src/room-foundation/stepstone-room.mjs workers/src/room-foundation/router.mjs workers/test/room-bootstrap.integration.test.mjs
+git add workers/src/room-foundation/stepstone-room.mjs workers/src/room-foundation/lobby-registry.mjs workers/src/room-foundation/router.mjs workers/src/index.mjs workers/test/room-bootstrap.integration.test.mjs
 git commit -m "feat: persist room bootstrap sessions"
 ```
 
