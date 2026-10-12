@@ -1,6 +1,7 @@
 import { LIMITS } from './constants.mjs';
 
 const REGISTRY_LEASE_MS = 60_000;
+const RECONCILE_RETRY_MS = 1_000;
 const REQUEST_ID = /^[A-Za-z0-9_-]{16,64}$/u;
 const REQUEST_HASH = /^[0-9a-f]{64}$/u;
 const ROOM_CODE = /^\d{3}$/u;
@@ -32,6 +33,15 @@ function assertRequest(requestId, requestHash) {
 
 function assertCodeIncarnation(code, incarnation) {
   return ROOM_CODE.test(code) && Number.isSafeInteger(incarnation) && incarnation >= 1;
+}
+
+function exactInspectionShape(inspection, initialized) {
+  if (inspection === null || typeof inspection !== 'object' || Array.isArray(inspection)) return false;
+  const keys = Object.keys(inspection).sort();
+  const expected = initialized ? ['initialized', 'response'] : ['initialized'];
+  return inspection.initialized === initialized
+    && keys.length === expected.length
+    && keys.every((key, index) => key === expected[index]);
 }
 
 function safeResponseJson(value) {
@@ -120,15 +130,29 @@ export class LobbyRegistry {
     const next = this.nextDue();
     if (next === null) {
       if (current !== null) await this.ctx.storage.deleteAlarm();
+    } else if (current !== null && (current <= next
+      || (next <= now && current <= now + RECONCILE_RETRY_MS))) {
+      return;
     } else if (current !== next) {
       await this.ctx.storage.setAlarm(Math.max(next, now));
     }
   }
 
-  async scheduleAlarm() {
+  async scheduleAlarm(retryAt = null) {
     const next = this.nextDue();
-    if (next === null) await this.ctx.storage.deleteAlarm();
-    else await this.ctx.storage.setAlarm(Math.max(next, Date.now()));
+    if (next === null) {
+      await this.ctx.storage.deleteAlarm();
+      return;
+    }
+    const now = Date.now();
+    const current = await this.ctx.storage.getAlarm();
+    if (retryAt !== null) {
+      const target = current !== null && current > now ? Math.min(current, retryAt) : retryAt;
+      await this.ctx.storage.setAlarm(Math.max(target, now));
+    } else if (!(next <= now && current !== null && current > now
+      && current <= now + RECONCILE_RETRY_MS)) {
+      await this.ctx.storage.setAlarm(Math.max(next, now));
+    }
   }
 
   replayValue(stored) {
@@ -308,18 +332,30 @@ export class LobbyRegistry {
     ));
     const decisions = [];
     for (const item of expired) {
-      let inspection = { initialized: false };
       try {
         const id = this.env.STEPSTONE_ROOM.idFromName(`${item.code}:${item.incarnation}`);
-        inspection = await this.env.STEPSTONE_ROOM.get(id).inspectInitialization({
+        const inspection = await this.env.STEPSTONE_ROOM.get(id).inspectInitialization({
           code: item.code, incarnation: item.incarnation, leaseId: item.lease_id,
         });
+        if (exactInspectionShape(inspection, false)) {
+          decisions.push({ ...item, outcome: 'ABSENT' });
+        } else if (exactInspectionShape(inspection, true)) {
+          let responseJson;
+          try { responseJson = safeResponseJson(inspection.response ?? null); }
+          catch {
+            decisions.push({ ...item, outcome: 'RETRY' });
+            continue;
+          }
+          decisions.push({ ...item, outcome: 'ACTIVE', responseJson });
+        } else {
+          decisions.push({ ...item, outcome: 'RETRY' });
+        }
       } catch {
-        inspection = { initialized: false };
+        decisions.push({ ...item, outcome: 'RETRY' });
       }
-      decisions.push({ ...item, inspection });
     }
 
+    let retryNeeded = false;
     await this.ctx.storage.transaction(async () => {
       for (const decision of decisions) {
         const current = row(this.sql.exec('SELECT * FROM room_codes WHERE code = ?', decision.code));
@@ -327,8 +363,9 @@ export class LobbyRegistry {
           || current.incarnation !== decision.incarnation
           || current.lease_id !== decision.lease_id
           || current.lease_expires_at > now) continue;
-        if (decision.inspection?.initialized === true) {
-          const responseJson = safeResponseJson(decision.inspection.response ?? null);
+        if (decision.outcome === 'RETRY') {
+          retryNeeded = true;
+        } else if (decision.outcome === 'ACTIVE') {
           this.sql.exec(
             `UPDATE room_codes SET status = 'ACTIVE', lease_id = NULL, lease_expires_at = NULL,
               tombstone_until = NULL, updated_at = ? WHERE code = ?`,
@@ -337,7 +374,7 @@ export class LobbyRegistry {
           this.sql.exec(
             `UPDATE creation_requests SET status = 'ACTIVE', response_json = ?, expires_at = ?
              WHERE code = ? AND incarnation = ? AND lease_id = ?`,
-            responseJson, now + LIMITS.creationReplayTtlMs,
+            decision.responseJson, now + LIMITS.creationReplayTtlMs,
             decision.code, decision.incarnation, decision.lease_id,
           );
         } else {
@@ -355,7 +392,7 @@ export class LobbyRegistry {
         }
       }
       this.sql.exec('DELETE FROM creation_requests WHERE expires_at <= ?', now);
-      await this.scheduleAlarm();
+      await this.scheduleAlarm(retryNeeded ? Date.now() + RECONCILE_RETRY_MS : null);
     });
     return result({ reconciled: decisions.length });
   }
@@ -423,6 +460,14 @@ export class StepstoneRoom {
   }
 
   async inspectInitialization({ code, incarnation, leaseId } = {}) {
+    if (this.env?.ROOM_FOUNDATION_TEST === 'true') {
+      const fault = await this.ctx?.storage?.get('registryInspectionFault');
+      const exactFault = fault?.code === code
+        && fault?.incarnation === incarnation
+        && fault?.leaseId === leaseId;
+      if (exactFault && fault.type === 'throw') throw new Error('injected inspection failure');
+      if (exactFault && fault.type === 'malformed') return { initialized: false, unexpected: true };
+    }
     const stored = await this.ctx?.storage?.get('registryInitializationProbe');
     const initialized = stored?.code === code
       && stored?.incarnation === incarnation
@@ -434,5 +479,22 @@ export class StepstoneRoom {
     if (this.env?.ROOM_FOUNDATION_TEST !== 'true') return { ok: false, error: 'ROOM_NOT_FOUND' };
     await this.ctx.storage.put('registryInitializationProbe', { code, incarnation, leaseId, response });
     return { ok: true, value: { initialized: true } };
+  }
+
+  async testSetInspectionFault({ code, incarnation, leaseId, type } = {}) {
+    if (this.env?.ROOM_FOUNDATION_TEST !== 'true') return { ok: false, error: 'ROOM_NOT_FOUND' };
+    if (type !== 'throw' && type !== 'malformed' && type !== null) {
+      return { ok: false, error: 'INVALID_REQUEST' };
+    }
+    const stored = await this.ctx.storage.get('registryInspectionFault');
+    if (type === null) {
+      if (stored?.code !== code || stored?.incarnation !== incarnation || stored?.leaseId !== leaseId) {
+        return { ok: false, error: 'INVALID_REQUEST' };
+      }
+      await this.ctx.storage.delete('registryInspectionFault');
+    } else {
+      await this.ctx.storage.put('registryInspectionFault', { code, incarnation, leaseId, type });
+    }
+    return { ok: true, value: { configured: type !== null } };
   }
 }

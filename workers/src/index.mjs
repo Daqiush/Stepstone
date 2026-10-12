@@ -33,6 +33,7 @@ class StepstoneRoom extends DurableObject {
   fetch(request) { return this.implementation.fetch(request); }
   inspectInitialization(input) { return this.implementation.inspectInitialization(input); }
   testSetInitialization(input) { return this.implementation.testSetInitialization(input); }
+  testSetInspectionFault(input) { return this.implementation.testSetInspectionFault(input); }
 }
 
 export { LobbyRegistry, StepstoneRoom };

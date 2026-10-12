@@ -32,6 +32,24 @@ async function error(action, input, code, status = 409) {
   assert.deepEqual(result.body, { ok: false, error: { code } });
 }
 
+async function waitForInspection(predicate, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const inspection = await ok('inspect');
+    if (predicate(inspection)) return inspection;
+    await runtime.wait(25);
+  }
+  assert.fail('timed out waiting for registry state');
+}
+
+function roomRow(inspection, allocation) {
+  return inspection.roomCodes.find((item) => item.code === allocation.code);
+}
+
+function creationRequest(inspection, id) {
+  return inspection.creationRequests.find((item) => item.request_id === id);
+}
+
 test('allocates atomically, activates an exact lease, and persists deterministic replay', async () => {
   const allocation = await ok('allocate', {
     requestId: requestId('allocate'), requestHash: requestHash('a'), incarnation: 99, now,
@@ -114,6 +132,94 @@ test('reconciles expired provisioning leases against the exact room incarnation'
   const tombstone = inspection.roomCodes.find((row) => row.code === absent.code);
   assert.equal(tombstone.status, 'TOMBSTONE');
   assert.equal(tombstone.tombstoneUntil, absent.leaseExpiresAt + LIMITS.registryTombstoneMs);
+});
+
+test('tombstones an exact provisioning lease when room inspection reports an identity mismatch', async () => {
+  const id = requestId('mismatch');
+  const allocation = await ok('allocate', {
+    requestId: id, requestHash: requestHash('7'), now: Date.now(),
+  });
+  await ok('setRoomInitialization', {
+    code: allocation.code,
+    incarnation: allocation.incarnation,
+    leaseId: `${allocation.leaseId}_wrong`,
+    response: { roomCode: allocation.code, incarnation: allocation.incarnation },
+  });
+
+  await ok('reconcile', { now: allocation.leaseExpiresAt });
+
+  const inspection = await ok('inspect');
+  assert.equal(roomRow(inspection, allocation).status, 'TOMBSTONE');
+  assert.equal(creationRequest(inspection, id).status, 'FAILED');
+});
+
+test('keeps exact provisioning state and schedules a bounded retry after inspection failure', async () => {
+  const id = requestId('rpcfail');
+  const allocation = await ok('allocate', {
+    requestId: id, requestHash: requestHash('8'), now: Date.now(),
+  });
+  await ok('setRoomInspectionFault', { ...allocation, type: 'throw' });
+  const before = await ok('inspect');
+  const expectedRoom = roomRow(before, allocation);
+  const expectedRequest = creationRequest(before, id);
+
+  const startedAt = Date.now();
+  await ok('reconcile', { now: allocation.leaseExpiresAt });
+
+  const after = await ok('inspect');
+  assert.deepEqual(roomRow(after, allocation), expectedRoom);
+  assert.deepEqual(creationRequest(after, id), expectedRequest);
+  assert.ok(after.alarmAt > startedAt);
+  assert.ok(after.alarmAt <= Date.now() + 5_000);
+
+  await ok('setRoomInspectionFault', { ...allocation, type: null });
+  await ok('reconcile', { now: allocation.leaseExpiresAt });
+});
+
+test('keeps exact provisioning state for a malformed inspection response', async () => {
+  const id = requestId('malformed');
+  const allocation = await ok('allocate', {
+    requestId: id, requestHash: requestHash('9'), now: Date.now(),
+  });
+  await ok('setRoomInspectionFault', { ...allocation, type: 'malformed' });
+  const before = await ok('inspect');
+
+  await ok('reconcile', { now: allocation.leaseExpiresAt });
+
+  const after = await ok('inspect');
+  assert.deepEqual(roomRow(after, allocation), roomRow(before, allocation));
+  assert.deepEqual(creationRequest(after, id), creationRequest(before, id));
+  await ok('setRoomInspectionFault', { ...allocation, type: null });
+  await ok('reconcile', { now: allocation.leaseExpiresAt });
+});
+
+test('reconciles an expired lease through the Durable Object alarm handler', async () => {
+  const id = requestId('alarmrun');
+  const allocation = await ok('allocate', {
+    requestId: id, requestHash: requestHash('a'), now: Date.now() - 59_500,
+  });
+  const response = { roomCode: allocation.code, incarnation: allocation.incarnation };
+  await ok('setRoomInitialization', { ...allocation, response });
+
+  const inspection = await waitForInspection((state) => (
+    roomRow(state, allocation)?.status === 'ACTIVE'
+  ));
+  assert.equal(creationRequest(inspection, id).status, 'ACTIVE');
+});
+
+test('reconstructs with a provisioning alarm due and subsequently reconciles it', async () => {
+  const id = requestId('restartdue');
+  const allocation = await ok('allocate', {
+    requestId: id, requestHash: requestHash('b'), now: Date.now() - 59_500,
+  });
+  const response = { roomCode: allocation.code, incarnation: allocation.incarnation };
+  await ok('setRoomInitialization', { ...allocation, response });
+  await runtime.restartRegistry();
+
+  await runtime.wait(750);
+  const inspection = await ok('inspect');
+  assert.equal(roomRow(inspection, allocation).status, 'ACTIVE');
+  assert.equal(creationRequest(inspection, id).status, 'ACTIVE');
 });
 
 test('release is exact, terminal, and cannot affect a reused incarnation', async () => {

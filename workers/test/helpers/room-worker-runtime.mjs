@@ -30,6 +30,10 @@ export async function createRoomWorkerRuntime() {
       await worker.evictDurableObject('LOBBY_REGISTRY', { name: REGISTRY_NAME });
     },
 
+    async wait(milliseconds) {
+      await new Promise((resolve) => setTimeout(resolve, milliseconds));
+    },
+
     async close() {
       await server.close();
     },

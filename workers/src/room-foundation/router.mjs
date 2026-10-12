@@ -38,6 +38,11 @@ async function registryTestBridge(request, env) {
       rpcResult = await env.STEPSTONE_ROOM.get(roomId).testSetInitialization(input);
       break;
     }
+    case 'setRoomInspectionFault': {
+      const roomId = env.STEPSTONE_ROOM.idFromName(`${input.code}:${input.incarnation}`);
+      rpcResult = await env.STEPSTONE_ROOM.get(roomId).testSetInspectionFault(input);
+      break;
+    }
     default:
       return new Response(null, { status: 404 });
   }
