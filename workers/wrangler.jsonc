@@ -7,10 +7,13 @@
   "version_metadata": { "binding": "CF_VERSION_METADATA" },
   "durable_objects": {
     "bindings": [
-      { "name": "DDS_FEASIBILITY_ROOM", "class_name": "FeasibilityRoom" }
+      { "name": "DDS_FEASIBILITY_ROOM", "class_name": "FeasibilityRoom" },
+      { "name": "LOBBY_REGISTRY", "class_name": "LobbyRegistry" },
+      { "name": "STEPSTONE_ROOM", "class_name": "StepstoneRoom" }
     ]
   },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["FeasibilityRoom"] }
+    { "tag": "v1", "new_sqlite_classes": ["FeasibilityRoom"] },
+    { "tag": "v2", "new_sqlite_classes": ["LobbyRegistry", "StepstoneRoom"] }
   ]
 }

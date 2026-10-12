@@ -1,6 +1,7 @@
 export { FeasibilityRoom } from './feasibility-room.mjs';
-import { fetchHarness } from './harness-router.mjs';
+export { LobbyRegistry, StepstoneRoom } from './room-foundation/router.mjs';
+import { fetchWorker } from './room-foundation/router.mjs';
 
 export default {
-  fetch: fetchHarness,
+  fetch: fetchWorker,
 };

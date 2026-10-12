@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 
 import { authorizeHarnessRequest } from '../src/remote-test-auth.mjs';
-import { fetchHarness } from '../src/harness-router.mjs';
+import { fetchWorker } from '../src/room-foundation/router.mjs';
 
 const keyBytes = new Uint8Array(32).fill(7);
 const key = Buffer.from(keyBytes).toString('base64url');
@@ -147,7 +147,7 @@ test('remote routing rebuilds the request and forwards only validated identity m
     },
   };
   const encoder = new TextEncoder();
-  const response = await fetchHarness(request('/__dds/solve', {
+  const response = await fetchWorker(request('/__dds/solve', {
     headers: { ...metadataFor('/__dds/solve', '{"deal":{}}'), 'x-dds-test-key': key, 'x-untrusted-header': 'discard-me' },
     body: new ReadableStream({ start(controller) {
       controller.enqueue(encoder.encode('{"deal":'));
@@ -177,7 +177,7 @@ test('local routing retains the fixed feasibility room', async () => {
       get() { return { fetch: async () => new Response('local') }; },
     },
   };
-  const response = await fetchHarness(request('/__dds/ping', { body: '{}' }), env);
+  const response = await fetchWorker(request('/__dds/ping', { body: '{}' }), env);
   assert.equal(await response.text(), 'local');
   assert.deepEqual(names, ['single-feasibility-room']);
 });
