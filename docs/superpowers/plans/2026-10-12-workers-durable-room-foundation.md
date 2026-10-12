@@ -149,9 +149,12 @@ git commit -m "feat: persist room bootstrap sessions"
 ### Task 5: Add hibernatable authentication, rotation, and connection epochs
 
 **Files:**
+- Modify: `workers/src/room-foundation/constants.mjs`
+- Modify: `workers/src/room-foundation/protocol.mjs`
 - Modify: `workers/src/room-foundation/stepstone-room.mjs`
 - Modify: `workers/src/room-foundation/router.mjs`
 - Test: `workers/test/room-websocket.integration.test.mjs`
+- Modify: `workers/test/helpers/room-worker-runtime.mjs`
 
 - [ ] **Step 1: Write failing WebSocket tests**
 
@@ -174,7 +177,7 @@ Run the focused test twice, including persistence reconstruction.
 - [ ] **Step 5: Commit**
 
 ```powershell
-git add workers/src/room-foundation/stepstone-room.mjs workers/src/room-foundation/router.mjs workers/test/room-websocket.integration.test.mjs
+git add workers/src/room-foundation/constants.mjs workers/src/room-foundation/protocol.mjs workers/src/room-foundation/stepstone-room.mjs workers/src/room-foundation/router.mjs workers/test/room-websocket.integration.test.mjs workers/test/helpers/room-worker-runtime.mjs
 git commit -m "feat: enforce durable socket authority"
 ```
 
