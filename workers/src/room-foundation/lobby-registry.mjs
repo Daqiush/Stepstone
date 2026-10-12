@@ -382,7 +382,10 @@ export class LobbyRegistry {
       try {
         const id = this.env.STEPSTONE_ROOM.idFromName(`${item.code}:${item.incarnation}`);
         const inspection = await this.env.STEPSTONE_ROOM.get(id).inspectInitialization({
-          code: item.code, incarnation: item.incarnation, leaseId: item.lease_id,
+          code: item.code,
+          incarnation: item.incarnation,
+          leaseId: item.lease_id,
+          leaseExpiresAt: item.lease_expires_at,
         });
         if (exactInspectionShape(inspection, false)) {
           decisions.push({ ...item, outcome: 'ABSENT' });

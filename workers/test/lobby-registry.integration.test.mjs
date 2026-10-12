@@ -116,7 +116,8 @@ test('reconciles expired provisioning leases against the exact room incarnation'
   const initializedResponse = createResponse(requestId('initialized'), initialized);
   await ok('setRoomInitialization', {
     code: initialized.code, incarnation: initialized.incarnation,
-    leaseId: initialized.leaseId, response: initializedResponse,
+    leaseId: initialized.leaseId, leaseExpiresAt: initialized.leaseExpiresAt,
+    response: initializedResponse,
   });
   await ok('reconcile', { now: initialized.leaseExpiresAt });
   const initializedReplay = await ok('allocateAt', {
@@ -155,6 +156,7 @@ test('tombstones an exact provisioning lease when room inspection reports an ide
     code: allocation.code,
     incarnation: allocation.incarnation,
     leaseId: `${allocation.leaseId}_wrong`,
+    leaseExpiresAt: allocation.leaseExpiresAt,
     response: createResponse(id, allocation),
   });
 

@@ -1,18 +1,41 @@
-import { createTestHarness } from 'wrangler';
+import { createTestHarness, unstable_dev } from 'wrangler';
 import { fileURLToPath } from 'node:url';
 
 const REGISTRY_NAME = 'singleton';
+const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
+const CONFIG_PATH = fileURLToPath(new URL('../../wrangler.jsonc', import.meta.url));
+const ENTRY_PATH = fileURLToPath(new URL('../../src/index.mjs', import.meta.url));
 
-export async function createRoomWorkerRuntime() {
-  const server = createTestHarness({
-    root: fileURLToPath(new URL('../../..', import.meta.url)),
-    workers: [{
-      configPath: './workers/wrangler.jsonc',
-      vars: { ROOM_FOUNDATION_TEST: 'true' },
-    }],
-  });
-  await server.listen();
-  const worker = server.getWorker();
+export async function createRoomWorkerRuntime({ persistenceDirectory = null } = {}) {
+  let server;
+  let worker;
+
+  async function start() {
+    if (persistenceDirectory !== null) {
+      server = await unstable_dev(ENTRY_PATH, {
+        config: CONFIG_PATH,
+        local: true,
+        persist: true,
+        persistTo: persistenceDirectory,
+        vars: { ROOM_FOUNDATION_TEST: 'true' },
+        logLevel: 'none',
+        experimental: { disableDevRegistry: true, disableExperimentalWarning: true },
+      });
+      worker = null;
+      return;
+    }
+    server = createTestHarness({
+      root: ROOT,
+      workers: [{
+        configPath: './workers/wrangler.jsonc',
+        vars: { ROOM_FOUNDATION_TEST: 'true' },
+      }],
+    });
+    await server.listen();
+    worker = server.getWorker();
+  }
+
+  await start();
 
   return {
     async request(path, init = {}) {
@@ -49,11 +72,21 @@ export async function createRoomWorkerRuntime() {
     },
 
     async restartRegistry() {
+      if (!worker) throw new Error('Durable Object eviction requires the test harness runtime');
       await worker.evictDurableObject('LOBBY_REGISTRY', { name: REGISTRY_NAME });
     },
 
     async restartRoom(code, incarnation) {
+      if (!worker) throw new Error('Durable Object eviction requires the test harness runtime');
       await worker.evictDurableObject('STEPSTONE_ROOM', { name: `${code}:${incarnation}` });
+    },
+
+    async restartProcess() {
+      if (persistenceDirectory === null) {
+        throw new Error('Process restart requires a persistence directory');
+      }
+      await server.stop();
+      await start();
     },
 
     async wait(milliseconds) {
@@ -61,7 +94,8 @@ export async function createRoomWorkerRuntime() {
     },
 
     async close() {
-      await server.close();
+      if (persistenceDirectory === null) await server.close();
+      else await server.stop();
     },
   };
 }

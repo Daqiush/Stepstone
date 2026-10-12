@@ -1,5 +1,5 @@
 import { LIMITS } from './constants.mjs';
-import { constantTimeDigestEqual } from './protocol.mjs';
+import { constantTimeDigestEqual, hashReconnectToken } from './protocol.mjs';
 
 const REQUEST_ID = /^[A-Za-z0-9_-]{16,64}$/u;
 const REQUEST_HASH = /^[0-9a-f]{64}$/u;
@@ -41,6 +41,10 @@ function validIdentity(value) {
 
 function validHash(value) {
   return typeof value === 'string' && REQUEST_HASH.test(value);
+}
+
+function validTime(value) {
+  return Number.isSafeInteger(value) && value >= 0;
 }
 
 function normalizeBootstrapResponse(response, expected) {
@@ -150,19 +154,21 @@ export class StepstoneRoom {
   }
 
   async initialize(input = {}) {
-    return this.initializeWithSession(input, crypto.randomUUID());
+    return this.initializeWithSession(input, crypto.randomUUID(), Date.now());
   }
 
-  async initializeWithSession(input = {}, proposedSessionId) {
+  async initializeWithSession(input = {}, proposedSessionId, now) {
     const {
-      code, incarnation, leaseId, requestId, requestHash, tokenHash,
+      code, incarnation, leaseId, leaseExpiresAt, requestId, requestHash, tokenHash,
     } = input;
     if (!validCodeIncarnation(code, incarnation)
       || !validIdentity(leaseId)
+      || !validTime(leaseExpiresAt)
       || !validIdentity(requestId)
       || !validHash(requestHash)
       || !validHash(tokenHash)
-      || !validIdentity(proposedSessionId)) return failure('INVALID_REQUEST');
+      || !validIdentity(proposedSessionId)
+      || !validTime(now)) return failure('INVALID_REQUEST');
 
     const fault = this.env?.ROOM_FOUNDATION_TEST === 'true'
       ? await this.ctx.storage.get('roomInitializationFault') : null;
@@ -170,6 +176,13 @@ export class StepstoneRoom {
       && fault.code === code
       && fault.incarnation === incarnation
       && fault.leaseId === leaseId) throw new Error('injected room initialization failure');
+    if (fault?.type === 'delay'
+      && fault.code === code
+      && fault.incarnation === incarnation
+      && fault.leaseId === leaseId) {
+      await new Promise((resolve) => setTimeout(resolve, fault.delayMs));
+      now = Date.now();
+    }
 
     const existing = row(this.sql.exec('SELECT * FROM room_state LIMIT 1'));
     if (existing) {
@@ -178,6 +191,7 @@ export class StepstoneRoom {
       const exact = existing.incarnation === incarnation
         && state.roomCode === code
         && state.initialization?.leaseId === leaseId
+        && state.initialization?.leaseExpiresAt === leaseExpiresAt
         && state.initialization?.requestId === requestId
         && state.initialization?.requestHash === requestHash
         && owner?.bootstrap_request_id === requestId
@@ -187,7 +201,7 @@ export class StepstoneRoom {
       return result({ response: JSON.parse(owner.bootstrap_response_json), replayed: true });
     }
 
-    const now = Date.now();
+    if (now >= leaseExpiresAt) return failure('LEASE_EXPIRED');
     const sessionId = proposedSessionId;
     const response = normalizeBootstrapResponse({
       v: 1, requestId, roomCode: code, incarnation, sessionId, role: 'OWNER', seat: 'N',
@@ -204,7 +218,9 @@ export class StepstoneRoom {
       createdAt: now,
       expiresAt: null,
       recentCommands: {},
-      initialization: { leaseId, requestId, requestHash },
+      initialization: {
+        leaseId, leaseExpiresAt, requestId, requestHash,
+      },
     };
 
     await this.ctx.storage.transaction(async () => {
@@ -311,8 +327,10 @@ export class StepstoneRoom {
     });
   }
 
-  async inspectInitialization({ code, incarnation, leaseId } = {}) {
-    if (!validCodeIncarnation(code, incarnation) || !validIdentity(leaseId)) {
+  async inspectInitialization({ code, incarnation, leaseId, leaseExpiresAt } = {}) {
+    if (!validCodeIncarnation(code, incarnation)
+      || !validIdentity(leaseId)
+      || !validTime(leaseExpiresAt)) {
       return { initialized: false };
     }
     if (this.env?.ROOM_FOUNDATION_TEST === 'true') {
@@ -326,7 +344,9 @@ export class StepstoneRoom {
     const stored = row(this.sql.exec('SELECT * FROM room_state LIMIT 1'));
     if (!stored || stored.incarnation !== incarnation) return { initialized: false };
     const state = JSON.parse(stored.state_json);
-    if (state.roomCode !== code || state.initialization?.leaseId !== leaseId) {
+    if (state.roomCode !== code
+      || state.initialization?.leaseId !== leaseId
+      || state.initialization?.leaseExpiresAt !== leaseExpiresAt) {
       return { initialized: false };
     }
     const owner = row(this.sql.exec("SELECT bootstrap_response_json FROM sessions WHERE role = 'OWNER' LIMIT 1"));
@@ -334,20 +354,23 @@ export class StepstoneRoom {
     return { initialized: true, response: JSON.parse(owner.bootstrap_response_json) };
   }
 
-  async testSetInitialization({ code, incarnation, leaseId, response } = {}) {
+  async testSetInitialization({ code, incarnation, leaseId, leaseExpiresAt, response } = {}) {
     if (this.env?.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
     const normalized = normalizeBootstrapResponse(response, {
       code, incarnation, requestId: response?.requestId, role: 'OWNER', seat: 'N',
     });
-    if (!normalized || !validIdentity(leaseId)) return failure('INVALID_REQUEST');
+    if (!normalized || !validIdentity(leaseId) || !validTime(leaseExpiresAt)) {
+      return failure('INVALID_REQUEST');
+    }
     const initialized = await this.initializeWithSession({
       code,
       incarnation,
       leaseId,
+      leaseExpiresAt,
       requestId: normalized.requestId,
       requestHash: '0'.repeat(64),
       tokenHash: '1'.repeat(64),
-    }, normalized.sessionId);
+    }, normalized.sessionId, Math.min(Date.now(), leaseExpiresAt - 1));
     return initialized.ok ? result({ initialized: true }) : initialized;
   }
 
@@ -369,10 +392,14 @@ export class StepstoneRoom {
     return result({ configured: type !== null });
   }
 
-  async testSetInitializationFault({ code, incarnation, leaseId, type } = {}) {
+  async testSetInitializationFault({ code, incarnation, leaseId, type, delayMs } = {}) {
     if (this.env?.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
+    const delayValid = type === 'delay'
+      && Number.isSafeInteger(delayMs)
+      && delayMs >= 1
+      && delayMs <= 5_000;
     if (!validCodeIncarnation(code, incarnation) || !validIdentity(leaseId)
-      || (type !== 'throw' && type !== null)) return failure('INVALID_REQUEST');
+      || (type !== 'throw' && type !== null && !delayValid)) return failure('INVALID_REQUEST');
     const stored = await this.ctx.storage.get('roomInitializationFault');
     if (type === null) {
       if (stored?.code !== code || stored?.incarnation !== incarnation || stored?.leaseId !== leaseId) {
@@ -380,7 +407,13 @@ export class StepstoneRoom {
       }
       await this.ctx.storage.delete('roomInitializationFault');
     } else {
-      await this.ctx.storage.put('roomInitializationFault', { code, incarnation, leaseId, type });
+      await this.ctx.storage.put('roomInitializationFault', {
+        code,
+        incarnation,
+        leaseId,
+        type,
+        ...(type === 'delay' ? { delayMs } : {}),
+      });
     }
     return result({ configured: type !== null });
   }
@@ -413,6 +446,65 @@ export class StepstoneRoom {
           payload: JSON.parse(action.payload_json),
         })),
       alarmAt: await this.ctx.storage.getAlarm(),
+    });
+  }
+
+  async testInitializeAt(input = {}) {
+    if (this.env?.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
+    const { sessionId, now, ...initialization } = input;
+    return this.initializeWithSession(initialization, sessionId, now);
+  }
+
+  async testProbeTokenStorage({
+    code, incarnation, plaintextToken, expectedLeaseExpiresAt,
+  } = {}) {
+    if (this.env?.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
+    if (!validCodeIncarnation(code, incarnation) || !validTime(expectedLeaseExpiresAt)) {
+      return failure('INVALID_REQUEST');
+    }
+    let expectedDigest;
+    try { expectedDigest = await hashReconnectToken(plaintextToken); }
+    catch { return failure('INVALID_REQUEST'); }
+
+    const stored = row(this.sql.exec('SELECT * FROM room_state LIMIT 1'));
+    if (!stored || stored.incarnation !== incarnation) return failure('ROOM_NOT_FOUND');
+    const state = JSON.parse(stored.state_json);
+    if (state.roomCode !== code) return failure('ROOM_NOT_FOUND');
+
+    const textColumns = [
+      ['room_state', ['status', 'state_json']],
+      ['sessions', [
+        'session_id', 'token_hash', 'previous_token_hash', 'last_rotation_id',
+        'last_rotation_next_hash', 'current_connection_id', 'bootstrap_request_id',
+        'bootstrap_request_hash', 'bootstrap_response_json', 'role', 'seat',
+      ]],
+      ['pending_actions', ['action_id', 'kind', 'payload_json']],
+    ];
+    let plaintextOccurrences = 0;
+    let digestOutsideCredentialOccurrences = 0;
+    for (const [table, columns] of textColumns) {
+      for (const column of columns) {
+        plaintextOccurrences += row(this.sql.exec(
+          `SELECT COUNT(*) AS count FROM ${table} WHERE instr(COALESCE(${column}, ''), ?) > 0`,
+          plaintextToken,
+        )).count;
+        if (!(table === 'sessions' && column === 'token_hash')) {
+          digestOutsideCredentialOccurrences += row(this.sql.exec(
+            `SELECT COUNT(*) AS count FROM ${table} WHERE instr(COALESCE(${column}, ''), ?) > 0`,
+            expectedDigest,
+          )).count;
+        }
+      }
+    }
+    const credentialDigestMatches = row(this.sql.exec(
+      'SELECT COUNT(*) AS count FROM sessions WHERE token_hash = ?', expectedDigest,
+    )).count;
+    return result({
+      plaintextOccurrences,
+      credentialDigestMatches,
+      digestOutsideCredentialOccurrences,
+      initializationLeaseExpiresAtMatches:
+        state.initialization?.leaseExpiresAt === expectedLeaseExpiresAt,
     });
   }
 }

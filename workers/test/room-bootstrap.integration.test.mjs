@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 
 import { LIMITS } from '../src/room-foundation/constants.mjs';
-import { canonicalJson } from '../src/room-foundation/protocol.mjs';
+import { canonicalJson, hashReconnectToken } from '../src/room-foundation/protocol.mjs';
 import { createRoomWorkerRuntime } from './helpers/room-worker-runtime.mjs';
 
 const TOKEN_BYTES = 32;
@@ -102,6 +105,23 @@ async function inspectRoom(created) {
   return inspected.body.value;
 }
 
+async function postWith(targetRuntime, path, body) {
+  return targetRuntime.request(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: typeof body === 'string' ? body : JSON.stringify(body),
+  });
+}
+
+async function inspectRoomWith(targetRuntime, created) {
+  const inspected = await targetRuntime.room('inspectRoom', {
+    code: created.roomCode,
+    incarnation: created.incarnation,
+  });
+  assert.equal(inspected.status, 200, JSON.stringify(inspected.body));
+  return inspected.body.value;
+}
+
 test('creates owner N, allocates E/S/W without downgrade, and persists a spectator', async () => {
   const ownerBody = createBody('owner');
   const startedAt = Date.now();
@@ -188,6 +208,196 @@ test('rejects malformed, non-v1, and oversized JSON before bootstrap parsing', a
   const oversizedResult = await post('/api/rooms', oversized);
   assertPublicError(oversizedResult, 'INVALID_REQUEST', 400);
   assert.equal(oversizedResult.text.includes('padding'), false);
+});
+
+test('rejects malformed, non-v1, and oversized join JSON without adding a session', async () => {
+  const created = await createRoom(createBody('invalid_join_owner'));
+  const path = `/api/rooms/${created.roomCode}/join`;
+  assertPublicError(await post(path, '{'), 'INVALID_REQUEST', 400);
+  assertPublicError(
+    await post(path, { ...joinBody('wrong_join_version'), v: 2 }),
+    'PROTOCOL_MISMATCH',
+    400,
+  );
+  const oversized = JSON.stringify({
+    ...joinBody('oversized_join'),
+    padding: 'x'.repeat(LIMITS.httpJsonBytes),
+  });
+  assert.ok(Buffer.byteLength(oversized) > LIMITS.httpJsonBytes);
+  assertPublicError(await post(path, oversized), 'INVALID_REQUEST', 400);
+  assert.equal((await inspectRoom(created)).sessions.length, 1);
+});
+
+test('persists the authoritative lease expiry and stores only credential token digests', async () => {
+  const body = createBody('storage_owner');
+  const requestHash = createHash('sha256').update(canonicalJson(body)).digest('hex');
+  const allocationResult = await runtime.registry('allocateAt', {
+    requestId: body.requestId,
+    requestHash,
+    now: Date.now(),
+  });
+  assert.equal(allocationResult.status, 200, JSON.stringify(allocationResult.body));
+  const allocation = allocationResult.body.value;
+
+  const createResult = await post('/api/rooms', body);
+  assert.equal(createResult.status, 200, createResult.text);
+  const playerBody = joinBody('StorageEast');
+  const joinResult = await joinRoom(createResult.body, playerBody);
+  assert.equal(joinResult.status, 200, joinResult.text);
+
+  for (const plaintextToken of [body.reconnectToken, playerBody.reconnectToken]) {
+    const probe = await runtime.room('probeRoomTokenStorage', {
+      code: allocation.code,
+      incarnation: allocation.incarnation,
+      plaintextToken,
+      expectedLeaseExpiresAt: allocation.leaseExpiresAt,
+    });
+    assert.equal(probe.status, 200, JSON.stringify(probe.body));
+    assert.deepEqual(probe.body.value, {
+      plaintextOccurrences: 0,
+      credentialDigestMatches: 1,
+      digestOutsideCredentialOccurrences: 0,
+      initializationLeaseExpiresAtMatches: true,
+    });
+    assert.equal(JSON.stringify(probe.body).includes(plaintextToken), false);
+    assert.equal(JSON.stringify(probe.body).includes(await hashReconnectToken(plaintextToken)), false);
+  }
+});
+
+test('rejects stale empty initialization while allowing exact committed initialization replay', async () => {
+  const replayBody = createBody('expired_replay');
+  const replayHash = createHash('sha256').update(canonicalJson(replayBody)).digest('hex');
+  const replayAllocationResult = await runtime.registry('allocateAt', {
+    requestId: replayBody.requestId,
+    requestHash: replayHash,
+    now: Date.now(),
+  });
+  const replayAllocation = replayAllocationResult.body.value;
+  const sessionId = nextId('replay_session');
+  const exactInput = {
+    code: replayAllocation.code,
+    incarnation: replayAllocation.incarnation,
+    leaseId: replayAllocation.leaseId,
+    leaseExpiresAt: replayAllocation.leaseExpiresAt,
+    requestId: replayBody.requestId,
+    requestHash: replayHash,
+    tokenHash: await hashReconnectToken(replayBody.reconnectToken),
+    sessionId,
+  };
+  const initialized = await runtime.room('initializeRoomAt', {
+    ...exactInput,
+    now: replayAllocation.leaseExpiresAt - 1,
+  });
+  assert.equal(initialized.status, 200, JSON.stringify(initialized.body));
+  const replayed = await runtime.room('initializeRoomAt', {
+    ...exactInput,
+    now: replayAllocation.leaseExpiresAt,
+  });
+  assert.equal(replayed.status, 200, JSON.stringify(replayed.body));
+  assert.equal(replayed.body.value.replayed, true);
+  assert.deepEqual(replayed.body.value.response, initialized.body.value.response);
+
+  const staleBody = createBody('stale_empty');
+  const staleHash = createHash('sha256').update(canonicalJson(staleBody)).digest('hex');
+  const staleAllocationResult = await runtime.registry('allocateAt', {
+    requestId: staleBody.requestId,
+    requestHash: staleHash,
+    now: Date.now() - 59_000,
+  });
+  const staleAllocation = staleAllocationResult.body.value;
+  const configured = await runtime.room('setRoomInitializationFault', {
+    code: staleAllocation.code,
+    incarnation: staleAllocation.incarnation,
+    leaseId: staleAllocation.leaseId,
+    type: 'delay',
+    delayMs: 1_200,
+  });
+  assert.equal(configured.status, 200, JSON.stringify(configured.body));
+
+  const createPromise = post('/api/rooms', staleBody);
+  await runtime.wait(1_050);
+  const reconcilePromise = runtime.registry('reconcile', { now: staleAllocation.leaseExpiresAt });
+  const [staleCreate, reconciled] = await Promise.all([createPromise, reconcilePromise]);
+  assertPublicError(staleCreate, 'SERVICE_CAPACITY', 503);
+  assert.equal(reconciled.status, 200, JSON.stringify(reconciled.body));
+
+  const registry = await runtime.registry('inspect');
+  const staleRow = registry.body.value.roomCodes.find((item) => item.code === staleAllocation.code);
+  assert.equal(staleRow.status, 'TOMBSTONE');
+  const absentRoom = await runtime.room('inspectRoom', {
+    code: staleAllocation.code,
+    incarnation: staleAllocation.incarnation,
+  });
+  assert.equal(absentRoom.status, 409, JSON.stringify(absentRoom.body));
+  assert.deepEqual(absentRoom.body, { ok: false, error: { code: 'ROOM_NOT_FOUND' } });
+
+  const cleared = await runtime.room('setRoomInitializationFault', {
+    code: staleAllocation.code,
+    incarnation: staleAllocation.incarnation,
+    leaseId: staleAllocation.leaseId,
+    type: null,
+  });
+  assert.equal(cleared.status, 200, JSON.stringify(cleared.body));
+});
+
+test('replays bootstrap state after closing and reopening a persisted Wrangler runtime', async () => {
+  const persistenceDirectory = await mkdtemp(join(tmpdir(), 'stepstone-room-bootstrap-'));
+  let persistentRuntime;
+  try {
+    persistentRuntime = await createRoomWorkerRuntime({ persistenceDirectory });
+    const ownerBody = createBody('process_owner');
+    const firstCreate = await postWith(persistentRuntime, '/api/rooms', ownerBody);
+    assert.equal(firstCreate.status, 200, firstCreate.text);
+    const created = firstCreate.body;
+    const playerBody = joinBody('ProcessEast');
+    const firstJoin = await postWith(
+      persistentRuntime,
+      `/api/rooms/${created.roomCode}/join`,
+      playerBody,
+    );
+    assert.equal(firstJoin.status, 200, firstJoin.text);
+    const spectatorBody = joinBody('ProcessWatcher', 'spectator');
+    const firstSpectator = await postWith(
+      persistentRuntime,
+      `/api/rooms/${created.roomCode}/join`,
+      spectatorBody,
+    );
+    assert.equal(firstSpectator.status, 200, firstSpectator.text);
+    const before = await inspectRoomWith(persistentRuntime, created);
+
+    await persistentRuntime.restartProcess();
+
+    const replayCreate = await postWith(persistentRuntime, '/api/rooms', ownerBody);
+    assert.deepEqual(replayCreate.body, created);
+    const replayJoin = await postWith(
+      persistentRuntime,
+      `/api/rooms/${created.roomCode}/join`,
+      playerBody,
+    );
+    assert.deepEqual(replayJoin.body, firstJoin.body);
+    const replaySpectator = await postWith(
+      persistentRuntime,
+      `/api/rooms/${created.roomCode}/join`,
+      spectatorBody,
+    );
+    assert.deepEqual(replaySpectator.body, firstSpectator.body);
+
+    const afterRestart = await inspectRoomWith(persistentRuntime, created);
+    assert.deepEqual(
+      afterRestart.sessions.map(({ sessionId, role, seat }) => ({ sessionId, role, seat })),
+      before.sessions.map(({ sessionId, role, seat }) => ({ sessionId, role, seat })),
+    );
+    assert.deepEqual(afterRestart.pendingActions, before.pendingActions);
+    assert.equal(afterRestart.alarmAt, before.alarmAt);
+  } finally {
+    await persistentRuntime?.close();
+    await rm(persistenceDirectory, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 100,
+    });
+  }
 });
 
 test('replays create and join exactly after response loss, eviction, and request conflict', async () => {

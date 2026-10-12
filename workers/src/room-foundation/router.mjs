@@ -83,11 +83,14 @@ async function createRoom(request, env) {
     if (allocation.value.status === 'ACTIVE') return jsonResponse(allocation.value.response);
     if (allocation.value.status !== 'PROVISIONING') return publicErrorResponse('SERVICE_CAPACITY');
 
-    const { code, incarnation, leaseId } = allocation.value;
+    const {
+      code, incarnation, leaseId, leaseExpiresAt,
+    } = allocation.value;
     const initialized = await roomStub(env, code, incarnation).initialize({
       code,
       incarnation,
       leaseId,
+      leaseExpiresAt,
       requestId: parsed.requestId,
       requestHash,
       tokenHash,
@@ -178,6 +181,16 @@ async function registryTestBridge(request, env) {
     case 'inspectRoom': {
       const roomId = env.STEPSTONE_ROOM.idFromName(`${input.code}:${input.incarnation}`);
       rpcResult = await env.STEPSTONE_ROOM.get(roomId).testInspect(input);
+      break;
+    }
+    case 'initializeRoomAt': {
+      const roomId = env.STEPSTONE_ROOM.idFromName(`${input.code}:${input.incarnation}`);
+      rpcResult = await env.STEPSTONE_ROOM.get(roomId).testInitializeAt(input);
+      break;
+    }
+    case 'probeRoomTokenStorage': {
+      const roomId = env.STEPSTONE_ROOM.idFromName(`${input.code}:${input.incarnation}`);
+      rpcResult = await env.STEPSTONE_ROOM.get(roomId).testProbeTokenStorage(input);
       break;
     }
     default:
