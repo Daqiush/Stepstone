@@ -190,6 +190,35 @@ test('keeps exact provisioning state and schedules a bounded retry after inspect
   await ok('reconcile', { now: allocation.leaseExpiresAt });
 });
 
+test('retry scheduling preserves the earliest provisioning deadline across leases', async () => {
+  await ok('inspect');
+  const wallStart = Date.now();
+  const firstDue = wallStart + 5_000;
+  const secondDue = wallStart + 5_500;
+  const first = await ok('allocateAt', {
+    requestId: requestId('retryfirst'),
+    requestHash: requestHash('a'),
+    now: firstDue - 60_000,
+  });
+  const other = await ok('allocateAt', {
+    requestId: requestId('retryother'),
+    requestHash: requestHash('b'),
+    now: secondDue - 60_000,
+  });
+  assert.equal(first.leaseExpiresAt, firstDue);
+  assert.equal(other.leaseExpiresAt, secondDue);
+
+  try {
+    await ok('scheduleRetryWithoutAlarm', { retryAt: wallStart + 6_000 });
+    const inspection = await ok('inspect');
+    assert.equal(roomRow(inspection, first).status, 'PROVISIONING');
+    assert.equal(roomRow(inspection, other).status, 'PROVISIONING');
+    assert.equal(inspection.alarmAt, firstDue);
+  } finally {
+    await ok('reconcile', { now: wallStart + 6_000 });
+  }
+});
+
 test('keeps exact provisioning state for a malformed inspection response', async () => {
   const id = requestId('malformed');
   const allocation = await ok('allocateAt', {

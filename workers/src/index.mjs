@@ -25,6 +25,9 @@ class LobbyRegistry extends DurableObject {
   testMarkReleasePendingAt(input) { return this.implementation.testMarkReleasePendingAt(input); }
   testReleaseAt(input) { return this.implementation.testReleaseAt(input); }
   testReconcile(input) { return this.implementation.testReconcile(input); }
+  testScheduleRetryWithoutAlarm(input) {
+    return this.implementation.testScheduleRetryWithoutAlarm(input);
+  }
   testRecoverAlarmAt(input) { return this.implementation.testRecoverAlarmAt(input); }
   testInspect() { return this.implementation.testInspect(); }
   testSeedCapacity(input) { return this.implementation.testSeedCapacity(input); }
@@ -46,6 +49,7 @@ class StepstoneRoom extends DurableObject {
   testSetInitializationFault(input) { return this.implementation.testSetInitializationFault(input); }
   testInspect(input) { return this.implementation.testInspect(input); }
   testInitializeAt(input) { return this.implementation.testInitializeAt(input); }
+  testAlarmAt(input) { return this.implementation.testAlarmAt(input); }
   testProbeTokenStorage(input) { return this.implementation.testProbeTokenStorage(input); }
 }
 

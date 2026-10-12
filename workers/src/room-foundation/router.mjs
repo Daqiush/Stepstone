@@ -2,7 +2,6 @@ import { fetchHarness } from '../harness-router.mjs';
 import { LIMITS } from './constants.mjs';
 import {
   ProtocolError,
-  assertHttpJsonSize,
   fingerprintCreateRequest,
   fingerprintJoinRequest,
   hashReconnectToken,
@@ -44,11 +43,40 @@ async function parseHttpJson(request, parser) {
   const contentLength = request.headers.get('content-length');
   if (contentLength !== null) {
     const length = Number(contentLength);
-    if (!Number.isSafeInteger(length) || length < 0) throw new ProtocolError('INVALID_REQUEST');
-    if (length > LIMITS.httpJsonBytes) throw new ProtocolError('INVALID_REQUEST');
+    if (!Number.isSafeInteger(length) || length < 0 || length > LIMITS.httpJsonBytes) {
+      try { await request.body?.cancel(); }
+      catch { /* The header error remains the stable public outcome. */ }
+      throw new ProtocolError('INVALID_REQUEST');
+    }
   }
-  const bytes = await request.arrayBuffer();
-  assertHttpJsonSize(bytes);
+  const reader = request.body?.getReader();
+  const chunks = [];
+  let byteLength = 0;
+  if (reader !== undefined) {
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        byteLength += value.byteLength;
+        if (byteLength > LIMITS.httpJsonBytes) {
+          reader.cancel().catch(() => {});
+          throw new ProtocolError('INVALID_REQUEST');
+        }
+        chunks.push(value);
+      }
+    } catch (error) {
+      if (error instanceof ProtocolError) throw error;
+      throw new ProtocolError('INVALID_REQUEST');
+    } finally {
+      reader.releaseLock();
+    }
+  }
+  const bytes = new Uint8Array(byteLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
   let text;
   try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
   catch { throw new ProtocolError('INVALID_REQUEST'); }
@@ -160,6 +188,10 @@ async function registryTestBridge(request, env) {
     case 'markReleasePendingAt': rpcResult = await registry.testMarkReleasePendingAt(input); break;
     case 'releaseAt': rpcResult = await registry.testReleaseAt(input); break;
     case 'reconcile': rpcResult = await registry.testReconcile(input); break;
+    case 'scheduleRetryWithoutAlarm': {
+      rpcResult = await registry.testScheduleRetryWithoutAlarm(input);
+      break;
+    }
     case 'recoverAlarmAt': rpcResult = await registry.testRecoverAlarmAt(input); break;
     case 'inspect': rpcResult = await registry.testInspect(); break;
     case 'seedCapacity': rpcResult = await registry.testSeedCapacity(input); break;
@@ -191,6 +223,11 @@ async function registryTestBridge(request, env) {
     case 'probeRoomTokenStorage': {
       const roomId = env.STEPSTONE_ROOM.idFromName(`${input.code}:${input.incarnation}`);
       rpcResult = await env.STEPSTONE_ROOM.get(roomId).testProbeTokenStorage(input);
+      break;
+    }
+    case 'runRoomAlarmAt': {
+      const roomId = env.STEPSTONE_ROOM.idFromName(`${input.code}:${input.incarnation}`);
+      rpcResult = await env.STEPSTONE_ROOM.get(roomId).testAlarmAt(input);
       break;
     }
     default:

@@ -7,6 +7,7 @@ import { after, before, test } from 'node:test';
 
 import { LIMITS } from '../src/room-foundation/constants.mjs';
 import { canonicalJson, hashReconnectToken } from '../src/room-foundation/protocol.mjs';
+import { fetchRoomFoundation } from '../src/room-foundation/router.mjs';
 import { createRoomWorkerRuntime } from './helpers/room-worker-runtime.mjs';
 
 const TOKEN_BYTES = 32;
@@ -72,6 +73,60 @@ function successShape(requestId, roomCode, incarnation, sessionId, role, seat) {
 function assertPublicError(result, code, status) {
   assert.equal(result.status, status, result.text);
   assert.deepEqual(result.body, { v: 1, error: { code } });
+}
+
+function unknownLengthOversizedBody() {
+  const state = { cancelled: false, pulls: 0 };
+  const chunk = new TextEncoder().encode('x'.repeat(4_096));
+  const body = new ReadableStream({
+    pull(controller) {
+      state.pulls += 1;
+      if (state.pulls <= 64) controller.enqueue(chunk);
+      else controller.close();
+    },
+    cancel() {
+      state.cancelled = true;
+    },
+  });
+  return { body, state };
+}
+
+async function postStreaming(path, body) {
+  return runtime.request(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body,
+    duplex: 'half',
+  });
+}
+
+function closedUnknownLengthOversizedBody() {
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array(LIMITS.httpJsonBytes + 1));
+      controller.close();
+    },
+  });
+}
+
+async function directStreamingPost(path, body, bindingCalls, headers = {}) {
+  const binding = {
+    idFromName() {
+      bindingCalls.push('idFromName');
+      throw new Error('oversized input reached durable storage');
+    },
+  };
+  const response = await fetchRoomFoundation(new Request(`https://stepstone.test${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...headers },
+    body,
+    duplex: 'half',
+  }), {
+    LOBBY_REGISTRY: binding,
+    STEPSTONE_ROOM: binding,
+  });
+  const text = await response.text();
+  return { status: response.status, body: JSON.parse(text), text };
 }
 
 async function createRoom(body = createBody()) {
@@ -226,6 +281,88 @@ test('rejects malformed, non-v1, and oversized join JSON without adding a sessio
   assert.ok(Buffer.byteLength(oversized) > LIMITS.httpJsonBytes);
   assertPublicError(await post(path, oversized), 'INVALID_REQUEST', 400);
   assert.equal((await inspectRoom(created)).sessions.length, 1);
+});
+
+test('cancels unknown-length oversized create and join streams before reading the full body', async () => {
+  const bindingCalls = [];
+  for (const path of ['/api/rooms', '/api/rooms/123/join']) {
+    const stream = unknownLengthOversizedBody();
+    assertPublicError(
+      await directStreamingPost(path, stream.body, bindingCalls),
+      'INVALID_REQUEST',
+      400,
+    );
+    assert.equal(stream.state.cancelled, true);
+    assert.ok(stream.state.pulls < 64, `${path} consumed ${stream.state.pulls} chunks`);
+  }
+  assert.deepEqual(bindingCalls, []);
+
+  const declaredOversized = unknownLengthOversizedBody();
+  assertPublicError(
+    await directStreamingPost('/api/rooms', declaredOversized.body, bindingCalls, {
+      'content-length': String(LIMITS.httpJsonBytes + 1),
+    }),
+    'INVALID_REQUEST',
+    400,
+  );
+  assert.equal(declaredOversized.state.cancelled, true);
+  assert.deepEqual(bindingCalls, []);
+
+  const registryBefore = await runtime.registry('inspect');
+  assert.equal(registryBefore.status, 200, JSON.stringify(registryBefore.body));
+  assertPublicError(
+    await postStreaming('/api/rooms', closedUnknownLengthOversizedBody()),
+    'INVALID_REQUEST',
+    400,
+  );
+
+  const registryAfter = await runtime.registry('inspect');
+  assert.equal(registryAfter.status, 200, JSON.stringify(registryAfter.body));
+  assert.deepEqual(registryAfter.body.value.roomCodes, registryBefore.body.value.roomCodes);
+  assert.deepEqual(
+    registryAfter.body.value.creationRequests,
+    registryBefore.body.value.creationRequests,
+  );
+
+  const created = await createRoom(createBody('stream_join_owner'));
+  const sessionsBefore = (await inspectRoom(created)).sessions.length;
+  assertPublicError(
+    await postStreaming(
+      `/api/rooms/${created.roomCode}/join`,
+      closedUnknownLengthOversizedBody(),
+    ),
+    'INVALID_REQUEST',
+    400,
+  );
+  assert.equal((await inspectRoom(created)).sessions.length, sessionsBefore);
+});
+
+test('consumes one due bootstrap placeholder without scheduling an immediate alarm loop', async () => {
+  const created = await createRoom(createBody('placeholder_alarm_owner'));
+  const before = await inspectRoom(created);
+  assert.equal(before.pendingActions.length, 1);
+  assert.equal(before.pendingActions[0].kind, 'owner-auth-expiry');
+
+  const first = await runtime.room('runRoomAlarmAt', {
+    code: created.roomCode,
+    incarnation: created.incarnation,
+    now: before.pendingActions[0].dueAt,
+  });
+  assert.equal(first.status, 200, JSON.stringify(first.body));
+  assert.equal(first.body.ok, true, JSON.stringify(first.body));
+  const afterFirst = await inspectRoom(created);
+  assert.deepEqual(afterFirst.pendingActions, []);
+  assert.equal(afterFirst.alarmAt, null);
+
+  const second = await runtime.room('runRoomAlarmAt', {
+    code: created.roomCode,
+    incarnation: created.incarnation,
+    now: before.pendingActions[0].dueAt + 1,
+  });
+  assert.equal(second.status, 200, JSON.stringify(second.body));
+  const afterSecond = await inspectRoom(created);
+  assert.deepEqual(afterSecond.pendingActions, []);
+  assert.equal(afterSecond.alarmAt, null);
 });
 
 test('persists the authoritative lease expiry and stores only credential token digests', async () => {

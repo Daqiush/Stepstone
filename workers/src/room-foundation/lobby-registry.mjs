@@ -125,6 +125,21 @@ export class LobbyRegistry {
     return candidates.length === 0 ? null : Math.min(...candidates);
   }
 
+  nextFutureDue(now) {
+    const lease = row(this.sql.exec(
+      `SELECT MIN(lease_expires_at) AS due_at FROM room_codes
+       WHERE status = 'PROVISIONING' AND lease_expires_at > ?`,
+      now,
+    ))?.due_at;
+    const request = row(this.sql.exec(
+      `SELECT MIN(expires_at) AS due_at FROM creation_requests
+       WHERE status IN ('ACTIVE', 'FAILED') AND expires_at > ?`,
+      now,
+    ))?.due_at;
+    const candidates = [lease, request].filter((value) => value !== null && value !== undefined);
+    return candidates.length === 0 ? null : Math.min(...candidates);
+  }
+
   async recoverAlarm() {
     const now = Date.now();
     await this.recoverAlarmAt(now, now);
@@ -156,7 +171,10 @@ export class LobbyRegistry {
     const now = Date.now();
     const current = await this.ctx.storage.getAlarm();
     if (retryAt !== null) {
-      const target = current !== null && current > now ? Math.min(current, retryAt) : retryAt;
+      const futureDue = this.nextFutureDue(now);
+      const candidates = [retryAt, futureDue, current !== null && current > now ? current : null]
+        .filter((value) => value !== null);
+      const target = Math.min(...candidates);
       await this.ctx.storage.setAlarm(Math.max(target, now));
     } else if (!(next <= now && current !== null && current > now
       && current <= now + RECONCILE_RETRY_MS)) {
@@ -461,6 +479,14 @@ export class LobbyRegistry {
   testReconcile({ now } = {}) {
     if (this.env.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
     return this.reconcile(now);
+  }
+
+  async testScheduleRetryWithoutAlarm({ retryAt } = {}) {
+    if (this.env.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
+    if (!validTime(retryAt)) return failure('INVALID_REQUEST');
+    await this.ctx.storage.deleteAlarm();
+    await this.scheduleAlarm(retryAt);
+    return result({ scheduled: true });
   }
 
   async testRecoverAlarmAt({ now } = {}) {

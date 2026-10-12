@@ -150,7 +150,17 @@ export class StepstoneRoom {
   }
 
   alarm() {
-    return this.recoverAlarm();
+    return this.consumeDueActions(Date.now());
+  }
+
+  consumeDueActions(now) {
+    return this.ctx.storage.transaction(async () => {
+      this.sql.exec('DELETE FROM pending_actions WHERE due_at <= ?', now);
+      const next = this.nextDue();
+      if (next === null) await this.ctx.storage.deleteAlarm();
+      else await this.ctx.storage.setAlarm(Math.max(next, Date.now()));
+      return result({ consumed: true });
+    });
   }
 
   async initialize(input = {}) {
@@ -453,6 +463,18 @@ export class StepstoneRoom {
     if (this.env?.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
     const { sessionId, now, ...initialization } = input;
     return this.initializeWithSession(initialization, sessionId, now);
+  }
+
+  testAlarmAt({ code, incarnation, now } = {}) {
+    if (this.env?.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
+    if (!validCodeIncarnation(code, incarnation) || !validTime(now)) {
+      return failure('INVALID_REQUEST');
+    }
+    const stored = row(this.sql.exec('SELECT * FROM room_state LIMIT 1'));
+    if (!stored || stored.incarnation !== incarnation) return failure('ROOM_NOT_FOUND');
+    const state = JSON.parse(stored.state_json);
+    if (state.roomCode !== code) return failure('ROOM_NOT_FOUND');
+    return this.consumeDueActions(now);
   }
 
   async testProbeTokenStorage({
