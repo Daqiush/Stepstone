@@ -6,6 +6,15 @@ import {
 const statusSet = new Set(REGISTRY_STATUSES);
 const codePattern = /^\d{3}$/;
 const idPattern = /^[A-Za-z0-9_-]{16,64}$/;
+const rowFields = [
+  'code',
+  'incarnation',
+  'status',
+  'leaseId',
+  'leaseExpiresAt',
+  'tombstoneUntil',
+  'updatedAt',
+].sort();
 
 export class RegistryTransitionError extends Error {
   constructor(reason) {
@@ -25,14 +34,27 @@ function validTime(value) {
 
 function validateRow(row) {
   if (row === null || typeof row !== 'object' || Array.isArray(row)) fail('INVALID_ROW');
-  if (!codePattern.test(row.code) || !statusSet.has(row.status)) fail('INVALID_ROW');
+  const fields = Object.keys(row).sort();
+  if (fields.length !== rowFields.length
+    || fields.some((field, index) => field !== rowFields[index])) fail('INVALID_ROW');
+  if (typeof row.code !== 'string' || !codePattern.test(row.code) || !statusSet.has(row.status)) {
+    fail('INVALID_ROW');
+  }
   if (!Number.isSafeInteger(row.incarnation) || row.incarnation < 0) fail('INVALID_ROW');
   if (row.status !== 'FREE' && row.incarnation < 1) fail('INVALID_ROW');
   if (!validTime(row.updatedAt)) fail('INVALID_ROW');
   if (row.status === 'PROVISIONING') {
-    if (!idPattern.test(row.leaseId) || !validTime(row.leaseExpiresAt)) fail('INVALID_ROW');
+    if (typeof row.leaseId !== 'string'
+      || !idPattern.test(row.leaseId)
+      || !validTime(row.leaseExpiresAt)) fail('INVALID_ROW');
+  } else if (row.leaseId !== null || row.leaseExpiresAt !== null) {
+    fail('INVALID_ROW');
   }
-  if (row.status === 'TOMBSTONE' && !validTime(row.tombstoneUntil)) fail('INVALID_ROW');
+  if (row.status === 'TOMBSTONE') {
+    if (!validTime(row.tombstoneUntil)) fail('INVALID_ROW');
+  } else if (row.tombstoneUntil !== null) {
+    fail('INVALID_ROW');
+  }
 }
 
 function validateNow(now) {
@@ -69,6 +91,7 @@ function activate(row, now) {
 }
 
 function tombstone(row, now) {
+  if (now > Number.MAX_SAFE_INTEGER - LIMITS.registryTombstoneMs) fail('TIME_OVERFLOW');
   return {
     ...row,
     status: 'TOMBSTONE',
@@ -87,6 +110,7 @@ export function allocateRegistryCode(row, { leaseId, leaseExpiresAt, now }) {
   const available = row.status === 'FREE'
     || (row.status === 'TOMBSTONE' && row.tombstoneUntil <= now);
   if (!available) fail('CODE_UNAVAILABLE');
+  if (row.incarnation === Number.MAX_SAFE_INTEGER) fail('INCARNATION_EXHAUSTED');
   return {
     code: row.code,
     incarnation: row.incarnation + 1,
@@ -127,7 +151,15 @@ export function markRegistryReleasePending(row, { incarnation, now }) {
   validateNow(now);
   requireExactIncarnation(row, incarnation);
   if (row.status !== 'ACTIVE') fail('INVALID_STATE');
-  return { ...row, status: 'RELEASE_PENDING', updatedAt: now };
+  return {
+    code: row.code,
+    incarnation: row.incarnation,
+    status: 'RELEASE_PENDING',
+    leaseId: null,
+    leaseExpiresAt: null,
+    tombstoneUntil: null,
+    updatedAt: now,
+  };
 }
 
 export function releaseRegistryCode(row, { incarnation, now }) {

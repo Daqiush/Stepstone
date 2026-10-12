@@ -241,6 +241,32 @@ test('canonical JSON recursively sorts object keys while retaining array order',
   }
 });
 
+test('canonical JSON preserves parsed __proto__ keys without colliding with an empty object', () => {
+  const withProtoKey = JSON.parse('{"safe":1,"__proto__":{"polluted":true}}');
+  assert.equal(
+    canonicalJson(withProtoKey),
+    '{"__proto__":{"polluted":true},"safe":1}',
+  );
+  assert.notEqual(
+    createHash('sha256').update(canonicalJson(withProtoKey)).digest('hex'),
+    createHash('sha256').update(canonicalJson({ safe: 1 })).digest('hex'),
+  );
+});
+
+test('canonical JSON serializes integer-like keys in lexical sorted order', () => {
+  const integerKeys = JSON.parse('{"2":"two","10":"ten","1":"one","a":"letter"}');
+  assert.equal(
+    canonicalJson(integerKeys),
+    '{"1":"one","10":"ten","2":"two","a":"letter"}',
+  );
+  const reordered = JSON.parse('{"a":"letter","1":"one","10":"ten","2":"two"}');
+  assert.equal(canonicalJson(integerKeys), canonicalJson(reordered));
+  assert.notEqual(
+    createHash('sha256').update(canonicalJson(integerKeys)).digest('hex'),
+    createHash('sha256').update(canonicalJson({ 1: 'one', 2: 'two', 10: 'changed', a: 'letter' })).digest('hex'),
+  );
+});
+
 test('canonical fingerprints are SHA-256 hashes and reject unknown fields before hashing', async () => {
   const reorderedCreate = {
     reconnectToken,

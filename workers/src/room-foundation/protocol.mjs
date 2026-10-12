@@ -179,35 +179,37 @@ export function parseCommandFrame(value) {
 export function canonicalJson(value) {
   const ancestors = new Set();
 
-  function canonicalize(current) {
-    if (current === null || typeof current === 'boolean' || typeof current === 'string') return current;
+  function serialize(current) {
+    if (current === null || typeof current === 'boolean' || typeof current === 'string') {
+      return JSON.stringify(current);
+    }
     if (typeof current === 'number') {
       if (!Number.isFinite(current)) throw new TypeError('canonical JSON requires finite numbers');
-      return current;
+      return JSON.stringify(current);
     }
     if (Array.isArray(current)) {
       if (ancestors.has(current)) throw new TypeError('canonical JSON cannot contain cycles');
       ancestors.add(current);
-      const result = current.map(canonicalize);
+      const result = `[${current.map(serialize).join(',')}]`;
       ancestors.delete(current);
       return result;
     }
     if (!isPlainObject(current)) throw new TypeError('canonical JSON requires plain JSON values');
     if (ancestors.has(current)) throw new TypeError('canonical JSON cannot contain cycles');
     ancestors.add(current);
-    const result = {};
+    const members = [];
     for (const key of Object.keys(current).sort()) {
       const item = current[key];
       if (item === undefined || typeof item === 'function' || typeof item === 'symbol' || typeof item === 'bigint') {
         throw new TypeError('canonical JSON requires plain JSON values');
       }
-      result[key] = canonicalize(item);
+      members.push(`${JSON.stringify(key)}:${serialize(item)}`);
     }
     ancestors.delete(current);
-    return result;
+    return `{${members.join(',')}}`;
   }
 
-  return JSON.stringify(canonicalize(value));
+  return serialize(value);
 }
 
 function bytesToHex(bytes) {
