@@ -271,6 +271,16 @@ export class LobbyRegistry {
     });
   }
 
+  lookupActive({ code } = {}) {
+    if (typeof code !== 'string' || !ROOM_CODE.test(code)) return failure('ROOM_NOT_FOUND');
+    const current = row(this.sql.exec(
+      "SELECT code, incarnation FROM room_codes WHERE code = ? AND status = 'ACTIVE'", code,
+    ));
+    return current
+      ? result({ code: current.code, incarnation: current.incarnation })
+      : failure('ROOM_NOT_FOUND');
+  }
+
   async activateAt({ requestId, code, incarnation, leaseId, response, now } = {}) {
     if (typeof requestId !== 'string' || !REQUEST_ID.test(requestId)
       || !assertCodeIncarnation(code, incarnation)
@@ -526,55 +536,5 @@ export class LobbyRegistry {
       }
       return result({ count });
     });
-  }
-}
-
-export class StepstoneRoom {
-  constructor(ctx, env) {
-    this.ctx = ctx;
-    this.env = env;
-  }
-
-  fetch() {
-    return new Response(null, { status: 404 });
-  }
-
-  async inspectInitialization({ code, incarnation, leaseId } = {}) {
-    if (this.env?.ROOM_FOUNDATION_TEST === 'true') {
-      const fault = await this.ctx?.storage?.get('registryInspectionFault');
-      const exactFault = fault?.code === code
-        && fault?.incarnation === incarnation
-        && fault?.leaseId === leaseId;
-      if (exactFault && fault.type === 'throw') throw new Error('injected inspection failure');
-      if (exactFault && fault.type === 'malformed') return { initialized: false, unexpected: true };
-    }
-    const stored = await this.ctx?.storage?.get('registryInitializationProbe');
-    const initialized = stored?.code === code
-      && stored?.incarnation === incarnation
-      && stored?.leaseId === leaseId;
-    return initialized ? { initialized: true, response: stored.response } : { initialized: false };
-  }
-
-  async testSetInitialization({ code, incarnation, leaseId, response } = {}) {
-    if (this.env?.ROOM_FOUNDATION_TEST !== 'true') return { ok: false, error: 'ROOM_NOT_FOUND' };
-    await this.ctx.storage.put('registryInitializationProbe', { code, incarnation, leaseId, response });
-    return { ok: true, value: { initialized: true } };
-  }
-
-  async testSetInspectionFault({ code, incarnation, leaseId, type } = {}) {
-    if (this.env?.ROOM_FOUNDATION_TEST !== 'true') return { ok: false, error: 'ROOM_NOT_FOUND' };
-    if (type !== 'throw' && type !== 'malformed' && type !== null) {
-      return { ok: false, error: 'INVALID_REQUEST' };
-    }
-    const stored = await this.ctx.storage.get('registryInspectionFault');
-    if (type === null) {
-      if (stored?.code !== code || stored?.incarnation !== incarnation || stored?.leaseId !== leaseId) {
-        return { ok: false, error: 'INVALID_REQUEST' };
-      }
-      await this.ctx.storage.delete('registryInspectionFault');
-    } else {
-      await this.ctx.storage.put('registryInspectionFault', { code, incarnation, leaseId, type });
-    }
-    return { ok: true, value: { configured: type !== null } };
   }
 }

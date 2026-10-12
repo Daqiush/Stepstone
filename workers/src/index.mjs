@@ -1,8 +1,8 @@
 import { DurableObject } from 'cloudflare:workers';
 import {
   LobbyRegistry as LobbyRegistryImplementation,
-  StepstoneRoom as StepstoneRoomImplementation,
 } from './room-foundation/lobby-registry.mjs';
+import { StepstoneRoom as StepstoneRoomImplementation } from './room-foundation/stepstone-room.mjs';
 
 export { FeasibilityRoom } from './feasibility-room.mjs';
 import { fetchWorker } from './room-foundation/router.mjs';
@@ -16,6 +16,7 @@ class LobbyRegistry extends DurableObject {
   fetch(request) { return this.implementation.fetch(request); }
   allocate(input) { return this.implementation.allocate(input); }
   activate(input) { return this.implementation.activate(input); }
+  lookupActive(input) { return this.implementation.lookupActive(input); }
   markReleasePending(input) { return this.implementation.markReleasePending(input); }
   release(input) { return this.implementation.release(input); }
   alarm() { return this.implementation.alarm(); }
@@ -36,9 +37,14 @@ class StepstoneRoom extends DurableObject {
   }
 
   fetch(request) { return this.implementation.fetch(request); }
+  initialize(input) { return this.implementation.initialize(input); }
+  join(input) { return this.implementation.join(input); }
   inspectInitialization(input) { return this.implementation.inspectInitialization(input); }
+  alarm() { return this.implementation.alarm(); }
   testSetInitialization(input) { return this.implementation.testSetInitialization(input); }
   testSetInspectionFault(input) { return this.implementation.testSetInspectionFault(input); }
+  testSetInitializationFault(input) { return this.implementation.testSetInitializationFault(input); }
+  testInspect(input) { return this.implementation.testInspect(input); }
 }
 
 export { LobbyRegistry, StepstoneRoom };
