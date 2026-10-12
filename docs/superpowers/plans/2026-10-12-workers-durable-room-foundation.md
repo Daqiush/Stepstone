@@ -84,6 +84,8 @@ git commit -m "feat: gate durable room Worker routes"
 
 **Files:**
 - Create: `workers/src/room-foundation/lobby-registry.mjs`
+- Modify: `workers/src/room-foundation/router.mjs`
+- Modify: `workers/src/index.mjs`
 - Test: `workers/test/lobby-registry.integration.test.mjs`
 - Create: `workers/test/helpers/room-worker-runtime.mjs`
 
@@ -97,7 +99,7 @@ Run: `node --test workers/test/lobby-registry.integration.test.mjs`
 
 - [ ] **Step 3: Implement registry SQL and alarm paths**
 
-Use primary-key-only registry tables. Use `transactionSync` for SQL-only changes and asynchronous storage transactions for SQL plus alarm changes. Preserve an already-due alarm during constructor recovery. Expose only internal RPC methods; local failure injection lives behind `ROOM_FOUNDATION_TEST` and never logs request bodies or tokens.
+Use primary-key-only registry tables. Use `transactionSync` for SQL-only changes and asynchronous storage transactions for SQL plus alarm changes. Preserve an already-due alarm during constructor recovery. Replace the Task 2 placeholder export with the real registry class. Expose only internal RPC methods; a minimal router test bridge and failure injection may exist only behind `ROOM_FOUNDATION_TEST` and must never log request bodies or tokens.
 
 - [ ] **Step 4: Verify GREEN**
 
@@ -106,7 +108,7 @@ Run the focused integration test twice to catch persistence/restart assumptions.
 - [ ] **Step 5: Commit**
 
 ```powershell
-git add workers/src/room-foundation/lobby-registry.mjs workers/test/lobby-registry.integration.test.mjs workers/test/helpers/room-worker-runtime.mjs
+git add workers/src/room-foundation/lobby-registry.mjs workers/src/room-foundation/router.mjs workers/src/index.mjs workers/test/lobby-registry.integration.test.mjs workers/test/helpers/room-worker-runtime.mjs
 git commit -m "feat: add durable room allocation registry"
 ```
 
