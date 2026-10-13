@@ -60,6 +60,9 @@ function validTime(value) {
   return Number.isSafeInteger(value) && value >= 0;
 }
 
+class SocketAuthenticationError extends Error {}
+class SocketRoomExpiredError extends Error {}
+
 function normalizeBootstrapResponse(response, expected) {
   const keys = ['v', 'requestId', 'roomCode', 'incarnation', 'sessionId', 'role', 'seat'];
   if (!exactKeys(response, keys)
@@ -183,8 +186,24 @@ export class StepstoneRoom {
   async reconcileWebSockets(now) {
     const sockets = this.ctx.getWebSockets();
     const completedHandshakeActions = [];
+    const identity = this.roomIdentity();
+    const roomInactive = !identity
+      || identity.stored.status !== 'ACTIVE'
+      || identity.state.status !== 'ACTIVE'
+      || identity.stored.incarnation !== identity.state.incarnation;
     for (const socket of sockets) {
       const attachment = this.socketAttachment(socket);
+      if (roomInactive || attachment?.incarnation !== identity.stored.incarnation) {
+        this.closeSocket(
+          socket,
+          WEBSOCKET_CLOSE.ROOM_EXPIRED,
+          WEBSOCKET_CLOSE_REASON.ROOM_EXPIRED,
+        );
+        if (validIdentity(attachment?.connectionId)) {
+          completedHandshakeActions.push(`handshake-timeout:${attachment.connectionId}`);
+        }
+        continue;
+      }
       if (!attachment || !validIdentity(attachment.connectionId)) {
         this.closeSocket(socket, WEBSOCKET_CLOSE.PROTOCOL_ERROR, WEBSOCKET_CLOSE_REASON.PROTOCOL_ERROR);
         continue;
@@ -296,16 +315,19 @@ export class StepstoneRoom {
     return row(this.sql.exec('SELECT MIN(due_at) AS due_at FROM pending_actions'))?.due_at ?? null;
   }
 
-  async recoverAlarm() {
+  async recoverAlarm(now = Date.now()) {
     const current = await this.ctx.storage.getAlarm();
+    if (current !== null && current <= now) {
+      await this.ctx.storage.setAlarm(now);
+      return;
+    }
     const next = this.nextDue();
     if (next === null) {
       if (current !== null) await this.ctx.storage.deleteAlarm();
       return;
     }
-    const now = Date.now();
     const target = Math.max(next, now);
-    if (current === null || current > target || current < now) {
+    if (current === null || current > target) {
       await this.ctx.storage.setAlarm(target);
     }
   }
@@ -471,7 +493,10 @@ export class StepstoneRoom {
       }
 
       const duplicateToken = row(this.sql.exec(
-        'SELECT session_id FROM sessions WHERE token_hash = ? LIMIT 1', tokenHash,
+        `SELECT session_id FROM sessions
+         WHERE token_hash = ? OR previous_token_hash = ? LIMIT 1`,
+        tokenHash,
+        tokenHash,
       ));
       if (duplicateToken) return failure('REQUEST_CONFLICT');
 
@@ -523,7 +548,7 @@ export class StepstoneRoom {
     const fault = await this.ctx.storage.get('roomAuthFault');
     if (!fault || fault.code !== code || fault.incarnation !== incarnation) return null;
     await this.ctx.storage.delete('roomAuthFault');
-    return fault.type;
+    return fault;
   }
 
   closeForProtocol(socket, error) {
@@ -581,58 +606,76 @@ export class StepstoneRoom {
       return;
     }
 
-    let session = row(this.sql.exec(
-      'SELECT * FROM sessions WHERE incarnation = ? AND token_hash = ? LIMIT 1',
-      identity.stored.incarnation,
-      currentDigest,
-    ));
-    let replay = false;
-    if (!session) {
-      session = row(this.sql.exec(
-        'SELECT * FROM sessions WHERE incarnation = ? AND previous_token_hash = ? LIMIT 1',
-        identity.stored.incarnation,
-        currentDigest,
-      ));
-      replay = session !== null;
-    }
-    if (!session || (session.expires_at !== null && session.expires_at <= Date.now())) {
-      this.closeSocket(socket, WEBSOCKET_CLOSE.AUTH_INVALID, WEBSOCKET_CLOSE_REASON.AUTH_INVALID);
-      return;
-    }
-    if (replay && (session.last_rotation_id !== parsed.id
-      || !constantTimeDigestEqual(session.last_rotation_next_hash, nextDigest)
-      || !constantTimeDigestEqual(session.token_hash, nextDigest))) {
-      this.closeSocket(socket, WEBSOCKET_CLOSE.AUTH_INVALID, WEBSOCKET_CLOSE_REASON.AUTH_INVALID);
-      return;
-    }
-    if (!replay) {
-      const duplicateNextToken = row(this.sql.exec(
-        'SELECT session_id FROM sessions WHERE token_hash = ? AND session_id <> ? LIMIT 1',
-        nextDigest,
-        session.session_id,
-      ));
-      if (constantTimeDigestEqual(currentDigest, nextDigest) || duplicateNextToken) {
-        this.closeSocket(socket, WEBSOCKET_CLOSE.AUTH_INVALID, WEBSOCKET_CLOSE_REASON.AUTH_INVALID);
-        return;
-      }
-    }
-
-    const sameConnection = replay && session.current_connection_id === attachment.connectionId;
-    const proposedEpoch = sameConnection
-      ? session.connection_epoch : session.connection_epoch + 1;
-    const proposedAttachment = {
-      sessionId: session.session_id,
-      incarnation: identity.stored.incarnation,
-      protocolVersion: PROTOCOL_VERSION,
-      connectionId: attachment.connectionId,
-      connectionEpoch: proposedEpoch,
-      authenticated: true,
-    };
-    socket.serializeAttachment(proposedAttachment);
-
     const fault = await this.takeAuthFault(identity.state.roomCode, identity.stored.incarnation);
+    if (fault?.type === 'delay-before-transaction') {
+      await new Promise((resolve) => setTimeout(resolve, fault.delayMs));
+    }
+    let authenticated;
     try {
       await this.ctx.storage.transaction(async () => {
+        const freshIdentity = this.roomIdentity();
+        if (!freshIdentity
+          || freshIdentity.stored.status !== 'ACTIVE'
+          || freshIdentity.state.status !== 'ACTIVE'
+          || freshIdentity.stored.incarnation !== attachment.incarnation
+          || freshIdentity.state.incarnation !== attachment.incarnation) {
+          throw new SocketRoomExpiredError();
+        }
+
+        const currentMatches = rows(this.sql.exec(
+          'SELECT * FROM sessions WHERE incarnation = ? AND token_hash = ?',
+          attachment.incarnation,
+          currentDigest,
+        ));
+        const previousMatches = rows(this.sql.exec(
+          'SELECT * FROM sessions WHERE incarnation = ? AND previous_token_hash = ?',
+          attachment.incarnation,
+          currentDigest,
+        ));
+        const currentCredential = currentMatches.length === 1 && previousMatches.length === 0;
+        const replay = currentMatches.length === 0 && previousMatches.length === 1;
+        if (!currentCredential && !replay) throw new SocketAuthenticationError();
+        const session = currentCredential ? currentMatches[0] : previousMatches[0];
+        if (session.expires_at !== null && session.expires_at <= Date.now()) {
+          throw new SocketAuthenticationError();
+        }
+        if (replay && (session.last_rotation_id !== parsed.id
+          || !constantTimeDigestEqual(session.last_rotation_next_hash, nextDigest)
+          || !constantTimeDigestEqual(session.token_hash, nextDigest))) {
+          throw new SocketAuthenticationError();
+        }
+
+        const nextReservations = rows(this.sql.exec(
+          `SELECT session_id, token_hash, previous_token_hash FROM sessions
+           WHERE incarnation = ? AND (token_hash = ? OR previous_token_hash = ?)`,
+          attachment.incarnation,
+          nextDigest,
+          nextDigest,
+        ));
+        if (replay) {
+          const exactReservation = nextReservations.length === 1
+            && nextReservations[0].session_id === session.session_id
+            && constantTimeDigestEqual(nextReservations[0].token_hash, nextDigest)
+            && !constantTimeDigestEqual(nextReservations[0].previous_token_hash, nextDigest);
+          if (!exactReservation) throw new SocketAuthenticationError();
+        } else if (nextReservations.length !== 0) {
+          throw new SocketAuthenticationError();
+        }
+
+        const sameConnection = replay
+          && session.current_connection_id === attachment.connectionId;
+        const proposedEpoch = sameConnection
+          ? session.connection_epoch : session.connection_epoch + 1;
+        const proposedAttachment = {
+          sessionId: session.session_id,
+          incarnation: attachment.incarnation,
+          protocolVersion: PROTOCOL_VERSION,
+          connectionId: attachment.connectionId,
+          connectionEpoch: proposedEpoch,
+          authenticated: true,
+        };
+        socket.serializeAttachment(proposedAttachment);
+
         if (!replay) {
           this.sql.exec(
             `UPDATE sessions SET
@@ -649,7 +692,7 @@ export class StepstoneRoom {
             attachment.connectionId,
             proposedEpoch,
             session.session_id,
-            identity.stored.incarnation,
+            attachment.incarnation,
           );
         } else if (!sameConnection) {
           this.sql.exec(
@@ -658,7 +701,7 @@ export class StepstoneRoom {
             attachment.connectionId,
             proposedEpoch,
             session.session_id,
-            identity.stored.incarnation,
+            attachment.incarnation,
           );
         }
         this.sql.exec(
@@ -674,14 +717,26 @@ export class StepstoneRoom {
           );
         }
         await this.recomputeAlarm();
-        if (fault === 'before-commit') throw new Error('injected auth precommit failure');
+        if (fault?.type === 'before-commit') throw new Error('injected auth precommit failure');
+        authenticated = {
+          sessionId: session.session_id,
+          role: session.role,
+          seat: session.seat,
+          connectionEpoch: proposedEpoch,
+          connectionId: attachment.connectionId,
+        };
       });
-    } catch {
+    } catch (error) {
+      if (error instanceof SocketAuthenticationError) {
+        this.closeSocket(socket, WEBSOCKET_CLOSE.AUTH_INVALID, WEBSOCKET_CLOSE_REASON.AUTH_INVALID);
+      } else if (error instanceof SocketRoomExpiredError) {
+        this.closeSocket(socket, WEBSOCKET_CLOSE.ROOM_EXPIRED, WEBSOCKET_CLOSE_REASON.ROOM_EXPIRED);
+      }
       return;
     }
 
-    if (fault === 'after-commit-before-reply') return;
-    this.closeReplacedSockets(session.session_id, attachment.connectionId);
+    if (fault?.type === 'after-commit-before-reply') return;
+    this.closeReplacedSockets(authenticated.sessionId, authenticated.connectionId);
     const committed = this.roomIdentity();
     if (!committed || committed.stored.status !== 'ACTIVE') {
       this.closeSocket(socket, WEBSOCKET_CLOSE.ROOM_EXPIRED, WEBSOCKET_CLOSE_REASON.ROOM_EXPIRED);
@@ -692,10 +747,10 @@ export class StepstoneRoom {
       type: 'hello-ok',
       id: parsed.id,
       payload: {
-        sessionId: session.session_id,
-        role: session.role,
-        seat: session.seat,
-        connectionEpoch: proposedEpoch,
+        sessionId: authenticated.sessionId,
+        role: authenticated.role,
+        seat: authenticated.seat,
+        connectionEpoch: authenticated.connectionEpoch,
         revision: committed.state.revision,
         snapshot: publicRoomState(committed.state),
       },
@@ -856,15 +911,34 @@ export class StepstoneRoom {
     return result({ configured: type !== null });
   }
 
-  async testSetAuthFault({ code, incarnation, type } = {}) {
+  async testSetAuthFault({ code, incarnation, type, delayMs } = {}) {
     if (this.env?.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
+    const delayed = type === 'delay-before-transaction'
+      && Number.isSafeInteger(delayMs) && delayMs >= 1 && delayMs <= 5_000;
     if (!validCodeIncarnation(code, incarnation)
-      || !['before-commit', 'after-commit-before-reply', null].includes(type)) {
+      || (!['before-commit', 'after-commit-before-reply', null].includes(type) && !delayed)) {
       return failure('INVALID_REQUEST');
     }
     if (type === null) await this.ctx.storage.delete('roomAuthFault');
-    else await this.ctx.storage.put('roomAuthFault', { code, incarnation, type });
+    else await this.ctx.storage.put('roomAuthFault', {
+      code,
+      incarnation,
+      type,
+      ...(delayed ? { delayMs } : {}),
+    });
     return result({ configured: type !== null });
+  }
+
+  async testRecoverAlarmAt({ code, incarnation, now, currentAlarmAt } = {}) {
+    if (this.env?.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
+    if (!validCodeIncarnation(code, incarnation)
+      || !validTime(now) || !validTime(currentAlarmAt)) return failure('INVALID_REQUEST');
+    const identity = this.roomIdentity();
+    if (!identity || identity.stored.incarnation !== incarnation
+      || identity.state.roomCode !== code) return failure('ROOM_NOT_FOUND');
+    await this.ctx.storage.setAlarm(currentAlarmAt);
+    await this.recoverAlarm(now);
+    return result({ alarmAt: await this.ctx.storage.getAlarm() });
   }
 
   testSetStatus({ code, incarnation, status } = {}) {

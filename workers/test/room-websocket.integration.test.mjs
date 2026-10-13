@@ -145,6 +145,15 @@ test('closes oversized, malformed, non-hello, and protocol-mismatched preauth fr
   }
 });
 
+test('expectNoMessage rejects when the socket closes before its quiet period', async () => {
+  const room = await createRoom('quiet_close_owner');
+  const socket = await runtime.openWebSocket(wsPath(room));
+  const quiet = socket.expectNoMessage(1_000);
+  socket.send('{');
+  await assert.rejects(quiet, /closed before quiet period/u);
+  assert.equal((await socket.closed()).code, WEBSOCKET_CLOSE.PROTOCOL_ERROR);
+});
+
 test('caps reconstructed unauthenticated sockets at eight and times them out durably with 4408', async () => {
   const room = await createRoom('preauth_cap_owner');
   const sockets = [];
@@ -241,6 +250,73 @@ test('rejects another session credential as the next token with 4401', async () 
   assert.equal((await socket.closed()).code, WEBSOCKET_CLOSE.AUTH_INVALID);
   const state = await inspect(room);
   assert.equal(state.sessions.find((item) => item.sessionId === player.sessionId).connectionEpoch, 0);
+});
+
+test('reserves another session previous credential against rotation', async () => {
+  const room = await createRoom('previous_collision_owner');
+  const player = await joinRoom(room, 'PreviousCollisionEast', 'player');
+  const ownerAuth = await authenticate(room, room);
+  const playerSocket = await runtime.openWebSocket(wsPath(room));
+  playerSocket.send(hello(player, ownerAuth.previousToken).frame);
+  assert.equal((await playerSocket.closed()).code, WEBSOCKET_CLOSE.AUTH_INVALID);
+  const state = await inspect(room);
+  assert.equal(state.sessions.find((item) => item.sessionId === player.sessionId).connectionEpoch, 0);
+  ownerAuth.socket.close();
+});
+
+test('reserves the same session previous credential against rollback rotation', async () => {
+  const room = await createRoom('history_rollback_owner');
+  const ownerAuth = await authenticate(room, room);
+  ownerAuth.socket.send(hello(ownerAuth.session, ownerAuth.previousToken).frame);
+  assert.equal((await ownerAuth.socket.closed()).code, WEBSOCKET_CLOSE.AUTH_INVALID);
+  const state = await inspect(room);
+  assert.equal(state.sessions[0].connectionEpoch, 1);
+});
+
+test('bootstrap rejects a credential reserved in another session history', async () => {
+  const room = await createRoom('history_bootstrap_owner');
+  const ownerAuth = await authenticate(room, room);
+  const response = await post(`/api/rooms/${room.roomCode}/join`, {
+    v: 1,
+    requestId: id('history_bootstrap_join'),
+    displayName: 'History watcher',
+    reconnectToken: ownerAuth.previousToken,
+    requestedRole: 'spectator',
+  });
+  assert.equal(response.status, 409, response.text);
+  assert.deepEqual(response.body, { v: 1, error: { code: 'REQUEST_CONFLICT' } });
+  assert.equal((await inspect(room)).sessions.length, 1);
+  ownerAuth.socket.close();
+});
+
+test('overlapping distinct rotations authorize exactly one socket', async () => {
+  const room = await createRoom('overlap_owner');
+  const first = await runtime.openWebSocket(wsPath(room));
+  const second = await runtime.openWebSocket(wsPath(room));
+  const firstHello = hello(room, token(), id('overlap_first'));
+  const secondHello = hello(room, token(), id('overlap_second'));
+  const configured = await runtime.room('setRoomAuthFault', {
+    code: room.roomCode,
+    incarnation: room.incarnation,
+    type: 'delay-before-transaction',
+    delayMs: 200,
+  });
+  assert.equal(configured.status, 200, JSON.stringify(configured.body));
+
+  first.send(firstHello.frame);
+  await runtime.wait(25);
+  second.send(secondHello.frame);
+  const winner = await parseMessage(second);
+  assert.equal(winner.id, secondHello.rotationId);
+  assert.equal(winner.payload.connectionEpoch, 1);
+  assert.equal((await first.closed()).code, WEBSOCKET_CLOSE.AUTH_INVALID);
+
+  const state = await inspect(room);
+  assert.equal(state.sessions[0].connectionEpoch, 1);
+  const authoritative = state.sockets.filter((socket) => socket.authenticated);
+  assert.equal(authoritative.length, 1);
+  assert.equal(authoritative[0].connectionEpoch, 1);
+  second.close();
 });
 
 test('owner authentication alone cancels owner expiry and invalid credentials close with 4401', async () => {
@@ -351,4 +427,53 @@ test('a newer authenticated socket has sole authority across hibernation and exp
   });
   expiredSocket.send(hello(expiredRoom).frame);
   assert.equal((await expiredSocket.closed()).code, WEBSOCKET_CLOSE.ROOM_EXPIRED);
+});
+
+test('wake closes every socket for persisted CLOSING state and removes handshake actions', async () => {
+  const room = await createRoom('closing_wake_owner');
+  const authenticated = await authenticate(room, room);
+  const preauth = await runtime.openWebSocket(wsPath(room));
+  const configured = await runtime.room('setRoomStatus', {
+    code: room.roomCode,
+    incarnation: room.incarnation,
+    status: 'CLOSING',
+  });
+  assert.equal(configured.status, 200, JSON.stringify(configured.body));
+
+  await runtime.restartRoom(room.roomCode, room.incarnation);
+  const wakeState = await inspect(room);
+  assert.equal(
+    wakeState.pendingActions.some((action) => action.kind === 'handshake-timeout'),
+    false,
+  );
+  const delivered = await Promise.allSettled([
+    authenticated.socket.closed(500),
+    preauth.closed(500),
+  ]);
+  const closeCodes = delivered
+    .filter((item) => item.status === 'fulfilled')
+    .map((item) => item.value.code);
+  assert.ok(closeCodes.length >= 1, 'Wrangler delivered no close frame for reconstructed sockets');
+  assert.deepEqual([...new Set(closeCodes)], [WEBSOCKET_CLOSE.ROOM_EXPIRED]);
+  assert.notEqual(authenticated.socket.raw.readyState, WebSocket.OPEN);
+  assert.notEqual(preauth.raw.readyState, WebSocket.OPEN);
+  authenticated.socket.close();
+  preauth.close();
+  await runtime.wait(25);
+  const state = await inspect(room);
+  assert.equal(state.sockets.length, 0);
+  assert.equal(state.pendingActions.some((action) => action.kind === 'handshake-timeout'), false);
+});
+
+test('alarm recovery never postpones an already-due alarm behind a later action', async () => {
+  const room = await createRoom('due_alarm_owner');
+  const now = Date.now() + 5_000;
+  const recovered = await runtime.room('recoverRoomAlarmAt', {
+    code: room.roomCode,
+    incarnation: room.incarnation,
+    now,
+    currentAlarmAt: now - 1_000,
+  });
+  assert.equal(recovered.status, 200, JSON.stringify(recovered.body));
+  assert.equal(recovered.body.value.alarmAt, now);
 });

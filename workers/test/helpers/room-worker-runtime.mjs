@@ -135,21 +135,36 @@ export async function createRoomWorkerRuntime({ persistenceDirectory = null } = 
         },
         async expectNoMessage(milliseconds = 100) {
           if (messages.length > 0) throw new Error(`unexpected WebSocket message: ${messages[0]}`);
+          if (closeEvent) throw new Error(`socket closed before quiet period: ${closeEvent.code}`);
           await new Promise((resolve, reject) => {
-            const waiter = {
+            let settled = false;
+            const removeWaiter = (waiters, waiter) => {
+              const index = waiters.indexOf(waiter);
+              if (index >= 0) waiters.splice(index, 1);
+            };
+            const finish = (callback) => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              removeWaiter(messageWaiters, messageWaiter);
+              removeWaiter(closeWaiters, closeWaiter);
+              callback();
+            };
+            const messageWaiter = {
               resolve(value) {
-                clearTimeout(timer);
-                const index = messageWaiters.indexOf(waiter);
-                if (index >= 0) messageWaiters.splice(index, 1);
-                reject(new Error(`unexpected WebSocket message: ${String(value)}`));
+                finish(() => reject(new Error(`unexpected WebSocket message: ${String(value)}`)));
+              },
+            };
+            const closeWaiter = {
+              resolve(event) {
+                finish(() => reject(new Error(`socket closed before quiet period: ${event.code}`)));
               },
             };
             const timer = setTimeout(() => {
-              const index = messageWaiters.indexOf(waiter);
-              if (index >= 0) messageWaiters.splice(index, 1);
-              resolve();
+              finish(resolve);
             }, milliseconds);
-            messageWaiters.push(waiter);
+            messageWaiters.push(messageWaiter);
+            closeWaiters.push(closeWaiter);
           });
         },
         async closed(timeoutMs = 2_000) {
