@@ -70,3 +70,21 @@ export const REGISTRY_RELEASE_RESULTS = Object.freeze(['RELEASED', 'SUPERSEDED']
 
 export const ROLES = Object.freeze(['OWNER', 'PLAYER', 'SPECTATOR']);
 export const PLAYER_SEATS = Object.freeze(['N', 'E', 'S', 'W']);
+
+export const WEBSOCKET_CLOSE = Object.freeze({
+  PROTOCOL_ERROR: 1002,
+  AUTH_INVALID: 4401,
+  FORBIDDEN: 4403,
+  AUTH_TIMEOUT: 4408,
+  SESSION_REPLACED: 4409,
+  ROOM_EXPIRED: 4410,
+});
+
+export const WEBSOCKET_CLOSE_REASON = Object.freeze({
+  PROTOCOL_ERROR: 'protocol error',
+  AUTH_INVALID: 'authentication invalid',
+  FORBIDDEN: 'forbidden',
+  AUTH_TIMEOUT: 'authentication timeout',
+  SESSION_REPLACED: 'session replaced',
+  ROOM_EXPIRED: 'room expired',
+});

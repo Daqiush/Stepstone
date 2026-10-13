@@ -9,6 +9,7 @@ const ENTRY_PATH = fileURLToPath(new URL('../../src/index.mjs', import.meta.url)
 export async function createRoomWorkerRuntime({ persistenceDirectory = null } = {}) {
   let server;
   let worker;
+  let serverUrl;
 
   async function start() {
     if (persistenceDirectory !== null) {
@@ -22,6 +23,11 @@ export async function createRoomWorkerRuntime({ persistenceDirectory = null } = 
         experimental: { disableDevRegistry: true, disableExperimentalWarning: true },
       });
       worker = null;
+      serverUrl = new URL(
+        /^https?:\/\//u.test(server.address)
+          ? server.address
+          : `http://${server.address}:${server.port}`,
+      );
       return;
     }
     server = createTestHarness({
@@ -31,7 +37,8 @@ export async function createRoomWorkerRuntime({ persistenceDirectory = null } = 
         vars: { ROOM_FOUNDATION_TEST: 'true' },
       }],
     });
-    await server.listen();
+    const listening = await server.listen();
+    serverUrl = listening.url;
     worker = server.getWorker();
   }
 
@@ -71,6 +78,103 @@ export async function createRoomWorkerRuntime({ persistenceDirectory = null } = 
       return { status: response.status, body };
     },
 
+    async openWebSocket(path) {
+      const url = new URL(path, serverUrl);
+      url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+      const socket = new WebSocket(url);
+      const messages = [];
+      const messageWaiters = [];
+      let closeEvent = null;
+      const closeWaiters = [];
+
+      socket.addEventListener('message', (event) => {
+        const waiter = messageWaiters.shift();
+        if (waiter) waiter.resolve(event.data);
+        else messages.push(event.data);
+      });
+      socket.addEventListener('close', (event) => {
+        closeEvent = event;
+        while (closeWaiters.length > 0) closeWaiters.shift().resolve(event);
+      });
+
+      await new Promise((resolve, reject) => {
+        const onOpen = () => {
+          socket.removeEventListener('error', onError);
+          resolve();
+        };
+        const onError = () => {
+          socket.removeEventListener('open', onOpen);
+          reject(new Error('WebSocket upgrade failed'));
+        };
+        socket.addEventListener('open', onOpen, { once: true });
+        socket.addEventListener('error', onError, { once: true });
+      });
+
+      return {
+        raw: socket,
+        send(value) {
+          socket.send(typeof value === 'string' || value instanceof ArrayBuffer
+            ? value : JSON.stringify(value));
+        },
+        async nextMessage(timeoutMs = 2_000) {
+          if (messages.length > 0) return messages.shift();
+          return new Promise((resolve, reject) => {
+            const waiter = {
+              resolve(value) {
+                clearTimeout(timer);
+                resolve(value);
+              },
+            };
+            const timer = setTimeout(() => {
+              const index = messageWaiters.indexOf(waiter);
+              if (index >= 0) messageWaiters.splice(index, 1);
+              reject(new Error('timed out waiting for WebSocket message'));
+            }, timeoutMs);
+            messageWaiters.push(waiter);
+          });
+        },
+        async expectNoMessage(milliseconds = 100) {
+          if (messages.length > 0) throw new Error(`unexpected WebSocket message: ${messages[0]}`);
+          await new Promise((resolve, reject) => {
+            const waiter = {
+              resolve(value) {
+                clearTimeout(timer);
+                const index = messageWaiters.indexOf(waiter);
+                if (index >= 0) messageWaiters.splice(index, 1);
+                reject(new Error(`unexpected WebSocket message: ${String(value)}`));
+              },
+            };
+            const timer = setTimeout(() => {
+              const index = messageWaiters.indexOf(waiter);
+              if (index >= 0) messageWaiters.splice(index, 1);
+              resolve();
+            }, milliseconds);
+            messageWaiters.push(waiter);
+          });
+        },
+        async closed(timeoutMs = 2_000) {
+          if (closeEvent) return closeEvent;
+          return new Promise((resolve, reject) => {
+            const waiter = {
+              resolve(event) {
+                clearTimeout(timer);
+                resolve(event);
+              },
+            };
+            const timer = setTimeout(() => {
+              const index = closeWaiters.indexOf(waiter);
+              if (index >= 0) closeWaiters.splice(index, 1);
+              reject(new Error('timed out waiting for WebSocket close'));
+            }, timeoutMs);
+            closeWaiters.push(waiter);
+          });
+        },
+        close(code = 1000, reason = '') {
+          socket.close(code, reason);
+        },
+      };
+    },
+
     async restartRegistry() {
       if (!worker) throw new Error('Durable Object eviction requires the test harness runtime');
       await worker.evictDurableObject('LOBBY_REGISTRY', { name: REGISTRY_NAME });
@@ -78,7 +182,10 @@ export async function createRoomWorkerRuntime({ persistenceDirectory = null } = 
 
     async restartRoom(code, incarnation) {
       if (!worker) throw new Error('Durable Object eviction requires the test harness runtime');
-      await worker.evictDurableObject('STEPSTONE_ROOM', { name: `${code}:${incarnation}` });
+      await worker.evictDurableObject('STEPSTONE_ROOM', {
+        name: `${code}:${incarnation}`,
+        webSockets: 'hibernate',
+      });
     },
 
     async restartProcess() {

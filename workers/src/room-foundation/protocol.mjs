@@ -96,6 +96,23 @@ export function assertWebSocketFrameSize(value) {
   assertByteLimit(value, LIMITS.webSocketFrameBytes, 'INVALID_COMMAND');
 }
 
+export function parseWebSocketJson(value) {
+  assertWebSocketFrameSize(value);
+  let text;
+  if (typeof value === 'string') text = value;
+  else {
+    let bytes;
+    if (value instanceof ArrayBuffer) bytes = new Uint8Array(value);
+    else if (ArrayBuffer.isView(value)) {
+      bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    } else fail('INVALID_COMMAND');
+    try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+    catch { fail('INVALID_COMMAND'); }
+  }
+  try { return JSON.parse(text); }
+  catch { fail('INVALID_COMMAND'); }
+}
+
 export function assertCommandPayloadSize(payload) {
   let serialized;
   try {

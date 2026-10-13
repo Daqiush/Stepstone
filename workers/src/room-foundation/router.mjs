@@ -170,6 +170,22 @@ async function joinRoom(request, env, code) {
   }
 }
 
+async function openRoomWebSocket(request, env, code, incarnationText) {
+  const incarnation = Number(incarnationText);
+  if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
+    return publicErrorResponse('ROOM_NOT_FOUND');
+  }
+  try {
+    const active = await registryStub(env).lookupActive({ code });
+    if (!active?.ok || active.value.incarnation !== incarnation) {
+      return publicErrorResponse('ROOM_NOT_FOUND');
+    }
+    return await roomStub(env, code, incarnation).fetch(request);
+  } catch {
+    return publicErrorResponse('ROOM_NOT_FOUND');
+  }
+}
+
 async function registryTestBridge(request, env) {
   let input;
   try { input = await request.json(); }
@@ -208,6 +224,16 @@ async function registryTestBridge(request, env) {
     case 'setRoomInitializationFault': {
       const roomId = env.STEPSTONE_ROOM.idFromName(`${input.code}:${input.incarnation}`);
       rpcResult = await env.STEPSTONE_ROOM.get(roomId).testSetInitializationFault(input);
+      break;
+    }
+    case 'setRoomAuthFault': {
+      const roomId = env.STEPSTONE_ROOM.idFromName(`${input.code}:${input.incarnation}`);
+      rpcResult = await env.STEPSTONE_ROOM.get(roomId).testSetAuthFault(input);
+      break;
+    }
+    case 'setRoomStatus': {
+      const roomId = env.STEPSTONE_ROOM.idFromName(`${input.code}:${input.incarnation}`);
+      rpcResult = await env.STEPSTONE_ROOM.get(roomId).testSetStatus(input);
       break;
     }
     case 'inspectRoom': {
@@ -259,6 +285,8 @@ export function fetchRoomFoundation(request, env) {
   if (path === ROOM_ROOT) return createRoom(request, env);
   const join = path.match(/^\/api\/rooms\/(\d{3})\/join$/u);
   if (join) return joinRoom(request, env, join[1]);
+  const webSocket = path.match(/^\/api\/rooms\/(\d{3})\/([1-9][0-9]*)\/ws$/u);
+  if (webSocket) return openRoomWebSocket(request, env, webSocket[1], webSocket[2]);
   return publicErrorResponse('ROOM_NOT_FOUND');
 }
 
