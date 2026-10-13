@@ -536,6 +536,68 @@ test('transaction failure rolls back, reloads persisted state, and broadcasts no
   await parseMessage(peerAuth.socket);
 });
 
+test('same-revision persisted corruption before CAS fails closed without a stale commit', async () => {
+  const room = await createRoom('cas_corruption_owner');
+  const peer = await join(room, 'player', 'cas_corruption_peer');
+  const ownerAuth = await authenticate(room, room);
+  const peerAuth = await authenticate(room, peer);
+  const command = increment(id('cas_corruption_increment'), 0);
+  const configured = await runtime.room('setRoomCommandFault', {
+    code: room.roomCode,
+    incarnation: room.incarnation,
+    sessionId: room.sessionId,
+    commandId: command.id,
+    type: 'corrupt-state-before-cas',
+  });
+  assert.equal(configured.status, 200);
+
+  ownerAuth.socket.send(sync(id('cas_corruption_unrelated_sync')));
+  assert.equal((await parseMessage(ownerAuth.socket)).payload.revision, 0);
+  ownerAuth.socket.send(command);
+  assert.deepEqual(await parseMessage(ownerAuth.socket), {
+    v: 1,
+    type: 'error',
+    id: command.id,
+    payload: { code: 'SERVICE_CAPACITY', revision: 0 },
+  });
+  await ownerAuth.socket.expectNoMessage();
+  await peerAuth.socket.expectNoMessage();
+  const persisted = await inspect(room);
+  assert.equal(persisted.roomState.revision, 0);
+  assert.equal(persisted.roomState.foundationCounter, 0);
+  assert.equal((await accounting(room)).cumulative.roomStateRowsWritten, 0);
+});
+
+test('same-revision valid persisted mutation before CAS is preserved and not overwritten', async () => {
+  const room = await createRoom('cas_mutation_owner');
+  const peer = await join(room, 'player', 'cas_mutation_peer');
+  const ownerAuth = await authenticate(room, room);
+  const peerAuth = await authenticate(room, peer);
+  const command = increment(id('cas_mutation_increment'), 0);
+  const configured = await runtime.room('setRoomCommandFault', {
+    code: room.roomCode,
+    incarnation: room.incarnation,
+    sessionId: room.sessionId,
+    commandId: command.id,
+    type: 'mutate-state-before-cas',
+  });
+  assert.equal(configured.status, 200);
+
+  ownerAuth.socket.send(command);
+  assert.deepEqual(await parseMessage(ownerAuth.socket), {
+    v: 1,
+    type: 'error',
+    id: command.id,
+    payload: { code: 'SERVICE_CAPACITY', revision: 0 },
+  });
+  await ownerAuth.socket.expectNoMessage();
+  await peerAuth.socket.expectNoMessage();
+  const persisted = await inspect(room);
+  assert.equal(persisted.roomState.revision, 0);
+  assert.equal(persisted.roomState.foundationCounter, 7);
+  assert.equal((await accounting(room)).cumulative.roomStateRowsWritten, 0);
+});
+
 test('fresh persisted authority is required for every command frame', async () => {
   const room = await createRoom('fresh_authority_owner');
   const first = await authenticate(room, room);

@@ -20,6 +20,13 @@ import {
   isValidCommandCache,
   storeCommandResult,
 } from './command-cache.mjs';
+import {
+  accountedRow,
+  accountedRows,
+  addSqlAccounting,
+  emptySqlAccounting,
+  executeAccountedSql,
+} from './sql-accounting.mjs';
 
 const REQUEST_ID = /^[A-Za-z0-9_-]{16,64}$/u;
 const REQUEST_HASH = /^[0-9a-f]{64}$/u;
@@ -73,55 +80,6 @@ class SocketRoomExpiredError extends Error {}
 class SocketSessionReplacedError extends Error {}
 class CommandCasError extends Error {}
 
-function emptySqlAccounting() {
-  return {
-    statements: [],
-    totalRowsRead: 0,
-    totalRowsWritten: 0,
-    roomStateRowsRead: 0,
-    roomStateRowsWritten: 0,
-    sessionRowsRead: 0,
-    sessionRowsWritten: 0,
-    actionRowsRead: 0,
-    actionRowsWritten: 0,
-  };
-}
-
-function sqlTable(statement) {
-  const normalized = statement.toLowerCase();
-  if (/\broom_state\b/u.test(normalized)) return 'room_state';
-  if (/\bsessions\b/u.test(normalized)) return 'sessions';
-  if (/\bpending_actions\b/u.test(normalized)) return 'pending_actions';
-  return 'other';
-}
-
-function recordSql(accounting, statement, cursor) {
-  const operation = statement.trimStart().split(/\s+/u, 1)[0].toUpperCase();
-  const table = sqlTable(statement);
-  const rowsRead = Number.isSafeInteger(cursor.rowsRead) ? cursor.rowsRead : 0;
-  const rowsWritten = Number.isSafeInteger(cursor.rowsWritten) ? cursor.rowsWritten : 0;
-  accounting.statements.push({ operation, table, rowsRead, rowsWritten });
-  accounting.totalRowsRead += rowsRead;
-  accounting.totalRowsWritten += rowsWritten;
-  const prefix = table === 'room_state' ? 'roomState'
-    : table === 'sessions' ? 'session'
-      : table === 'pending_actions' ? 'action' : null;
-  if (prefix !== null) {
-    accounting[`${prefix}RowsRead`] += rowsRead;
-    accounting[`${prefix}RowsWritten`] += rowsWritten;
-  }
-  return cursor;
-}
-
-function addSqlAccounting(target, source) {
-  for (const key of [
-    'totalRowsRead', 'totalRowsWritten',
-    'roomStateRowsRead', 'roomStateRowsWritten',
-    'sessionRowsRead', 'sessionRowsWritten',
-    'actionRowsRead', 'actionRowsWritten',
-  ]) target[key] += source[key];
-}
-
 function normalizeBootstrapResponse(response, expected) {
   const keys = ['v', 'requestId', 'roomCode', 'incarnation', 'sessionId', 'role', 'seat'];
   if (!exactKeys(response, keys)
@@ -162,6 +120,7 @@ export class StepstoneRoom {
     this.env = env;
     this.sql = ctx?.storage?.sql;
     this.commandState = null;
+    this.commandStateJson = null;
     this.sessionAuthorities = new Map();
     this.commandCacheReady = false;
     this.lastCommandAccounting = emptySqlAccounting();
@@ -209,10 +168,6 @@ export class StepstoneRoom {
     });
   }
 
-  executeAccountedSql(accounting, statement, ...bindings) {
-    return recordSql(accounting, statement, this.sql.exec(statement, ...bindings));
-  }
-
   cacheSessionAuthority(session) {
     this.sessionAuthorities.set(session.session_id, {
       sessionId: session.session_id,
@@ -228,12 +183,14 @@ export class StepstoneRoom {
   rebuildCommandAuthority() {
     const accounting = emptySqlAccounting();
     try {
-      const stored = row(this.executeAccountedSql(
+      const stored = accountedRow(
+        this.sql,
         accounting,
         'SELECT * FROM room_state LIMIT 1',
-      ));
+      );
       if (!stored) {
         this.commandState = null;
+        this.commandStateJson = null;
         this.sessionAuthorities = new Map();
         this.commandCacheReady = true;
         this.lastWakeAccounting = accounting;
@@ -255,11 +212,12 @@ export class StepstoneRoom {
         && isValidCommandCache(state.recentCommands);
       if (!validState) throw new TypeError('invalid persisted command state');
 
-      const persistedSessions = rows(this.executeAccountedSql(
+      const persistedSessions = accountedRows(
+        this.sql,
         accounting,
         `SELECT session_id, incarnation, role, seat, current_connection_id,
                 connection_epoch, expires_at FROM sessions ORDER BY rowid`,
-      ));
+      );
       const authorities = new Map();
       for (const session of persistedSessions) {
         const validSession = validIdentity(session.session_id)
@@ -285,12 +243,14 @@ export class StepstoneRoom {
         });
       }
       this.commandState = state;
+      this.commandStateJson = stored.state_json;
       this.sessionAuthorities = authorities;
       this.commandCacheReady = true;
       this.lastWakeAccounting = accounting;
       return true;
     } catch {
       this.commandState = null;
+      this.commandStateJson = null;
       this.sessionAuthorities = new Map();
       this.commandCacheReady = false;
       this.lastWakeAccounting = accounting;
@@ -597,13 +557,14 @@ export class StepstoneRoom {
         leaseId, leaseExpiresAt, requestId, requestHash,
       },
     };
+    const serializedState = JSON.stringify(state);
 
     await this.ctx.storage.transaction(async () => {
       this.sql.exec(
         `INSERT INTO room_state
           (incarnation, schema_version, revision, status, expires_at, state_json)
          VALUES (?, 1, 0, 'ACTIVE', NULL, ?)`,
-        incarnation, JSON.stringify(state),
+        incarnation, serializedState,
       );
       this.sql.exec(
         `INSERT INTO sessions
@@ -622,6 +583,7 @@ export class StepstoneRoom {
       await this.ctx.storage.setAlarm(dueAt);
     });
     this.commandState = state;
+    this.commandStateJson = serializedState;
     this.commandCacheReady = true;
     this.cacheSessionAuthority({
       session_id: sessionId,
@@ -858,14 +820,40 @@ export class StepstoneRoom {
       });
       await new Promise((resolve) => setTimeout(resolve, fault.delayMs));
     }
+    if (fault?.type === 'corrupt-state-before-cas'
+      || fault?.type === 'mutate-state-before-cas') {
+      try {
+        this.ctx.storage.transactionSync(() => {
+          const stored = row(this.sql.exec('SELECT * FROM room_state LIMIT 1'));
+          if (!stored) throw new CommandCasError();
+          const persisted = JSON.parse(stored.state_json);
+          if (fault.type === 'corrupt-state-before-cas') {
+            persisted.recentCommands = { malformed: true };
+          } else {
+            persisted.foundationCounter = 7;
+          }
+          this.sql.exec(
+            'UPDATE room_state SET state_json = ? WHERE incarnation = ?',
+            JSON.stringify(persisted),
+            persisted.incarnation,
+          );
+        });
+      } catch {
+        this.rebuildCommandAuthority();
+        this.commandError(socket, command.id, 'SERVICE_CAPACITY', this.persistedRevision());
+        return;
+      }
+    }
 
     const accounting = emptySqlAccounting();
     let outcome;
     try {
       outcome = this.ctx.storage.transactionSync(() => {
         const state = this.commandState;
+        const expectedStateJson = this.commandStateJson;
         if (!this.commandCacheReady
           || !state
+          || typeof expectedStateJson !== 'string'
           || state.status !== 'ACTIVE'
           || state.incarnation !== attachment.incarnation) throw new SocketRoomExpiredError();
         const session = this.authoritativeSession(attachment);
@@ -919,8 +907,9 @@ export class StepstoneRoom {
         assertRoomSnapshotSize(serialized);
         const updateStatement =
           `UPDATE room_state SET revision = ?, status = ?, expires_at = ?, state_json = ?
-           WHERE incarnation = ? AND revision = ? AND status = 'ACTIVE'`;
-        const updated = this.executeAccountedSql(
+           WHERE incarnation = ? AND revision = ? AND status = 'ACTIVE' AND state_json = ?`;
+        const updated = executeAccountedSql(
+          this.sql,
           accounting,
           updateStatement,
           proposed.revision,
@@ -929,11 +918,13 @@ export class StepstoneRoom {
           serialized,
           proposed.incarnation,
           state.revision,
+          expectedStateJson,
         );
         if (updated.rowsWritten !== 1) throw new CommandCasError();
         if (fault?.type === 'before-commit') throw new Error('injected command precommit failure');
         return {
-          kind: 'mutation', state: proposed, session, committedRevision, compactReply,
+          kind: 'mutation', state: proposed, stateJson: serialized,
+          session, committedRevision, compactReply,
         };
       });
     } catch (error) {
@@ -988,6 +979,7 @@ export class StepstoneRoom {
 
     if (outcome.kind === 'mutation') {
       this.commandState = outcome.state;
+      this.commandStateJson = outcome.stateJson;
       addSqlAccounting(this.cumulativeCommandAccounting, accounting);
     }
     if (outcome.kind === 'mutation' && fault?.type === 'after-commit-before-delivery') return;
@@ -1382,7 +1374,13 @@ export class StepstoneRoom {
     if (!validCodeIncarnation(code, incarnation)
       || !validIdentity(sessionId)
       || !validIdentity(commandId)
-      || (!['before-commit', 'after-commit-before-delivery', null].includes(type) && !delayed)) {
+      || (![
+        'before-commit',
+        'after-commit-before-delivery',
+        'corrupt-state-before-cas',
+        'mutate-state-before-cas',
+        null,
+      ].includes(type) && !delayed)) {
       return failure('INVALID_REQUEST');
     }
     const identity = this.cachedRoomIdentity();
@@ -1478,15 +1476,19 @@ export class StepstoneRoom {
       const state = JSON.parse(stored.state_json);
       if (state.roomCode !== code) return failure('ROOM_NOT_FOUND');
       state.status = status;
+      const serialized = JSON.stringify(state);
       this.sql.exec(
         'UPDATE room_state SET status = ?, state_json = ? WHERE incarnation = ?',
         status,
-        JSON.stringify(state),
+        serialized,
         incarnation,
       );
-      return { response: result({ status }), state };
+      return { response: result({ status }), state, serialized };
     });
-    if (changed?.state) this.commandState = changed.state;
+    if (changed?.state) {
+      this.commandState = changed.state;
+      this.commandStateJson = changed.serialized;
+    }
     return changed?.response ?? changed;
   }
 
