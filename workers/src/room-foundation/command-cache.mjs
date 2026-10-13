@@ -59,6 +59,10 @@ function validatedCache(value) {
   return normalized;
 }
 
+export function isValidCommandCache(cache) {
+  return validatedCache(cache) !== null;
+}
+
 export function inspectCommandCache(cache, {
   sessionId, commandId, requestHash, now,
 } = {}) {

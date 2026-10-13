@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   inspectCommandCache,
+  isValidCommandCache,
   storeCommandResult,
 } from '../src/room-foundation/command-cache.mjs';
 import { LIMITS } from '../src/room-foundation/constants.mjs';
@@ -161,4 +162,12 @@ test('fails closed for malformed persisted caches without mutating them', () => 
     assert.throws(() => storeCommandResult(malformed, entry(), NOW), TypeError);
     assert.equal(JSON.stringify(malformed), before);
   }
+});
+
+test('validates a persisted cache for wake reconstruction without exposing normalized state', () => {
+  const valid = { [SESSION_A]: [entry()] };
+  assert.equal(isValidCommandCache(valid), true);
+  assert.equal(isValidCommandCache({ [SESSION_A]: [{ ...entry(), requestHash: 'bad' }] }), false);
+  assert.equal(isValidCommandCache(null), false);
+  assert.deepEqual(valid, { [SESSION_A]: [entry()] });
 });

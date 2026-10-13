@@ -17,6 +17,7 @@ import {
 } from './protocol.mjs';
 import {
   inspectCommandCache,
+  isValidCommandCache,
   storeCommandResult,
 } from './command-cache.mjs';
 
@@ -70,6 +71,56 @@ function validTime(value) {
 class SocketAuthenticationError extends Error {}
 class SocketRoomExpiredError extends Error {}
 class SocketSessionReplacedError extends Error {}
+class CommandCasError extends Error {}
+
+function emptySqlAccounting() {
+  return {
+    statements: [],
+    totalRowsRead: 0,
+    totalRowsWritten: 0,
+    roomStateRowsRead: 0,
+    roomStateRowsWritten: 0,
+    sessionRowsRead: 0,
+    sessionRowsWritten: 0,
+    actionRowsRead: 0,
+    actionRowsWritten: 0,
+  };
+}
+
+function sqlTable(statement) {
+  const normalized = statement.toLowerCase();
+  if (/\broom_state\b/u.test(normalized)) return 'room_state';
+  if (/\bsessions\b/u.test(normalized)) return 'sessions';
+  if (/\bpending_actions\b/u.test(normalized)) return 'pending_actions';
+  return 'other';
+}
+
+function recordSql(accounting, statement, cursor) {
+  const operation = statement.trimStart().split(/\s+/u, 1)[0].toUpperCase();
+  const table = sqlTable(statement);
+  const rowsRead = Number.isSafeInteger(cursor.rowsRead) ? cursor.rowsRead : 0;
+  const rowsWritten = Number.isSafeInteger(cursor.rowsWritten) ? cursor.rowsWritten : 0;
+  accounting.statements.push({ operation, table, rowsRead, rowsWritten });
+  accounting.totalRowsRead += rowsRead;
+  accounting.totalRowsWritten += rowsWritten;
+  const prefix = table === 'room_state' ? 'roomState'
+    : table === 'sessions' ? 'session'
+      : table === 'pending_actions' ? 'action' : null;
+  if (prefix !== null) {
+    accounting[`${prefix}RowsRead`] += rowsRead;
+    accounting[`${prefix}RowsWritten`] += rowsWritten;
+  }
+  return cursor;
+}
+
+function addSqlAccounting(target, source) {
+  for (const key of [
+    'totalRowsRead', 'totalRowsWritten',
+    'roomStateRowsRead', 'roomStateRowsWritten',
+    'sessionRowsRead', 'sessionRowsWritten',
+    'actionRowsRead', 'actionRowsWritten',
+  ]) target[key] += source[key];
+}
 
 function normalizeBootstrapResponse(response, expected) {
   const keys = ['v', 'requestId', 'roomCode', 'incarnation', 'sessionId', 'role', 'seat'];
@@ -110,6 +161,12 @@ export class StepstoneRoom {
     this.ctx = ctx;
     this.env = env;
     this.sql = ctx?.storage?.sql;
+    this.commandState = null;
+    this.sessionAuthorities = new Map();
+    this.commandCacheReady = false;
+    this.lastCommandAccounting = emptySqlAccounting();
+    this.cumulativeCommandAccounting = emptySqlAccounting();
+    this.lastWakeAccounting = emptySqlAccounting();
     if (!this.sql) return;
     ctx.blockConcurrencyWhile(async () => {
       ctx.storage.transactionSync(() => {
@@ -146,9 +203,111 @@ export class StepstoneRoom {
         )`);
         this.sql.exec('CREATE INDEX IF NOT EXISTS pending_actions_due_at ON pending_actions(due_at)');
       });
+      this.rebuildCommandAuthority();
       await this.reconcileWebSockets(Date.now());
       await this.recoverAlarm();
     });
+  }
+
+  executeAccountedSql(accounting, statement, ...bindings) {
+    return recordSql(accounting, statement, this.sql.exec(statement, ...bindings));
+  }
+
+  cacheSessionAuthority(session) {
+    this.sessionAuthorities.set(session.session_id, {
+      sessionId: session.session_id,
+      incarnation: session.incarnation,
+      role: session.role,
+      seat: session.seat,
+      connectionId: session.current_connection_id,
+      connectionEpoch: session.connection_epoch,
+      expiresAt: session.expires_at,
+    });
+  }
+
+  rebuildCommandAuthority() {
+    const accounting = emptySqlAccounting();
+    try {
+      const stored = row(this.executeAccountedSql(
+        accounting,
+        'SELECT * FROM room_state LIMIT 1',
+      ));
+      if (!stored) {
+        this.commandState = null;
+        this.sessionAuthorities = new Map();
+        this.commandCacheReady = true;
+        this.lastWakeAccounting = accounting;
+        return true;
+      }
+      const state = JSON.parse(stored.state_json);
+      const validState = Number.isSafeInteger(state?.schemaVersion)
+        && state.schemaVersion === stored.schema_version
+        && validCodeIncarnation(state.roomCode, state.incarnation)
+        && state.incarnation === stored.incarnation
+        && Number.isSafeInteger(state.revision)
+        && state.revision >= 0
+        && state.revision === stored.revision
+        && state.status === stored.status
+        && Number.isSafeInteger(state.foundationCounter)
+        && state.foundationCounter >= 0
+        && validTime(state.createdAt)
+        && (state.expiresAt === null || validTime(state.expiresAt))
+        && isValidCommandCache(state.recentCommands);
+      if (!validState) throw new TypeError('invalid persisted command state');
+
+      const persistedSessions = rows(this.executeAccountedSql(
+        accounting,
+        `SELECT session_id, incarnation, role, seat, current_connection_id,
+                connection_epoch, expires_at FROM sessions ORDER BY rowid`,
+      ));
+      const authorities = new Map();
+      for (const session of persistedSessions) {
+        const validSession = validIdentity(session.session_id)
+          && session.incarnation === state.incarnation
+          && ['OWNER', 'PLAYER', 'SPECTATOR'].includes(session.role)
+          && (session.seat === null || ['N', 'E', 'S', 'W'].includes(session.seat))
+          && (session.current_connection_id === null
+            || validIdentity(session.current_connection_id))
+          && Number.isSafeInteger(session.connection_epoch)
+          && session.connection_epoch >= 0
+          && (session.expires_at === null || validTime(session.expires_at));
+        if (!validSession || authorities.has(session.session_id)) {
+          throw new TypeError('invalid persisted session authority');
+        }
+        authorities.set(session.session_id, {
+          sessionId: session.session_id,
+          incarnation: session.incarnation,
+          role: session.role,
+          seat: session.seat,
+          connectionId: session.current_connection_id,
+          connectionEpoch: session.connection_epoch,
+          expiresAt: session.expires_at,
+        });
+      }
+      this.commandState = state;
+      this.sessionAuthorities = authorities;
+      this.commandCacheReady = true;
+      this.lastWakeAccounting = accounting;
+      return true;
+    } catch {
+      this.commandState = null;
+      this.sessionAuthorities = new Map();
+      this.commandCacheReady = false;
+      this.lastWakeAccounting = accounting;
+      return false;
+    }
+  }
+
+  cachedRoomIdentity() {
+    if (!this.commandCacheReady || !this.commandState) return null;
+    return {
+      stored: {
+        incarnation: this.commandState.incarnation,
+        revision: this.commandState.revision,
+        status: this.commandState.status,
+      },
+      state: this.commandState,
+    };
   }
 
   socketAttachment(socket) {
@@ -178,22 +337,18 @@ export class StepstoneRoom {
       || !validIdentity(attachment.sessionId)
       || !validIdentity(attachment.connectionId)
       || !Number.isSafeInteger(attachment.connectionEpoch)) return false;
-    const session = row(this.sql.exec(
-      `SELECT session_id FROM sessions
-       WHERE session_id = ? AND incarnation = ? AND current_connection_id = ?
-         AND connection_epoch = ? LIMIT 1`,
-      attachment.sessionId,
-      attachment.incarnation,
-      attachment.connectionId,
-      attachment.connectionEpoch,
-    ));
-    return session !== null;
+    if (!this.commandCacheReady) return false;
+    const session = this.sessionAuthorities.get(attachment.sessionId);
+    return session?.incarnation === attachment.incarnation
+      && session.connectionId === attachment.connectionId
+      && session.connectionEpoch === attachment.connectionEpoch
+      && (session.expiresAt === null || session.expiresAt > Date.now());
   }
 
   async reconcileWebSockets(now) {
     const sockets = this.ctx.getWebSockets();
     const completedHandshakeActions = [];
-    const identity = this.roomIdentity();
+    const identity = this.cachedRoomIdentity();
     const roomInactive = !identity
       || identity.stored.status !== 'ACTIVE'
       || identity.state.status !== 'ACTIVE'
@@ -265,7 +420,7 @@ export class StepstoneRoom {
       return new Response(null, { status: 404 });
     }
     const incarnation = Number(match[2]);
-    const identity = this.roomIdentity();
+    const identity = this.cachedRoomIdentity();
     if (!identity
       || identity.stored.status !== 'ACTIVE'
       || identity.stored.incarnation !== incarnation
@@ -466,6 +621,17 @@ export class StepstoneRoom {
       );
       await this.ctx.storage.setAlarm(dueAt);
     });
+    this.commandState = state;
+    this.commandCacheReady = true;
+    this.cacheSessionAuthority({
+      session_id: sessionId,
+      incarnation,
+      role: 'OWNER',
+      seat: 'N',
+      current_connection_id: null,
+      connection_epoch: 0,
+      expires_at: null,
+    });
     return result({ response, replayed: false });
   }
 
@@ -481,7 +647,8 @@ export class StepstoneRoom {
       return failure('INVALID_REQUEST');
     }
 
-    return this.ctx.storage.transactionSync(() => {
+    let createdAuthority = null;
+    const joined = this.ctx.storage.transactionSync(() => {
       const storedState = row(this.sql.exec('SELECT * FROM room_state LIMIT 1'));
       if (!storedState || storedState.incarnation !== incarnation) return failure('ROOM_NOT_FOUND');
       const state = JSON.parse(storedState.state_json);
@@ -545,8 +712,19 @@ export class StepstoneRoom {
         sessionId, tokenHash, requestId, requestHash, JSON.stringify(response),
         incarnation, role, seat,
       );
+      createdAuthority = {
+        session_id: sessionId,
+        incarnation,
+        role,
+        seat,
+        current_connection_id: null,
+        connection_epoch: 0,
+        expires_at: null,
+      };
       return result({ response, replayed: false });
     });
+    if (createdAuthority !== null) this.cacheSessionAuthority(createdAuthority);
+    return joined;
   }
 
   async takeAuthFault(code, incarnation) {
@@ -568,7 +746,7 @@ export class StepstoneRoom {
   }
 
   activeAuthority(attachment) {
-    const identity = this.roomIdentity();
+    const identity = this.cachedRoomIdentity();
     if (!identity
       || identity.stored.status !== 'ACTIVE'
       || identity.state.status !== 'ACTIVE'
@@ -580,12 +758,7 @@ export class StepstoneRoom {
   }
 
   persistedRevision() {
-    try {
-      const stored = row(this.sql.exec('SELECT revision FROM room_state LIMIT 1'));
-      return Number.isSafeInteger(stored?.revision) && stored.revision >= 0 ? stored.revision : 0;
-    } catch {
-      return 0;
-    }
+    return Number.isSafeInteger(this.commandState?.revision) ? this.commandState.revision : 0;
   }
 
   sendSocketFrame(socket, frame) {
@@ -612,26 +785,23 @@ export class StepstoneRoom {
       || !validIdentity(attachment.sessionId)
       || !validIdentity(attachment.connectionId)
       || !Number.isSafeInteger(attachment.connectionEpoch)) return null;
-    return row(this.sql.exec(
-      `SELECT session_id, role, seat FROM sessions
-       WHERE session_id = ? AND incarnation = ? AND current_connection_id = ?
-         AND connection_epoch = ? LIMIT 1`,
-      attachment.sessionId,
-      attachment.incarnation,
-      attachment.connectionId,
-      attachment.connectionEpoch,
-    ));
+    const session = this.sessionAuthorities.get(attachment.sessionId);
+    if (session?.incarnation !== attachment.incarnation
+      || session.connectionId !== attachment.connectionId
+      || session.connectionEpoch !== attachment.connectionEpoch
+      || (session.expiresAt !== null && session.expiresAt <= Date.now())) return null;
+    return session;
   }
 
   broadcastRoomSnapshot(committedState) {
     for (const candidate of this.ctx.getWebSockets()) {
       const attachment = this.socketAttachment(candidate);
-      const authority = this.activeAuthority(attachment);
-      if (!authority.ok
-        || authority.identity.stored.incarnation !== committedState.incarnation
-        || authority.identity.state.revision !== committedState.revision) continue;
       const session = this.authoritativeSession(attachment);
-      if (!session) continue;
+      if (!session
+        || !this.commandCacheReady
+        || this.commandState?.status !== 'ACTIVE'
+        || this.commandState.incarnation !== committedState.incarnation
+        || this.commandState.revision !== committedState.revision) continue;
       const snapshot = publicRoomState(committedState, session);
       this.sendSocketFrame(candidate, {
         v: PROTOCOL_VERSION,
@@ -665,32 +835,39 @@ export class StepstoneRoom {
       return;
     }
 
-    let fault;
+    let fault = null;
     try {
-      const identity = this.roomIdentity();
-      fault = identity ? await this.takeCommandFault(
-        identity.state.roomCode,
-        identity.stored.incarnation,
-        attachment.sessionId,
-        command.id,
-      ) : null;
+      if (this.env?.ROOM_FOUNDATION_TEST === 'true' && this.commandState !== null) {
+        fault = await this.takeCommandFault(
+          this.commandState.roomCode,
+          this.commandState.incarnation,
+          attachment.sessionId,
+          command.id,
+        );
+      }
     } catch {
       this.commandError(socket, command.id, 'SERVICE_CAPACITY', this.persistedRevision());
       return;
     }
+    if (fault?.type === 'delay-before-transaction') {
+      await this.ctx.storage.put('roomCommandHook', {
+        code: this.commandState?.roomCode,
+        incarnation: this.commandState?.incarnation,
+        commandId: command.id,
+        reached: true,
+      });
+      await new Promise((resolve) => setTimeout(resolve, fault.delayMs));
+    }
+
+    const accounting = emptySqlAccounting();
     let outcome;
     try {
       outcome = this.ctx.storage.transactionSync(() => {
-        const stored = row(this.sql.exec('SELECT * FROM room_state LIMIT 1'));
-        if (!stored) throw new SocketRoomExpiredError();
-        let state;
-        try { state = JSON.parse(stored.state_json); }
-        catch { throw new TypeError('malformed persisted room state'); }
-        if (stored.status !== 'ACTIVE'
+        const state = this.commandState;
+        if (!this.commandCacheReady
+          || !state
           || state.status !== 'ACTIVE'
-          || stored.incarnation !== attachment.incarnation
-          || state.incarnation !== attachment.incarnation
-          || stored.revision !== state.revision) throw new SocketRoomExpiredError();
+          || state.incarnation !== attachment.incarnation) throw new SocketRoomExpiredError();
         const session = this.authoritativeSession(attachment);
         if (!session) throw new SocketSessionReplacedError();
 
@@ -702,7 +879,7 @@ export class StepstoneRoom {
         }
 
         const cached = inspectCommandCache(state.recentCommands, {
-          sessionId: session.session_id,
+          sessionId: session.sessionId,
           commandId: command.id,
           requestHash,
           now: Date.now(),
@@ -730,7 +907,7 @@ export class StepstoneRoom {
           revision: committedRevision,
           foundationCounter: state.foundationCounter + 1,
           recentCommands: storeCommandResult(state.recentCommands, {
-            sessionId: session.session_id,
+            sessionId: session.sessionId,
             commandId: command.id,
             requestHash,
             committedRevision,
@@ -740,20 +917,23 @@ export class StepstoneRoom {
         };
         const serialized = JSON.stringify(proposed);
         assertRoomSnapshotSize(serialized);
-        const updated = this.sql.exec(
+        const updateStatement =
           `UPDATE room_state SET revision = ?, status = ?, expires_at = ?, state_json = ?
-           WHERE incarnation = ?`,
+           WHERE incarnation = ? AND revision = ? AND status = 'ACTIVE'`;
+        const updated = this.executeAccountedSql(
+          accounting,
+          updateStatement,
           proposed.revision,
           proposed.status,
           proposed.expiresAt,
           serialized,
           proposed.incarnation,
+          state.revision,
         );
-        if (updated.rowsWritten !== 1) throw new Error('room state update was not singular');
+        if (updated.rowsWritten !== 1) throw new CommandCasError();
         if (fault?.type === 'before-commit') throw new Error('injected command precommit failure');
         return {
           kind: 'mutation', state: proposed, session, committedRevision, compactReply,
-          rowsWritten: updated.rowsWritten,
         };
       });
     } catch (error) {
@@ -769,10 +949,13 @@ export class StepstoneRoom {
         );
         return;
       }
+      this.rebuildCommandAuthority();
+      this.lastCommandAccounting = emptySqlAccounting();
       this.commandError(socket, command.id, 'SERVICE_CAPACITY', this.persistedRevision());
       return;
     }
 
+    this.lastCommandAccounting = accounting;
     if (outcome.kind === 'sync') {
       const snapshot = publicRoomState(outcome.state, outcome.session);
       this.sendSocketFrame(socket, {
@@ -804,23 +987,19 @@ export class StepstoneRoom {
     }
 
     if (outcome.kind === 'mutation') {
-      this.lastCommandAccounting = {
-        roomStateRowsWritten: outcome.rowsWritten,
-        sessionRowsWritten: 0,
-        actionRowsWritten: 0,
-      };
+      this.commandState = outcome.state;
+      addSqlAccounting(this.cumulativeCommandAccounting, accounting);
     }
     if (outcome.kind === 'mutation' && fault?.type === 'after-commit-before-delivery') return;
 
-    const current = this.roomIdentity();
+    const current = outcome.state;
     if (!current
-      || current.stored.status !== 'ACTIVE'
-      || current.state.status !== 'ACTIVE'
-      || current.stored.incarnation !== attachment.incarnation) {
+      || current.status !== 'ACTIVE'
+      || current.incarnation !== attachment.incarnation) {
       this.closeSocket(socket, WEBSOCKET_CLOSE.ROOM_EXPIRED, WEBSOCKET_CLOSE_REASON.ROOM_EXPIRED);
       return;
     }
-    const snapshot = publicRoomState(current.state, outcome.session);
+    const snapshot = publicRoomState(current, outcome.session);
     this.sendSocketFrame(socket, {
       v: PROTOCOL_VERSION,
       type: 'reply',
@@ -828,7 +1007,7 @@ export class StepstoneRoom {
       name: outcome.compactReply.name,
       payload: { revision: outcome.committedRevision, snapshot },
     });
-    this.broadcastRoomSnapshot(current.state);
+    this.broadcastRoomSnapshot(current);
   }
 
   closeReplacedSockets(sessionId, connectionId) {
@@ -978,10 +1157,12 @@ export class StepstoneRoom {
         if (fault?.type === 'before-commit') throw new Error('injected auth precommit failure');
         authenticated = {
           sessionId: session.session_id,
+          incarnation: attachment.incarnation,
           role: session.role,
           seat: session.seat,
           connectionEpoch: proposedEpoch,
           connectionId: attachment.connectionId,
+          expiresAt: session.expires_at,
         };
       });
     } catch (error) {
@@ -993,9 +1174,10 @@ export class StepstoneRoom {
       return;
     }
 
+    this.sessionAuthorities.set(authenticated.sessionId, authenticated);
     if (fault?.type === 'after-commit-before-reply') return;
     this.closeReplacedSockets(authenticated.sessionId, authenticated.connectionId);
-    const committed = this.roomIdentity();
+    const committed = this.cachedRoomIdentity();
     if (!committed || committed.stored.status !== 'ACTIVE') {
       this.closeSocket(socket, WEBSOCKET_CLOSE.ROOM_EXPIRED, WEBSOCKET_CLOSE_REASON.ROOM_EXPIRED);
       return;
@@ -1047,7 +1229,7 @@ export class StepstoneRoom {
       return;
     }
 
-    const identity = this.roomIdentity();
+    const identity = this.cachedRoomIdentity();
     if (!identity
       || identity.stored.status !== 'ACTIVE'
       || identity.state.status !== 'ACTIVE'
@@ -1192,24 +1374,60 @@ export class StepstoneRoom {
   }
 
   async testSetCommandFault({
-    code, incarnation, sessionId, commandId, type,
+    code, incarnation, sessionId, commandId, type, delayMs,
   } = {}) {
     if (this.env?.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
+    const delayed = type === 'delay-before-transaction'
+      && Number.isSafeInteger(delayMs) && delayMs >= 1 && delayMs <= 5_000;
     if (!validCodeIncarnation(code, incarnation)
       || !validIdentity(sessionId)
       || !validIdentity(commandId)
-      || !['before-commit', 'after-commit-before-delivery', null].includes(type)) {
+      || (!['before-commit', 'after-commit-before-delivery', null].includes(type) && !delayed)) {
       return failure('INVALID_REQUEST');
     }
-    const identity = this.roomIdentity();
+    const identity = this.cachedRoomIdentity();
     if (!identity
       || identity.stored.incarnation !== incarnation
       || identity.state.roomCode !== code) return failure('ROOM_NOT_FOUND');
+    await this.ctx.storage.delete('roomCommandHook');
     if (type === null) await this.ctx.storage.delete('roomCommandFault');
     else await this.ctx.storage.put('roomCommandFault', {
       code, incarnation, sessionId, commandId, type,
+      ...(delayed ? { delayMs } : {}),
     });
     return result({ configured: type !== null });
+  }
+
+  async testInspectCommandHook({ code, incarnation, commandId } = {}) {
+    if (this.env?.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
+    if (!validCodeIncarnation(code, incarnation) || !validIdentity(commandId)) {
+      return failure('INVALID_REQUEST');
+    }
+    const hook = await this.ctx.storage.get('roomCommandHook');
+    return result({
+      reached: hook?.code === code
+        && hook?.incarnation === incarnation
+        && hook?.commandId === commandId
+        && hook?.reached === true,
+    });
+  }
+
+  testCorruptCommandCache({ code, incarnation } = {}) {
+    if (this.env?.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
+    if (!validCodeIncarnation(code, incarnation)) return failure('INVALID_REQUEST');
+    return this.ctx.storage.transactionSync(() => {
+      const stored = row(this.sql.exec('SELECT * FROM room_state LIMIT 1'));
+      if (!stored || stored.incarnation !== incarnation) return failure('ROOM_NOT_FOUND');
+      const state = JSON.parse(stored.state_json);
+      if (state.roomCode !== code) return failure('ROOM_NOT_FOUND');
+      state.recentCommands = { malformed: true };
+      this.sql.exec(
+        'UPDATE room_state SET state_json = ? WHERE incarnation = ?',
+        JSON.stringify(state),
+        incarnation,
+      );
+      return result({ corrupted: true });
+    });
   }
 
   testInspectCommandAccounting({ code, incarnation } = {}) {
@@ -1225,7 +1443,14 @@ export class StepstoneRoom {
        ORDER BY type, name`,
     )).map((item) => ({ type: item.type, name: item.name }));
     return result({
-      lastMutation: this.lastCommandAccounting ?? null,
+      lastCommand: this.lastCommandAccounting,
+      cumulative: this.cumulativeCommandAccounting,
+      lastWake: this.lastWakeAccounting,
+      cache: {
+        ready: this.commandCacheReady,
+        revision: this.commandState?.revision ?? null,
+        authorityCount: this.sessionAuthorities.size,
+      },
       commandSchemaObjects,
     });
   }
@@ -1247,7 +1472,7 @@ export class StepstoneRoom {
     if (!validCodeIncarnation(code, incarnation) || status !== 'CLOSING') {
       return failure('INVALID_REQUEST');
     }
-    return this.ctx.storage.transactionSync(() => {
+    const changed = this.ctx.storage.transactionSync(() => {
       const stored = row(this.sql.exec('SELECT * FROM room_state LIMIT 1'));
       if (!stored || stored.incarnation !== incarnation) return failure('ROOM_NOT_FOUND');
       const state = JSON.parse(stored.state_json);
@@ -1259,8 +1484,10 @@ export class StepstoneRoom {
         JSON.stringify(state),
         incarnation,
       );
-      return result({ status });
+      return { response: result({ status }), state };
     });
+    if (changed?.state) this.commandState = changed.state;
+    return changed?.response ?? changed;
   }
 
   async testInspect({ code, incarnation } = {}) {

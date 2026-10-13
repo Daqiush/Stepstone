@@ -139,6 +139,26 @@ async function accounting(room) {
   return response.body.value;
 }
 
+async function collectMessages(socket, count) {
+  const messages = [];
+  while (messages.length < count) messages.push(await parseMessage(socket));
+  return messages;
+}
+
+async function waitForCommandHook(room, commandId) {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const response = await runtime.room('inspectRoomCommandHook', {
+      code: room.roomCode,
+      incarnation: room.incarnation,
+      commandId,
+    });
+    assert.equal(response.status, 200);
+    if (response.body.value.reached) return;
+    await runtime.wait(5);
+  }
+  assert.fail('command overlap hook was not reached');
+}
+
 test('owner and player increment once, spectators are forbidden, and sync is read-only', async () => {
   const room = await createRoom('roles_owner');
   const player = await join(room, 'player', 'roles_player');
@@ -198,7 +218,11 @@ test('owner and player increment once, spectators are forbidden, and sync is rea
   assert.equal(synchronized.name, 'room.sync');
   assert.equal(synchronized.payload.revision, 2);
   publicSnapshot(synchronized.payload.snapshot, 2, 2);
-  assert.deepEqual(await accounting(room), before);
+  const afterSync = await accounting(room);
+  assert.equal(afterSync.cumulative.roomStateRowsWritten, before.cumulative.roomStateRowsWritten);
+  assert.deepEqual(afterSync.lastCommand.statements, []);
+  assert.equal(afterSync.lastCommand.totalRowsRead, 0);
+  assert.equal(afterSync.lastCommand.totalRowsWritten, 0);
 });
 
 test('rejects stale revisions and conflicting command reuse without writes or broadcasts', async () => {
@@ -230,7 +254,7 @@ test('rejects stale revisions and conflicting command reuse without writes or br
     payload: { code: 'COMMAND_CONFLICT', revision: 1 },
   });
   await peerAuth.socket.expectNoMessage();
-  assert.deepEqual(await accounting(room), committedAccounting);
+  assert.deepEqual((await accounting(room)).cumulative, committedAccounting.cumulative);
 });
 
 test('deduplicates exact retries, combines compact replay with current state, and rebroadcasts', async () => {
@@ -257,7 +281,7 @@ test('deduplicates exact retries, combines compact replay with current state, an
     assert.equal(event.payload.revision, 1);
     publicSnapshot(event.payload.snapshot, 1, 1);
   }
-  assert.deepEqual(await accounting(room), afterFirst);
+  assert.deepEqual((await accounting(room)).cumulative, afterFirst.cumulative);
   assert.equal((await inspect(room)).roomState.revision, 1);
 });
 
@@ -345,7 +369,7 @@ test('a revision gap is repaired by room.sync without another write', async () =
   const recovered = await parseMessage(peerAuth.socket);
   assert.equal(recovered.payload.revision, 2);
   publicSnapshot(recovered.payload.snapshot, 2, 2);
-  assert.deepEqual(await accounting(room), beforeSync);
+  assert.deepEqual((await accounting(room)).cumulative, beforeSync.cumulative);
 });
 
 test('normal mutations update exactly one room_state row and no command table or index exists', async () => {
@@ -356,12 +380,128 @@ test('normal mutations update exactly one room_state row and no command table or
   await parseMessage(ownerAuth.socket);
 
   const measured = await accounting(room);
-  assert.deepEqual(measured.lastMutation, {
-    roomStateRowsWritten: 1,
-    sessionRowsWritten: 0,
-    actionRowsWritten: 0,
-  });
+  assert.equal(measured.lastCommand.roomStateRowsWritten, 1);
+  assert.equal(measured.lastCommand.sessionRowsWritten, 0);
+  assert.equal(measured.lastCommand.actionRowsWritten, 0);
+  assert.equal(measured.lastCommand.totalRowsWritten, 1);
+  assert.ok(measured.lastCommand.totalRowsRead <= 4);
+  assert.deepEqual(measured.lastCommand.statements.map((statement) => ({
+    operation: statement.operation,
+    table: statement.table,
+    rowsWritten: statement.rowsWritten,
+  })), [{ operation: 'UPDATE', table: 'room_state', rowsWritten: 1 }]);
+  const projectedRowsRead = measured.lastCommand.totalRowsRead * 50_000
+    + measured.lastWake.totalRowsRead * 50;
+  assert.ok(projectedRowsRead <= 250_000, `${projectedRowsRead} projected rows read`);
   assert.deepEqual(measured.commandSchemaObjects, []);
+});
+
+test('wake reconstructs cached room and authority once and fails closed on malformed persisted cache', async () => {
+  const room = await createRoom('wake_cache_owner');
+  const ownerAuth = await authenticate(room, room);
+  ownerAuth.socket.send(increment(id('wake_cache_increment'), 0));
+  await collectMessages(ownerAuth.socket, 2);
+
+  await runtime.restartRoom(room.roomCode, room.incarnation);
+  ownerAuth.socket.send(sync(id('wake_cache_sync')));
+  const synchronized = await parseMessage(ownerAuth.socket);
+  publicSnapshot(synchronized.payload.snapshot, 1, 1);
+  const reconstructed = await accounting(room);
+  assert.equal(reconstructed.cache.ready, true);
+  assert.equal(reconstructed.cache.revision, 1);
+  assert.equal(reconstructed.cache.authorityCount, 1);
+  assert.ok(reconstructed.lastWake.totalRowsRead <= 17);
+  assert.deepEqual(reconstructed.lastCommand.statements, []);
+
+  const corrupted = await runtime.room('corruptRoomCommandCache', {
+    code: room.roomCode,
+    incarnation: room.incarnation,
+  });
+  assert.equal(corrupted.status, 200);
+  await runtime.restartRoom(room.roomCode, room.incarnation);
+  ownerAuth.socket.send(sync(id('wake_cache_rejected')));
+  assert.equal((await ownerAuth.socket.closed()).code, WEBSOCKET_CLOSE.ROOM_EXPIRED);
+  const persisted = await inspect(room);
+  assert.equal(persisted.roomState.revision, 1);
+  assert.equal(persisted.roomState.foundationCounter, 1);
+});
+
+test('two sockets racing the same expected revision commit exactly once', async () => {
+  const room = await createRoom('revision_race_owner');
+  const player = await join(room, 'player', 'revision_race_player');
+  const ownerAuth = await authenticate(room, room);
+  const playerAuth = await authenticate(room, player);
+  const ownerCommand = increment(id('revision_race_a'), 0);
+  const playerCommand = increment(id('revision_race_b'), 0);
+
+  ownerAuth.socket.send(ownerCommand);
+  playerAuth.socket.send(playerCommand);
+  const ownerMessages = await collectMessages(ownerAuth.socket, 2);
+  const playerMessages = await collectMessages(playerAuth.socket, 2);
+  const commandOutcomes = [...ownerMessages, ...playerMessages]
+    .filter((message) => message.id === ownerCommand.id || message.id === playerCommand.id);
+  assert.equal(commandOutcomes.filter((message) => message.type === 'reply').length, 1);
+  assert.equal(commandOutcomes.filter((message) => (
+    message.type === 'error' && message.payload.code === 'REVISION_CONFLICT'
+  )).length, 1);
+  for (const event of [...ownerMessages, ...playerMessages].filter((message) => message.type === 'event')) {
+    assert.equal(event.payload.revision, 1);
+  }
+  const persisted = await inspect(room);
+  assert.equal(persisted.roomState.revision, 1);
+  assert.equal(persisted.roomState.foundationCounter, 1);
+  assert.equal((await accounting(room)).cumulative.roomStateRowsWritten, 1);
+});
+
+test('overlapping duplicate frames commit once and both recover through current rebroadcast', async () => {
+  const room = await createRoom('duplicate_race_owner');
+  const ownerAuth = await authenticate(room, room);
+  const command = increment(id('duplicate_race_command'), 0);
+
+  ownerAuth.socket.send(command);
+  ownerAuth.socket.send(command);
+  const messages = await collectMessages(ownerAuth.socket, 4);
+  assert.equal(messages.filter((message) => message.type === 'reply').length, 2);
+  assert.equal(messages.filter((message) => message.type === 'event').length, 2);
+  for (const message of messages) assert.equal(message.payload.revision, 1);
+  const persisted = await inspect(room);
+  assert.equal(persisted.roomState.revision, 1);
+  assert.equal(persisted.roomState.foundationCounter, 1);
+  assert.equal((await accounting(room)).cumulative.roomStateRowsWritten, 1);
+});
+
+test('a command held after hashing loses authority to a connection takeover before CAS', async () => {
+  const room = await createRoom('takeover_race_owner');
+  const first = await authenticate(room, room);
+  const command = increment(id('takeover_race_command'), 0);
+  const configured = await runtime.room('setRoomCommandFault', {
+    code: room.roomCode,
+    incarnation: room.incarnation,
+    sessionId: room.sessionId,
+    commandId: command.id,
+    type: 'delay-before-transaction',
+    delayMs: 250,
+  });
+  assert.equal(configured.status, 200);
+
+  first.socket.send(command);
+  await waitForCommandHook(room, command.id);
+  const replacementSocket = await runtime.openWebSocket(wsPath(room));
+  const replacementToken = token();
+  replacementSocket.send({
+    v: 1,
+    type: 'hello',
+    id: id('takeover_race_rotation'),
+    reconnectToken: first.session.reconnectToken,
+    nextReconnectToken: replacementToken,
+  });
+  assert.equal((await parseMessage(replacementSocket)).payload.connectionEpoch, 2);
+  assert.equal((await first.socket.closed()).code, WEBSOCKET_CLOSE.SESSION_REPLACED);
+  await replacementSocket.expectNoMessage(350);
+  const persisted = await inspect(room);
+  assert.equal(persisted.roomState.revision, 0);
+  assert.equal(persisted.roomState.foundationCounter, 0);
+  assert.equal((await accounting(room)).cumulative.roomStateRowsWritten, 0);
 });
 
 test('transaction failure rolls back, reloads persisted state, and broadcasts nothing', async () => {

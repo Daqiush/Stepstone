@@ -61,6 +61,8 @@ class StepstoneRoom extends DurableObject {
   testInspectCommandAccounting(input) {
     return this.implementation.testInspectCommandAccounting(input);
   }
+  testInspectCommandHook(input) { return this.implementation.testInspectCommandHook(input); }
+  testCorruptCommandCache(input) { return this.implementation.testCorruptCommandCache(input); }
   testSetStatus(input) { return this.implementation.testSetStatus(input); }
   testRecoverAlarmAt(input) { return this.implementation.testRecoverAlarmAt(input); }
   testInspect(input) { return this.implementation.testInspect(input); }
