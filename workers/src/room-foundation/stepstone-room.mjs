@@ -6,12 +6,19 @@ import {
 } from './constants.mjs';
 import {
   ProtocolError,
+  assertRoomSnapshotSize,
   constantTimeDigestEqual,
+  fingerprintCommand,
   hashReconnectToken,
+  parseCommandFrame,
   parseHelloFrame,
   parseWebSocketJson,
   publicErrorResponse,
 } from './protocol.mjs';
+import {
+  inspectCommandCache,
+  storeCommandResult,
+} from './command-cache.mjs';
 
 const REQUEST_ID = /^[A-Za-z0-9_-]{16,64}$/u;
 const REQUEST_HASH = /^[0-9a-f]{64}$/u;
@@ -62,6 +69,7 @@ function validTime(value) {
 
 class SocketAuthenticationError extends Error {}
 class SocketRoomExpiredError extends Error {}
+class SocketSessionReplacedError extends Error {}
 
 function normalizeBootstrapResponse(response, expected) {
   const keys = ['v', 'requestId', 'roomCode', 'incarnation', 'sessionId', 'role', 'seat'];
@@ -84,7 +92,7 @@ function normalizeBootstrapResponse(response, expected) {
   };
 }
 
-function publicRoomState(stored) {
+function publicRoomState(stored, _session = null) {
   return {
     schemaVersion: stored.schemaVersion,
     roomCode: stored.roomCode,
@@ -94,7 +102,6 @@ function publicRoomState(stored) {
     foundationCounter: stored.foundationCounter,
     createdAt: stored.createdAt,
     expiresAt: stored.expiresAt,
-    recentCommands: stored.recentCommands,
   };
 }
 
@@ -572,6 +579,258 @@ export class StepstoneRoom {
     return { ok: true, identity };
   }
 
+  persistedRevision() {
+    try {
+      const stored = row(this.sql.exec('SELECT revision FROM room_state LIMIT 1'));
+      return Number.isSafeInteger(stored?.revision) && stored.revision >= 0 ? stored.revision : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  sendSocketFrame(socket, frame) {
+    try { socket.send(JSON.stringify(frame)); }
+    catch { /* A concurrently closed socket cannot receive delivery. */ }
+  }
+
+  commandError(socket, commandId, code, revision, snapshot = null) {
+    this.sendSocketFrame(socket, {
+      v: PROTOCOL_VERSION,
+      type: 'error',
+      id: commandId,
+      payload: {
+        code,
+        revision,
+        ...(snapshot === null ? {} : { snapshot }),
+      },
+    });
+  }
+
+  authoritativeSession(attachment) {
+    if (!attachment?.authenticated
+      || attachment.protocolVersion !== PROTOCOL_VERSION
+      || !validIdentity(attachment.sessionId)
+      || !validIdentity(attachment.connectionId)
+      || !Number.isSafeInteger(attachment.connectionEpoch)) return null;
+    return row(this.sql.exec(
+      `SELECT session_id, role, seat FROM sessions
+       WHERE session_id = ? AND incarnation = ? AND current_connection_id = ?
+         AND connection_epoch = ? LIMIT 1`,
+      attachment.sessionId,
+      attachment.incarnation,
+      attachment.connectionId,
+      attachment.connectionEpoch,
+    ));
+  }
+
+  broadcastRoomSnapshot(committedState) {
+    for (const candidate of this.ctx.getWebSockets()) {
+      const attachment = this.socketAttachment(candidate);
+      const authority = this.activeAuthority(attachment);
+      if (!authority.ok
+        || authority.identity.stored.incarnation !== committedState.incarnation
+        || authority.identity.state.revision !== committedState.revision) continue;
+      const session = this.authoritativeSession(attachment);
+      if (!session) continue;
+      const snapshot = publicRoomState(committedState, session);
+      this.sendSocketFrame(candidate, {
+        v: PROTOCOL_VERSION,
+        type: 'event',
+        name: 'room.snapshot',
+        payload: { revision: committedState.revision, snapshot },
+      });
+    }
+  }
+
+  async takeCommandFault(code, incarnation, sessionId, commandId) {
+    if (this.env?.ROOM_FOUNDATION_TEST !== 'true') return null;
+    const fault = await this.ctx.storage.get('roomCommandFault');
+    if (!fault
+      || fault.code !== code
+      || fault.incarnation !== incarnation
+      || fault.sessionId !== sessionId
+      || fault.commandId !== commandId) return null;
+    await this.ctx.storage.delete('roomCommandFault');
+    return fault;
+  }
+
+  async handleCommand(socket, attachment, frame) {
+    let command;
+    let requestHash;
+    try {
+      command = parseCommandFrame(frame);
+      requestHash = await fingerprintCommand(command);
+    } catch (error) {
+      this.closeForProtocol(socket, error);
+      return;
+    }
+
+    let fault;
+    try {
+      const identity = this.roomIdentity();
+      fault = identity ? await this.takeCommandFault(
+        identity.state.roomCode,
+        identity.stored.incarnation,
+        attachment.sessionId,
+        command.id,
+      ) : null;
+    } catch {
+      this.commandError(socket, command.id, 'SERVICE_CAPACITY', this.persistedRevision());
+      return;
+    }
+    let outcome;
+    try {
+      outcome = this.ctx.storage.transactionSync(() => {
+        const stored = row(this.sql.exec('SELECT * FROM room_state LIMIT 1'));
+        if (!stored) throw new SocketRoomExpiredError();
+        let state;
+        try { state = JSON.parse(stored.state_json); }
+        catch { throw new TypeError('malformed persisted room state'); }
+        if (stored.status !== 'ACTIVE'
+          || state.status !== 'ACTIVE'
+          || stored.incarnation !== attachment.incarnation
+          || state.incarnation !== attachment.incarnation
+          || stored.revision !== state.revision) throw new SocketRoomExpiredError();
+        const session = this.authoritativeSession(attachment);
+        if (!session) throw new SocketSessionReplacedError();
+
+        if (command.name === 'room.sync') {
+          return { kind: 'sync', state, session };
+        }
+        if (session.role !== 'OWNER' && session.role !== 'PLAYER') {
+          return { kind: 'forbidden', state, session };
+        }
+
+        const cached = inspectCommandCache(state.recentCommands, {
+          sessionId: session.session_id,
+          commandId: command.id,
+          requestHash,
+          now: Date.now(),
+        });
+        if (cached.kind === 'invalid') throw new TypeError('malformed persisted command cache');
+        if (cached.kind === 'conflict') return { kind: 'conflict', state, session };
+        if (cached.kind === 'duplicate') {
+          return {
+            kind: 'duplicate',
+            state,
+            session,
+            committedRevision: cached.entry.committedRevision,
+            compactReply: cached.entry.compactReply,
+          };
+        }
+        if (command.payload.expectedRevision !== state.revision) {
+          return { kind: 'revision-conflict', state, session };
+        }
+
+        const now = Date.now();
+        const committedRevision = state.revision + 1;
+        const compactReply = { name: command.name };
+        const proposed = {
+          ...state,
+          revision: committedRevision,
+          foundationCounter: state.foundationCounter + 1,
+          recentCommands: storeCommandResult(state.recentCommands, {
+            sessionId: session.session_id,
+            commandId: command.id,
+            requestHash,
+            committedRevision,
+            compactReply,
+            expiresAt: now + LIMITS.recentCommandTtlMs,
+          }, now),
+        };
+        const serialized = JSON.stringify(proposed);
+        assertRoomSnapshotSize(serialized);
+        const updated = this.sql.exec(
+          `UPDATE room_state SET revision = ?, status = ?, expires_at = ?, state_json = ?
+           WHERE incarnation = ?`,
+          proposed.revision,
+          proposed.status,
+          proposed.expiresAt,
+          serialized,
+          proposed.incarnation,
+        );
+        if (updated.rowsWritten !== 1) throw new Error('room state update was not singular');
+        if (fault?.type === 'before-commit') throw new Error('injected command precommit failure');
+        return {
+          kind: 'mutation', state: proposed, session, committedRevision, compactReply,
+          rowsWritten: updated.rowsWritten,
+        };
+      });
+    } catch (error) {
+      if (error instanceof SocketRoomExpiredError) {
+        this.closeSocket(socket, WEBSOCKET_CLOSE.ROOM_EXPIRED, WEBSOCKET_CLOSE_REASON.ROOM_EXPIRED);
+        return;
+      }
+      if (error instanceof SocketSessionReplacedError) {
+        this.closeSocket(
+          socket,
+          WEBSOCKET_CLOSE.SESSION_REPLACED,
+          WEBSOCKET_CLOSE_REASON.SESSION_REPLACED,
+        );
+        return;
+      }
+      this.commandError(socket, command.id, 'SERVICE_CAPACITY', this.persistedRevision());
+      return;
+    }
+
+    if (outcome.kind === 'sync') {
+      const snapshot = publicRoomState(outcome.state, outcome.session);
+      this.sendSocketFrame(socket, {
+        v: PROTOCOL_VERSION,
+        type: 'reply',
+        id: command.id,
+        name: command.name,
+        payload: { revision: outcome.state.revision, snapshot },
+      });
+      return;
+    }
+    if (outcome.kind === 'forbidden') {
+      this.commandError(socket, command.id, 'FORBIDDEN', outcome.state.revision);
+      return;
+    }
+    if (outcome.kind === 'conflict') {
+      this.commandError(socket, command.id, 'COMMAND_CONFLICT', outcome.state.revision);
+      return;
+    }
+    if (outcome.kind === 'revision-conflict') {
+      this.commandError(
+        socket,
+        command.id,
+        'REVISION_CONFLICT',
+        outcome.state.revision,
+        publicRoomState(outcome.state, outcome.session),
+      );
+      return;
+    }
+
+    if (outcome.kind === 'mutation') {
+      this.lastCommandAccounting = {
+        roomStateRowsWritten: outcome.rowsWritten,
+        sessionRowsWritten: 0,
+        actionRowsWritten: 0,
+      };
+    }
+    if (outcome.kind === 'mutation' && fault?.type === 'after-commit-before-delivery') return;
+
+    const current = this.roomIdentity();
+    if (!current
+      || current.stored.status !== 'ACTIVE'
+      || current.state.status !== 'ACTIVE'
+      || current.stored.incarnation !== attachment.incarnation) {
+      this.closeSocket(socket, WEBSOCKET_CLOSE.ROOM_EXPIRED, WEBSOCKET_CLOSE_REASON.ROOM_EXPIRED);
+      return;
+    }
+    const snapshot = publicRoomState(current.state, outcome.session);
+    this.sendSocketFrame(socket, {
+      v: PROTOCOL_VERSION,
+      type: 'reply',
+      id: command.id,
+      name: outcome.compactReply.name,
+      payload: { revision: outcome.committedRevision, snapshot },
+    });
+    this.broadcastRoomSnapshot(current.state);
+  }
+
   closeReplacedSockets(sessionId, connectionId) {
     for (const candidate of this.ctx.getWebSockets()) {
       const attachment = this.socketAttachment(candidate);
@@ -776,11 +1035,15 @@ export class StepstoneRoom {
         );
         return;
       }
-      if (frame?.type !== 'hello') {
-        this.closeSocket(socket, WEBSOCKET_CLOSE.PROTOCOL_ERROR, WEBSOCKET_CLOSE_REASON.PROTOCOL_ERROR);
+      if (frame?.type === 'hello') {
+        await this.authenticateSocket(socket, attachment, frame, authority.identity);
         return;
       }
-      await this.authenticateSocket(socket, attachment, frame, authority.identity);
+      if (frame?.type === 'command') {
+        await this.handleCommand(socket, attachment, frame);
+        return;
+      }
+      this.closeSocket(socket, WEBSOCKET_CLOSE.PROTOCOL_ERROR, WEBSOCKET_CLOSE_REASON.PROTOCOL_ERROR);
       return;
     }
 
@@ -926,6 +1189,45 @@ export class StepstoneRoom {
       ...(delayed ? { delayMs } : {}),
     });
     return result({ configured: type !== null });
+  }
+
+  async testSetCommandFault({
+    code, incarnation, sessionId, commandId, type,
+  } = {}) {
+    if (this.env?.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
+    if (!validCodeIncarnation(code, incarnation)
+      || !validIdentity(sessionId)
+      || !validIdentity(commandId)
+      || !['before-commit', 'after-commit-before-delivery', null].includes(type)) {
+      return failure('INVALID_REQUEST');
+    }
+    const identity = this.roomIdentity();
+    if (!identity
+      || identity.stored.incarnation !== incarnation
+      || identity.state.roomCode !== code) return failure('ROOM_NOT_FOUND');
+    if (type === null) await this.ctx.storage.delete('roomCommandFault');
+    else await this.ctx.storage.put('roomCommandFault', {
+      code, incarnation, sessionId, commandId, type,
+    });
+    return result({ configured: type !== null });
+  }
+
+  testInspectCommandAccounting({ code, incarnation } = {}) {
+    if (this.env?.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
+    if (!validCodeIncarnation(code, incarnation)) return failure('INVALID_REQUEST');
+    const identity = this.roomIdentity();
+    if (!identity
+      || identity.stored.incarnation !== incarnation
+      || identity.state.roomCode !== code) return failure('ROOM_NOT_FOUND');
+    const commandSchemaObjects = rows(this.sql.exec(
+      `SELECT type, name FROM sqlite_schema
+       WHERE type IN ('table', 'index') AND lower(name) LIKE '%command%'
+       ORDER BY type, name`,
+    )).map((item) => ({ type: item.type, name: item.name }));
+    return result({
+      lastMutation: this.lastCommandAccounting ?? null,
+      commandSchemaObjects,
+    });
   }
 
   async testRecoverAlarmAt({ code, incarnation, now, currentAlarmAt } = {}) {

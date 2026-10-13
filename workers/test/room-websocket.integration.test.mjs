@@ -206,7 +206,6 @@ test('rotates only token digests, returns the exact role snapshot, and keeps sam
         foundationCounter: 0,
         createdAt: authenticated.response.payload.snapshot.createdAt,
         expiresAt: null,
-        recentCommands: {},
       },
     },
   });
@@ -488,7 +487,10 @@ test('a newer authenticated socket has sole authority across hibernation and exp
   const replay = await parseMessage(secondSocket);
   assert.equal(replay.payload.connectionEpoch, 2);
   secondSocket.send({ v: 1, type: 'command', id: id('unsupported'), name: 'room.sync', payload: {} });
-  assert.equal((await secondSocket.closed()).code, WEBSOCKET_CLOSE.PROTOCOL_ERROR);
+  const synchronized = await parseMessage(secondSocket);
+  assert.equal(synchronized.type, 'reply');
+  assert.equal(synchronized.name, 'room.sync');
+  assert.equal(synchronized.payload.revision, 0);
 
   const expiredRoom = await createRoom('expired_socket_owner');
   const expiredSocket = await runtime.openWebSocket(wsPath(expiredRoom));
