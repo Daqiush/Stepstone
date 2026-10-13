@@ -203,6 +203,7 @@ async function registryTestBridge(request, env) {
     case 'activateAt': rpcResult = await registry.testActivateAt(input); break;
     case 'markReleasePendingAt': rpcResult = await registry.testMarkReleasePendingAt(input); break;
     case 'releaseAt': rpcResult = await registry.testReleaseAt(input); break;
+    case 'setReleaseFault': rpcResult = await registry.testSetReleaseFault(input); break;
     case 'reconcile': rpcResult = await registry.testReconcile(input); break;
     case 'scheduleRetryWithoutAlarm': {
       rpcResult = await registry.testScheduleRetryWithoutAlarm(input);
@@ -264,6 +265,21 @@ async function registryTestBridge(request, env) {
     case 'inspectRoom': {
       const roomId = env.STEPSTONE_ROOM.idFromName(`${input.code}:${input.incarnation}`);
       rpcResult = await env.STEPSTONE_ROOM.get(roomId).testInspect(input);
+      break;
+    }
+    case 'joinRoomAt': {
+      const roomId = env.STEPSTONE_ROOM.idFromName(`${input.code}:${input.incarnation}`);
+      rpcResult = await env.STEPSTONE_ROOM.get(roomId).testJoinAt(input);
+      break;
+    }
+    case 'seedRoomPendingActions': {
+      const roomId = env.STEPSTONE_ROOM.idFromName(`${input.code}:${input.incarnation}`);
+      rpcResult = await env.STEPSTONE_ROOM.get(roomId).testSeedPendingActions(input);
+      break;
+    }
+    case 'setRoomReleaseRetryAttempt': {
+      const roomId = env.STEPSTONE_ROOM.idFromName(`${input.code}:${input.incarnation}`);
+      rpcResult = await env.STEPSTONE_ROOM.get(roomId).testSetReleaseRetryAttempt(input);
       break;
     }
     case 'initializeRoomAt': {

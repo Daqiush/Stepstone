@@ -358,7 +358,21 @@ export class LobbyRegistry {
     });
   }
 
-  release({ code, incarnation } = {}) {
+  async release({ code, incarnation } = {}) {
+    if (this.env?.ROOM_FOUNDATION_TEST === 'true') {
+      const fault = await this.ctx.storage.get('registryReleaseFault');
+      const exact = fault?.code === code && fault?.incarnation === incarnation;
+      if (exact && (fault.type === 'release-once' || fault.type === 'release-always')) {
+        if (fault.type === 'release-once') await this.ctx.storage.delete('registryReleaseFault');
+        throw new Error('injected registry release failure');
+      }
+      const released = this.releaseAt({ code, incarnation, now: Date.now() });
+      if (exact && fault.type === 'after-release-before-response') {
+        await this.ctx.storage.delete('registryReleaseFault');
+        throw new Error('injected terminal registry response loss');
+      }
+      return released;
+    }
     return this.releaseAt({ code, incarnation, now: Date.now() });
   }
 
@@ -523,6 +537,24 @@ export class LobbyRegistry {
   testReleaseAt(input) {
     if (this.env.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
     return this.releaseAt(input);
+  }
+
+  async testSetReleaseFault({ code, incarnation, type } = {}) {
+    if (this.env.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
+    if (!assertCodeIncarnation(code, incarnation)
+      || !['release-once', 'release-always', 'after-release-before-response', null].includes(type)) {
+      return failure('INVALID_REQUEST');
+    }
+    if (type === null) {
+      const stored = await this.ctx.storage.get('registryReleaseFault');
+      if (stored?.code !== code || stored?.incarnation !== incarnation) {
+        return failure('INVALID_REQUEST');
+      }
+      await this.ctx.storage.delete('registryReleaseFault');
+    } else {
+      await this.ctx.storage.put('registryReleaseFault', { code, incarnation, type });
+    }
+    return result({ configured: type !== null });
   }
 
   async testInspect() {

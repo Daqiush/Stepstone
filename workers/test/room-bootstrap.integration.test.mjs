@@ -337,7 +337,7 @@ test('cancels unknown-length oversized create and join streams before reading th
   assert.equal((await inspectRoom(created)).sessions.length, sessionsBefore);
 });
 
-test('consumes one due bootstrap placeholder without scheduling an immediate alarm loop', async () => {
+test('owner authentication expiry closes, releases, and physically deletes the room', async () => {
   const created = await createRoom(createBody('placeholder_alarm_owner'));
   const before = await inspectRoom(created);
   assert.equal(before.pendingActions.length, 1);
@@ -350,19 +350,17 @@ test('consumes one due bootstrap placeholder without scheduling an immediate ala
   });
   assert.equal(first.status, 200, JSON.stringify(first.body));
   assert.equal(first.body.ok, true, JSON.stringify(first.body));
-  const afterFirst = await inspectRoom(created);
-  assert.deepEqual(afterFirst.pendingActions, []);
-  assert.equal(afterFirst.alarmAt, null);
-
-  const second = await runtime.room('runRoomAlarmAt', {
+  const afterFirst = await runtime.room('inspectRoom', {
     code: created.roomCode,
     incarnation: created.incarnation,
-    now: before.pendingActions[0].dueAt + 1,
   });
-  assert.equal(second.status, 200, JSON.stringify(second.body));
-  const afterSecond = await inspectRoom(created);
-  assert.deepEqual(afterSecond.pendingActions, []);
-  assert.equal(afterSecond.alarmAt, null);
+  assert.equal(afterFirst.body.error.code, 'ROOM_NOT_FOUND');
+  const registry = await runtime.registry('inspect');
+  assert.equal(registry.status, 200, JSON.stringify(registry.body));
+  const released = registry.body.value.roomCodes.find((row) => row.code === created.roomCode);
+  assert.equal(released.incarnation, created.incarnation);
+  assert.equal(released.status, 'TOMBSTONE');
+
 });
 
 test('persists the authoritative lease expiry and stores only credential token digests', async () => {

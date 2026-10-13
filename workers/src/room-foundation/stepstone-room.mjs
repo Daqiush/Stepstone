@@ -33,6 +33,10 @@ const REQUEST_HASH = /^[0-9a-f]{64}$/u;
 const ROOM_CODE = /^\d{3}$/u;
 const PLAYER_SEATS = ['E', 'S', 'W'];
 const WEBSOCKET_PATH = /^\/api\/rooms\/(\d{3})\/([1-9][0-9]*)\/ws$/u;
+const OWNER_AUTH_ACTION_ID = 'owner-auth-expiry';
+const ROOM_EXPIRY_ACTION_ID = 'room-expiry';
+const REGISTRY_RELEASE_ACTION_ID = 'registry-release';
+const RELEASE_RETRY_BASE_MS = 1_000;
 
 function result(value) {
   return { ok: true, value };
@@ -79,6 +83,7 @@ class SocketAuthenticationError extends Error {}
 class SocketRoomExpiredError extends Error {}
 class SocketSessionReplacedError extends Error {}
 class CommandCasError extends Error {}
+class PendingActionCapacityError extends Error {}
 
 function normalizeBootstrapResponse(response, expected) {
   const keys = ['v', 'requestId', 'roomCode', 'incarnation', 'sessionId', 'role', 'seat'];
@@ -126,6 +131,7 @@ export class StepstoneRoom {
     this.lastCommandAccounting = emptySqlAccounting();
     this.cumulativeCommandAccounting = emptySqlAccounting();
     this.lastWakeAccounting = emptySqlAccounting();
+    this.deleted = false;
     if (!this.sql) return;
     ctx.blockConcurrencyWhile(async () => {
       ctx.storage.transactionSync(() => {
@@ -285,6 +291,7 @@ export class StepstoneRoom {
   }
 
   roomIdentity() {
+    if (this.deleted) return null;
     const stored = row(this.sql.exec('SELECT * FROM room_state LIMIT 1'));
     if (!stored) return null;
     const state = JSON.parse(stored.state_json);
@@ -464,7 +471,206 @@ export class StepstoneRoom {
     return this.consumeDueActions(Date.now());
   }
 
+  registryStub() {
+    const id = this.env.LOBBY_REGISTRY.idFromName('singleton');
+    return this.env.LOBBY_REGISTRY.get(id);
+  }
+
+  hasLiveAuthenticatedSocket() {
+    for (const socket of this.ctx.getWebSockets()) {
+      if (this.attachmentHasAuthority(this.socketAttachment(socket))) return true;
+    }
+    return false;
+  }
+
+  async deletePendingAction(actionId) {
+    await this.ctx.storage.transaction(async () => {
+      this.sql.exec('DELETE FROM pending_actions WHERE action_id = ?', actionId);
+      await this.recomputeAlarm();
+    });
+  }
+
+  async cancelRoomExpiry() {
+    let lifecycleState = null;
+    await this.ctx.storage.transaction(async () => {
+      const identity = this.roomIdentity();
+      this.sql.exec('DELETE FROM pending_actions WHERE action_id = ?', ROOM_EXPIRY_ACTION_ID);
+      if (identity?.stored.status === 'ACTIVE' && identity.state.expiresAt !== null) {
+        const state = { ...identity.state, expiresAt: null };
+        const serialized = JSON.stringify(state);
+        assertRoomSnapshotSize(serialized);
+        this.sql.exec(
+          `UPDATE room_state SET expires_at = NULL, state_json = ?
+           WHERE incarnation = ? AND status = 'ACTIVE'`,
+          serialized,
+          identity.stored.incarnation,
+        );
+        lifecycleState = { state, serialized };
+      }
+      await this.recomputeAlarm();
+    });
+    if (lifecycleState !== null) {
+      this.commandState = lifecycleState.state;
+      this.commandStateJson = lifecycleState.serialized;
+    }
+  }
+
+  async beginClosing(action, now) {
+    let transitioned = false;
+    await this.ctx.storage.transaction(async () => {
+      const identity = this.roomIdentity();
+      if (!identity || identity.stored.incarnation !== action.incarnation) {
+        this.sql.exec('DELETE FROM pending_actions WHERE action_id = ?', action.action_id);
+        await this.recomputeAlarm();
+        return;
+      }
+      const persistedAction = row(this.sql.exec(
+        'SELECT * FROM pending_actions WHERE action_id = ? AND incarnation = ?',
+        action.action_id,
+        action.incarnation,
+      ));
+      if (!persistedAction || persistedAction.due_at > now) {
+        await this.recomputeAlarm();
+        return;
+      }
+      if (identity.stored.status !== 'ACTIVE' || identity.state.status !== 'ACTIVE') {
+        this.sql.exec('DELETE FROM pending_actions WHERE action_id = ?', action.action_id);
+        await this.recomputeAlarm();
+        return;
+      }
+
+      const state = { ...identity.state, status: 'CLOSING', expiresAt: now };
+      const serialized = JSON.stringify(state);
+      assertRoomSnapshotSize(serialized);
+      this.sql.exec(
+        `UPDATE room_state SET status = 'CLOSING', expires_at = ?, state_json = ?
+         WHERE incarnation = ? AND status = 'ACTIVE'`,
+        now,
+        serialized,
+        action.incarnation,
+      );
+      this.sql.exec(
+        `UPDATE sessions SET current_connection_id = NULL,
+           connection_epoch = connection_epoch + 1
+         WHERE incarnation = ? AND current_connection_id IS NOT NULL`,
+        action.incarnation,
+      );
+      this.sql.exec('DELETE FROM pending_actions');
+      this.sql.exec(
+        `INSERT INTO pending_actions (action_id, incarnation, due_at, kind, payload_json)
+         VALUES (?, ?, ?, 'registry-release', ?)`,
+        REGISTRY_RELEASE_ACTION_ID,
+        action.incarnation,
+        now,
+        JSON.stringify({ attempt: 0, phase: 'MARK' }),
+      );
+      await this.ctx.storage.setAlarm(Math.max(now, Date.now()));
+      transitioned = true;
+    });
+    if (!transitioned) return false;
+
+    this.rebuildCommandAuthority();
+    for (const socket of this.ctx.getWebSockets()) {
+      this.closeSocket(socket, WEBSOCKET_CLOSE.ROOM_EXPIRED, WEBSOCKET_CLOSE_REASON.ROOM_EXPIRED);
+    }
+    return true;
+  }
+
+  releaseRetryDelay(attempt) {
+    const exponent = Math.min(Math.max(attempt - 1, 0), 52);
+    return Math.min(
+      RELEASE_RETRY_BASE_MS * (2 ** exponent),
+      LIMITS.registryReleaseBackoffMaxMs,
+    );
+  }
+
+  async scheduleReleaseRetry(action, payload, now) {
+    const attempt = payload.attempt + 1;
+    const dueAt = now + this.releaseRetryDelay(attempt);
+    await this.ctx.storage.transaction(async () => {
+      this.sql.exec(
+        `UPDATE pending_actions SET due_at = ?, payload_json = ?
+         WHERE action_id = ? AND incarnation = ? AND kind = 'registry-release'`,
+        dueAt,
+        JSON.stringify({ attempt, phase: payload.phase }),
+        action.action_id,
+        action.incarnation,
+      );
+      await this.recomputeAlarm();
+    });
+  }
+
+  async processRegistryRelease(now) {
+    const action = row(this.sql.exec(
+      `SELECT * FROM pending_actions
+       WHERE action_id = ? AND kind = 'registry-release' LIMIT 1`,
+      REGISTRY_RELEASE_ACTION_ID,
+    ));
+    if (!action || action.due_at > now) return false;
+    const identity = this.roomIdentity();
+    if (!identity
+      || identity.stored.incarnation !== action.incarnation
+      || identity.stored.status !== 'CLOSING'
+      || identity.state.status !== 'CLOSING') {
+      await this.deletePendingAction(action.action_id);
+      return false;
+    }
+
+    let payload;
+    try { payload = JSON.parse(action.payload_json); }
+    catch { payload = null; }
+    if (!exactKeys(payload, ['attempt', 'phase'])
+      || !Number.isSafeInteger(payload.attempt)
+      || payload.attempt < 0
+      || !['MARK', 'RELEASE'].includes(payload.phase)) {
+      payload = { attempt: 0, phase: 'MARK' };
+    }
+
+    try {
+      const registry = this.registryStub();
+      if (payload.phase === 'MARK') {
+        const marked = await registry.markReleasePending({
+          code: identity.state.roomCode,
+          incarnation: identity.state.incarnation,
+        });
+        if (!marked?.ok || marked.value?.status !== 'RELEASE_PENDING') {
+          throw new Error('registry mark release rejected');
+        }
+        payload = { ...payload, phase: 'RELEASE' };
+        await this.ctx.storage.transaction(async () => {
+          this.sql.exec(
+            `UPDATE pending_actions SET payload_json = ?
+             WHERE action_id = ? AND incarnation = ? AND kind = 'registry-release'`,
+            JSON.stringify(payload),
+            action.action_id,
+            action.incarnation,
+          );
+          await this.ctx.storage.setAlarm(Math.max(now, Date.now()));
+        });
+      }
+
+      const released = await registry.release({
+        code: identity.state.roomCode,
+        incarnation: identity.state.incarnation,
+      });
+      if (!released?.ok || !['RELEASED', 'SUPERSEDED'].includes(released.value?.result)) {
+        throw new Error('registry release rejected');
+      }
+      await this.ctx.storage.deleteAll();
+      this.deleted = true;
+      this.commandState = null;
+      this.commandStateJson = null;
+      this.sessionAuthorities = new Map();
+      this.commandCacheReady = true;
+      return true;
+    } catch {
+      await this.scheduleReleaseRetry(action, payload, now);
+      return false;
+    }
+  }
+
   async consumeDueActions(now) {
+    if (this.deleted) return result({ consumed: true });
     const due = rows(this.sql.exec(
       'SELECT * FROM pending_actions WHERE due_at <= ? ORDER BY due_at, action_id', now,
     ));
@@ -481,10 +687,32 @@ export class StepstoneRoom {
         this.closeSocket(socket, WEBSOCKET_CLOSE.AUTH_TIMEOUT, WEBSOCKET_CLOSE_REASON.AUTH_TIMEOUT);
       }
     }
-    await this.ctx.storage.transaction(async () => {
-      this.sql.exec('DELETE FROM pending_actions WHERE due_at <= ?', now);
-      await this.recomputeAlarm();
-    });
+    if (timedOutConnections.size > 0) {
+      await this.ctx.storage.transaction(async () => {
+        for (const connectionId of timedOutConnections) {
+          this.sql.exec(
+            `DELETE FROM pending_actions
+             WHERE action_id = ? AND kind = 'handshake-timeout'`,
+            `handshake-timeout:${connectionId}`,
+          );
+        }
+        await this.recomputeAlarm();
+      });
+    }
+
+    for (const action of due) {
+      if (this.deleted || action.kind === 'handshake-timeout') continue;
+      if (action.kind === 'owner-auth-expiry') {
+        if (await this.beginClosing(action, now)) await this.processRegistryRelease(now);
+      } else if (action.kind === 'room-expiry') {
+        if (this.hasLiveAuthenticatedSocket()) await this.cancelRoomExpiry();
+        else if (await this.beginClosing(action, now)) await this.processRegistryRelease(now);
+      } else if (action.kind === 'registry-release') {
+        await this.processRegistryRelease(now);
+      } else {
+        await this.deletePendingAction(action.action_id);
+      }
+    }
     return result({ consumed: true });
   }
 
@@ -542,7 +770,7 @@ export class StepstoneRoom {
       v: 1, requestId, roomCode: code, incarnation, sessionId, role: 'OWNER', seat: 'N',
     }, { code, incarnation, requestId, role: 'OWNER', seat: 'N' });
     const dueAt = now + LIMITS.ownerAuthExpiryMs;
-    const actionId = `owner-auth-expiry:${sessionId}`;
+    const actionId = OWNER_AUTH_ACTION_ID;
     const state = {
       schemaVersion: 1,
       roomCode: code,
@@ -608,6 +836,7 @@ export class StepstoneRoom {
       || (requestedRole !== 'player' && requestedRole !== 'spectator')) {
       return failure('INVALID_REQUEST');
     }
+    if (this.deleted || !this.commandState) return failure('ROOM_NOT_FOUND');
 
     let createdAuthority = null;
     const joined = this.ctx.storage.transactionSync(() => {
@@ -1040,6 +1269,7 @@ export class StepstoneRoom {
       await new Promise((resolve) => setTimeout(resolve, fault.delayMs));
     }
     let authenticated;
+    let lifecycleState = null;
     try {
       await this.ctx.storage.transaction(async () => {
         const freshIdentity = this.roomIdentity();
@@ -1137,13 +1367,25 @@ export class StepstoneRoom {
           'DELETE FROM pending_actions WHERE action_id = ?',
           `handshake-timeout:${attachment.connectionId}`,
         );
-        this.sql.exec("DELETE FROM pending_actions WHERE kind = 'room-expiry'");
+        this.sql.exec('DELETE FROM pending_actions WHERE action_id = ?', ROOM_EXPIRY_ACTION_ID);
         if (session.role === 'OWNER') {
           this.sql.exec(
             `DELETE FROM pending_actions
              WHERE action_id = ? AND kind = 'owner-auth-expiry'`,
-            `owner-auth-expiry:${session.session_id}`,
+            OWNER_AUTH_ACTION_ID,
           );
+        }
+        if (freshIdentity.state.expiresAt !== null) {
+          lifecycleState = { ...freshIdentity.state, expiresAt: null };
+          const serialized = JSON.stringify(lifecycleState);
+          assertRoomSnapshotSize(serialized);
+          this.sql.exec(
+            `UPDATE room_state SET expires_at = NULL, state_json = ?
+             WHERE incarnation = ? AND status = 'ACTIVE'`,
+            serialized,
+            attachment.incarnation,
+          );
+          lifecycleState = { state: lifecycleState, serialized };
         }
         await this.recomputeAlarm();
         if (fault?.type === 'before-commit') throw new Error('injected auth precommit failure');
@@ -1167,6 +1409,10 @@ export class StepstoneRoom {
     }
 
     this.sessionAuthorities.set(authenticated.sessionId, authenticated);
+    if (lifecycleState !== null) {
+      this.commandState = lifecycleState.state;
+      this.commandStateJson = lifecycleState.serialized;
+    }
     if (fault?.type === 'after-commit-before-reply') return;
     this.closeReplacedSockets(authenticated.sessionId, authenticated.connectionId);
     const committed = this.cachedRoomIdentity();
@@ -1238,14 +1484,104 @@ export class StepstoneRoom {
 
   async cleanupClosedSocket(socket) {
     const attachment = this.socketAttachment(socket);
-    if (!validIdentity(attachment?.connectionId)) return;
+    if (this.deleted || !validIdentity(attachment?.connectionId)) return;
+    let clearedAuthority = null;
+    let lifecycleState = null;
     await this.ctx.storage.transaction(async () => {
       this.sql.exec(
         'DELETE FROM pending_actions WHERE action_id = ?',
         `handshake-timeout:${attachment.connectionId}`,
       );
+      if (attachment.authenticated === true
+        && validIdentity(attachment.sessionId)
+        && Number.isSafeInteger(attachment.connectionEpoch)) {
+        const session = row(this.sql.exec(
+          `SELECT * FROM sessions WHERE session_id = ? AND incarnation = ?
+           AND current_connection_id = ? AND connection_epoch = ? LIMIT 1`,
+          attachment.sessionId,
+          attachment.incarnation,
+          attachment.connectionId,
+          attachment.connectionEpoch,
+        ));
+        if (session) {
+          const nextEpoch = session.connection_epoch;
+          this.sql.exec(
+            `UPDATE sessions SET current_connection_id = NULL, connection_epoch = ?
+             WHERE session_id = ? AND incarnation = ?
+             AND current_connection_id = ? AND connection_epoch = ?`,
+            nextEpoch,
+            attachment.sessionId,
+            attachment.incarnation,
+            attachment.connectionId,
+            attachment.connectionEpoch,
+          );
+          clearedAuthority = {
+            sessionId: session.session_id,
+            incarnation: session.incarnation,
+            role: session.role,
+            seat: session.seat,
+            connectionId: null,
+            connectionEpoch: nextEpoch,
+            expiresAt: session.expires_at,
+          };
+
+          const identity = this.roomIdentity();
+          const connected = row(this.sql.exec(
+            `SELECT COUNT(*) AS count FROM sessions
+             WHERE incarnation = ? AND current_connection_id IS NOT NULL`,
+            attachment.incarnation,
+          )).count;
+          if (identity?.stored.status === 'ACTIVE'
+            && identity.state.status === 'ACTIVE'
+            && connected === 0) {
+            const existing = row(this.sql.exec(
+              'SELECT action_id FROM pending_actions WHERE action_id = ?',
+              ROOM_EXPIRY_ACTION_ID,
+            ));
+            const pendingCount = row(this.sql.exec(
+              'SELECT COUNT(*) AS count FROM pending_actions',
+            )).count;
+            if (!existing && pendingCount >= LIMITS.pendingActions) {
+              throw new PendingActionCapacityError();
+            }
+            const dueAt = Date.now() + LIMITS.roomExpiryMs;
+            const state = { ...identity.state, expiresAt: dueAt };
+            const serialized = JSON.stringify(state);
+            assertRoomSnapshotSize(serialized);
+            this.sql.exec(
+              `UPDATE room_state SET expires_at = ?, state_json = ?
+               WHERE incarnation = ? AND status = 'ACTIVE'`,
+              dueAt,
+              serialized,
+              attachment.incarnation,
+            );
+            this.sql.exec(
+              `INSERT INTO pending_actions
+                 (action_id, incarnation, due_at, kind, payload_json)
+               VALUES (?, ?, ?, 'room-expiry', ?)
+               ON CONFLICT(action_id) DO UPDATE SET
+                 incarnation = excluded.incarnation,
+                 due_at = excluded.due_at,
+                 kind = excluded.kind,
+                 payload_json = excluded.payload_json`,
+              ROOM_EXPIRY_ACTION_ID,
+              attachment.incarnation,
+              dueAt,
+              JSON.stringify({ scheduledBySessionId: attachment.sessionId }),
+            );
+            lifecycleState = { state, serialized };
+          }
+        }
+      }
       await this.recomputeAlarm();
     });
+    if (clearedAuthority !== null) {
+      this.sessionAuthorities.set(clearedAuthority.sessionId, clearedAuthority);
+    }
+    if (lifecycleState !== null) {
+      this.commandState = lifecycleState.state;
+      this.commandStateJson = lifecycleState.serialized;
+    }
   }
 
   webSocketClose(socket) {
@@ -1262,6 +1598,7 @@ export class StepstoneRoom {
       || !validTime(leaseExpiresAt)) {
       return { initialized: false };
     }
+    if (this.deleted) return { initialized: false };
     if (this.env?.ROOM_FOUNDATION_TEST === 'true') {
       const fault = await this.ctx.storage.get('registryInspectionFault');
       const exactFault = fault?.code === code
@@ -1495,6 +1832,7 @@ export class StepstoneRoom {
   async testInspect({ code, incarnation } = {}) {
     if (this.env?.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
     if (!validCodeIncarnation(code, incarnation)) return failure('INVALID_REQUEST');
+    if (this.deleted) return failure('ROOM_NOT_FOUND');
     const stored = row(this.sql.exec('SELECT * FROM room_state LIMIT 1'));
     if (!stored || stored.incarnation !== incarnation) return failure('ROOM_NOT_FOUND');
     const state = JSON.parse(stored.state_json);
@@ -1508,6 +1846,7 @@ export class StepstoneRoom {
         incarnation: session.incarnation,
         role: session.role,
         seat: session.seat,
+        connectionId: session.current_connection_id,
         connectionEpoch: session.connection_epoch,
         expiresAt: session.expires_at,
       })),
@@ -1539,6 +1878,76 @@ export class StepstoneRoom {
     if (this.env?.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
     const { sessionId, now, ...initialization } = input;
     return this.initializeWithSession(initialization, sessionId, now);
+  }
+
+  testJoinAt(input = {}) {
+    if (this.env?.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
+    return this.join(input);
+  }
+
+  async testSeedPendingActions({ code, incarnation, count, dueAt } = {}) {
+    if (this.env?.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
+    if (!validCodeIncarnation(code, incarnation)
+      || !Number.isSafeInteger(count)
+      || count < 0
+      || count > LIMITS.pendingActions
+      || !validTime(dueAt)) return failure('INVALID_REQUEST');
+    const identity = this.cachedRoomIdentity();
+    if (!identity
+      || identity.stored.incarnation !== incarnation
+      || identity.state.roomCode !== code
+      || identity.stored.status !== 'ACTIVE') return failure('ROOM_NOT_FOUND');
+
+    return this.ctx.storage.transaction(async () => {
+      const current = row(this.sql.exec('SELECT COUNT(*) AS count FROM pending_actions')).count;
+      if (current > count) return failure('INVALID_REQUEST');
+      for (let index = current; index < count; index += 1) {
+        const actionId = `test-live:${String(index).padStart(3, '0')}`;
+        this.sql.exec(
+          `INSERT INTO pending_actions (action_id, incarnation, due_at, kind, payload_json)
+           VALUES (?, ?, ?, 'test-live', '{}')`,
+          actionId,
+          incarnation,
+          dueAt,
+        );
+      }
+      await this.recomputeAlarm();
+      return result({ count });
+    });
+  }
+
+  async testSetReleaseRetryAttempt({ code, incarnation, attempt, dueAt } = {}) {
+    if (this.env?.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
+    if (!validCodeIncarnation(code, incarnation)
+      || !Number.isSafeInteger(attempt)
+      || attempt < 0
+      || attempt > 52
+      || !validTime(dueAt)) return failure('INVALID_REQUEST');
+    const identity = this.cachedRoomIdentity();
+    if (!identity
+      || identity.stored.incarnation !== incarnation
+      || identity.state.roomCode !== code
+      || identity.stored.status !== 'CLOSING') return failure('ROOM_NOT_FOUND');
+
+    return this.ctx.storage.transaction(async () => {
+      const action = row(this.sql.exec(
+        `SELECT action_id FROM pending_actions
+         WHERE action_id = ? AND incarnation = ? AND kind = 'registry-release'`,
+        REGISTRY_RELEASE_ACTION_ID,
+        incarnation,
+      ));
+      if (!action) return failure('INVALID_STATE');
+      this.sql.exec(
+        `UPDATE pending_actions SET due_at = ?, payload_json = ?
+         WHERE action_id = ? AND incarnation = ?`,
+        dueAt,
+        JSON.stringify({ attempt, phase: 'RELEASE' }),
+        REGISTRY_RELEASE_ACTION_ID,
+        incarnation,
+      );
+      await this.recomputeAlarm();
+      return result({ attempt, dueAt });
+    });
   }
 
   testAlarmAt({ code, incarnation, now } = {}) {
