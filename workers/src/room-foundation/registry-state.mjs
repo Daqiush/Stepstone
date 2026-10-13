@@ -150,6 +150,7 @@ export function markRegistryReleasePending(row, { incarnation, now }) {
   validateIncarnation(incarnation);
   validateNow(now);
   requireExactIncarnation(row, incarnation);
+  if (row.status === 'RELEASE_PENDING') return row;
   if (row.status !== 'ACTIVE') fail('INVALID_STATE');
   return {
     code: row.code,

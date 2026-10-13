@@ -221,6 +221,48 @@ test('non-owner authentication cannot prevent owner timeout, terminal response l
   assert.equal(currentJoin.incarnation, nextRoom.incarnation);
 });
 
+test('an exact committed mark-release response loss converges through retry and deletes the room', async () => {
+  const room = await createRoom('mark_response_loss_owner');
+  const before = await inspectRoom(room);
+  const ownerExpiry = before.body.value.pendingActions.find(
+    (action) => action.kind === 'owner-auth-expiry',
+  );
+
+  const configured = await runtime.registry('setReleaseFault', {
+    code: room.roomCode,
+    incarnation: room.incarnation,
+    type: 'after-mark-before-response',
+  });
+  assert.equal(configured.status, 200, JSON.stringify(configured.body));
+
+  const firstAlarm = await runtime.room('runRoomAlarmAt', {
+    code: room.roomCode,
+    incarnation: room.incarnation,
+    now: ownerExpiry.dueAt,
+  });
+  assert.equal(firstAlarm.status, 200, JSON.stringify(firstAlarm.body));
+  const closing = await inspectRoom(room);
+  assert.equal(closing.body.value.roomState.status, 'CLOSING');
+  assert.equal(closing.body.value.pendingActions.length, 1);
+  const retry = closing.body.value.pendingActions[0];
+  assert.equal(retry.actionId, 'registry-release');
+  assert.deepEqual(retry.payload, { attempt: 1, phase: 'MARK' });
+
+  const retryAlarm = await runtime.room('runRoomAlarmAt', {
+    code: room.roomCode,
+    incarnation: room.incarnation,
+    now: retry.dueAt,
+  });
+  assert.equal(retryAlarm.status, 200, JSON.stringify(retryAlarm.body));
+  const deleted = await inspectRoom(room);
+  assert.equal(deleted.body?.error?.code, 'ROOM_NOT_FOUND', JSON.stringify(deleted.body));
+
+  const registry = await inspectRegistry();
+  const released = registry.roomCodes.find((row) => row.code === room.roomCode);
+  assert.equal(released.incarnation, room.incarnation);
+  assert.equal(released.status, 'TOMBSTONE');
+});
+
 test('owner authentication cancels owner expiry and reconnect cancels one deterministic 24-hour expiry', async () => {
   const room = await createRoom('reconnect_owner');
   const first = await authenticate(room, room);

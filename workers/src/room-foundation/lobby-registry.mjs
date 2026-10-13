@@ -339,8 +339,17 @@ export class LobbyRegistry {
     });
   }
 
-  markReleasePending({ code, incarnation } = {}) {
-    return this.markReleasePendingAt({ code, incarnation, now: Date.now() });
+  async markReleasePending({ code, incarnation } = {}) {
+    const marked = this.markReleasePendingAt({ code, incarnation, now: Date.now() });
+    if (this.env?.ROOM_FOUNDATION_TEST === 'true' && marked?.ok) {
+      const fault = await this.ctx.storage.get('registryReleaseFault');
+      const exact = fault?.code === code && fault?.incarnation === incarnation;
+      if (exact && fault.type === 'after-mark-before-response') {
+        await this.ctx.storage.delete('registryReleaseFault');
+        throw new Error('injected registry mark response loss');
+      }
+    }
+    return marked;
   }
 
   markReleasePendingAt({ code, incarnation, now } = {}) {
@@ -349,6 +358,7 @@ export class LobbyRegistry {
       const current = row(this.sql.exec('SELECT * FROM room_codes WHERE code = ?', code));
       if (!current) return failure('INVALID_STATE');
       if (current.incarnation !== incarnation) return failure('INCARNATION_MISMATCH');
+      if (current.status === 'RELEASE_PENDING') return result({ status: 'RELEASE_PENDING' });
       if (current.status !== 'ACTIVE') return failure('INVALID_STATE');
       this.sql.exec(
         "UPDATE room_codes SET status = 'RELEASE_PENDING', updated_at = ? WHERE code = ?",
@@ -542,7 +552,13 @@ export class LobbyRegistry {
   async testSetReleaseFault({ code, incarnation, type } = {}) {
     if (this.env.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
     if (!assertCodeIncarnation(code, incarnation)
-      || !['release-once', 'release-always', 'after-release-before-response', null].includes(type)) {
+      || ![
+        'release-once',
+        'release-always',
+        'after-mark-before-response',
+        'after-release-before-response',
+        null,
+      ].includes(type)) {
       return failure('INVALID_REQUEST');
     }
     if (type === null) {

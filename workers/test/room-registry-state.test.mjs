@@ -172,6 +172,24 @@ test('mark-release-pending requires the exact active incarnation', () => {
   );
 });
 
+test('mark-release-pending replay preserves the exact pending incarnation', () => {
+  const pending = {
+    ...base,
+    status: 'RELEASE_PENDING',
+    leaseId: null,
+    leaseExpiresAt: null,
+    updatedAt: now + 4,
+  };
+  assert.deepEqual(
+    markRegistryReleasePending(pending, { incarnation: 7, now: now + 20 }),
+    pending,
+  );
+  expectTransitionError(
+    () => markRegistryReleasePending(pending, { incarnation: 6, now: now + 20 }),
+    'INCARNATION_MISMATCH',
+  );
+});
+
 test('exact release-pending transitions to a five-minute tombstone and returns RELEASED', () => {
   const pending = {
     ...base, status: 'RELEASE_PENDING', leaseId: null, leaseExpiresAt: null,
