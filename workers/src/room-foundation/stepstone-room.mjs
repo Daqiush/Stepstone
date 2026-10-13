@@ -485,8 +485,7 @@ export class StepstoneRoom {
         'SELECT * FROM sessions WHERE bootstrap_request_id = ? LIMIT 1', requestId,
       ));
       if (replay) {
-        if (replay.bootstrap_request_hash !== requestHash
-          || !constantTimeDigestEqual(replay.token_hash, tokenHash)) {
+        if (replay.bootstrap_request_hash !== requestHash) {
           return failure('REQUEST_CONFLICT');
         }
         return result({ response: JSON.parse(replay.bootstrap_response_json), replayed: true });

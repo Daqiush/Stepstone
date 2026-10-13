@@ -234,6 +234,78 @@ test('rotates only token digests, returns the exact role snapshot, and keeps sam
   authenticated.socket.close();
 });
 
+test('join replay stays exact after repeated reconnect-token rotations', async () => {
+  const room = await createRoom('rotated_join_replay_owner');
+  const joinRequest = {
+    v: 1,
+    requestId: id('rotated_join_replay'),
+    displayName: 'Rotating East',
+    reconnectToken: token(),
+    requestedRole: 'player',
+  };
+  const joined = await post(`/api/rooms/${room.roomCode}/join`, joinRequest);
+  assert.equal(joined.status, 200, joined.text);
+  const session = { ...joined.body, reconnectToken: joinRequest.reconnectToken };
+
+  const firstRotation = await authenticate(room, session);
+  const firstReplay = await post(`/api/rooms/${room.roomCode}/join`, joinRequest);
+  assert.equal(firstReplay.status, 200, firstReplay.text);
+  assert.deepEqual(firstReplay.body, joined.body);
+
+  const secondRotation = await authenticate(room, firstRotation.session);
+  const secondReplay = await post(`/api/rooms/${room.roomCode}/join`, joinRequest);
+  assert.equal(secondReplay.status, 200, secondReplay.text);
+  assert.deepEqual(secondReplay.body, joined.body);
+
+  const changedToken = await post(`/api/rooms/${room.roomCode}/join`, {
+    ...joinRequest,
+    reconnectToken: token(),
+  });
+  assert.equal(changedToken.status, 409, changedToken.text);
+  assert.deepEqual(changedToken.body, { v: 1, error: { code: 'REQUEST_CONFLICT' } });
+  const changedPayload = await post(`/api/rooms/${room.roomCode}/join`, {
+    ...joinRequest,
+    displayName: 'Changed East',
+  });
+  assert.equal(changedPayload.status, 409, changedPayload.text);
+  assert.deepEqual(changedPayload.body, { v: 1, error: { code: 'REQUEST_CONFLICT' } });
+
+  firstRotation.socket.close();
+  secondRotation.socket.close();
+});
+
+test('create replay stays exact after repeated owner reconnect-token rotations', async () => {
+  const createRequest = {
+    v: 1,
+    requestId: id('rotated_create_replay'),
+    displayName: 'Rotating North',
+    reconnectToken: token(),
+  };
+  const created = await post('/api/rooms', createRequest);
+  assert.equal(created.status, 200, created.text);
+  const session = { ...created.body, reconnectToken: createRequest.reconnectToken };
+
+  const firstRotation = await authenticate(created.body, session);
+  const firstReplay = await post('/api/rooms', createRequest);
+  assert.equal(firstReplay.status, 200, firstReplay.text);
+  assert.deepEqual(firstReplay.body, created.body);
+
+  const secondRotation = await authenticate(created.body, firstRotation.session);
+  const secondReplay = await post('/api/rooms', createRequest);
+  assert.equal(secondReplay.status, 200, secondReplay.text);
+  assert.deepEqual(secondReplay.body, created.body);
+
+  const changedToken = await post('/api/rooms', {
+    ...createRequest,
+    reconnectToken: token(),
+  });
+  assert.equal(changedToken.status, 409, changedToken.text);
+  assert.deepEqual(changedToken.body, { v: 1, error: { code: 'REQUEST_CONFLICT' } });
+
+  firstRotation.socket.close();
+  secondRotation.socket.close();
+});
+
 test('rejects a non-rotating next credential with 4401 without changing its epoch', async () => {
   const room = await createRoom('same_token_owner');
   const socket = await runtime.openWebSocket(wsPath(room));
