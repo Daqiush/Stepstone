@@ -2,6 +2,7 @@ import { LIMITS } from './constants.mjs';
 
 const REGISTRY_LEASE_MS = 60_000;
 const RECONCILE_RETRY_MS = 1_000;
+const RELEASE_RECONCILE_MS = 60_000;
 const NONTERMINAL_EXPIRES_AT = Number.MAX_SAFE_INTEGER;
 const REQUEST_ID = /^[A-Za-z0-9_-]{16,64}$/u;
 const REQUEST_HASH = /^[0-9a-f]{64}$/u;
@@ -118,10 +119,16 @@ export class LobbyRegistry {
     const lease = row(this.sql.exec(
       "SELECT MIN(lease_expires_at) AS due_at FROM room_codes WHERE status = 'PROVISIONING'",
     ))?.due_at;
+    const releaseUpdatedAt = row(this.sql.exec(
+      "SELECT MIN(updated_at) AS updated_at FROM room_codes WHERE status = 'RELEASE_PENDING'",
+    ))?.updated_at;
+    const release = releaseUpdatedAt === null || releaseUpdatedAt === undefined
+      ? null : Math.min(Number.MAX_SAFE_INTEGER, releaseUpdatedAt + RELEASE_RECONCILE_MS);
     const request = row(this.sql.exec(
       "SELECT MIN(expires_at) AS due_at FROM creation_requests WHERE status IN ('ACTIVE', 'FAILED')",
     ))?.due_at;
-    const candidates = [lease, request].filter((value) => value !== null && value !== undefined);
+    const candidates = [lease, release, request]
+      .filter((value) => value !== null && value !== undefined);
     return candidates.length === 0 ? null : Math.min(...candidates);
   }
 
@@ -131,12 +138,20 @@ export class LobbyRegistry {
        WHERE status = 'PROVISIONING' AND lease_expires_at > ?`,
       now,
     ))?.due_at;
+    const releaseUpdatedAt = row(this.sql.exec(
+      `SELECT MIN(updated_at) AS updated_at FROM room_codes
+       WHERE status = 'RELEASE_PENDING' AND updated_at > ?`,
+      now - RELEASE_RECONCILE_MS,
+    ))?.updated_at;
+    const release = releaseUpdatedAt === null || releaseUpdatedAt === undefined
+      ? null : Math.min(Number.MAX_SAFE_INTEGER, releaseUpdatedAt + RELEASE_RECONCILE_MS);
     const request = row(this.sql.exec(
       `SELECT MIN(expires_at) AS due_at FROM creation_requests
        WHERE status IN ('ACTIVE', 'FAILED') AND expires_at > ?`,
       now,
     ))?.due_at;
-    const candidates = [lease, request].filter((value) => value !== null && value !== undefined);
+    const candidates = [lease, release, request]
+      .filter((value) => value !== null && value !== undefined && value > now);
     return candidates.length === 0 ? null : Math.min(...candidates);
   }
 
@@ -231,6 +246,7 @@ export class LobbyRegistry {
 
   async allocateAt({ requestId, requestHash, now } = {}) {
     if (!assertRequest(requestId, requestHash) || !validTime(now)) return failure('INVALID_REQUEST');
+    await this.reconcile(now);
     const leaseId = crypto.randomUUID();
     const leaseExpiresAt = now + REGISTRY_LEASE_MS;
 
@@ -341,6 +357,7 @@ export class LobbyRegistry {
 
   async markReleasePending({ code, incarnation } = {}) {
     const marked = this.markReleasePendingAt({ code, incarnation, now: Date.now() });
+    if (marked?.ok) await this.scheduleAlarm();
     if (this.env?.ROOM_FOUNDATION_TEST === 'true' && marked?.ok) {
       const fault = await this.ctx.storage.get('registryReleaseFault');
       const exact = fault?.code === code && fault?.incarnation === incarnation;
@@ -451,6 +468,30 @@ export class LobbyRegistry {
       }
     }
 
+    const staleReleases = rows(this.sql.exec(
+      `SELECT code, incarnation, updated_at FROM room_codes
+       WHERE status = 'RELEASE_PENDING' AND updated_at <= ?
+       ORDER BY code`,
+      now - RELEASE_RECONCILE_MS,
+    ));
+    const releaseDecisions = [];
+    for (const item of staleReleases) {
+      try {
+        const id = this.env.STEPSTONE_ROOM.idFromName(`${item.code}:${item.incarnation}`);
+        const reconciled = await this.env.STEPSTONE_ROOM.get(id).reconcileClosingRelease({
+          code: item.code,
+          incarnation: item.incarnation,
+          now,
+        });
+        releaseDecisions.push({
+          ...item,
+          outcome: reconciled?.ok && reconciled.value?.reconciled === true ? 'DONE' : 'RETRY',
+        });
+      } catch {
+        releaseDecisions.push({ ...item, outcome: 'RETRY' });
+      }
+    }
+
     let retryNeeded = false;
     await this.ctx.storage.transaction(async () => {
       for (const decision of decisions) {
@@ -487,13 +528,22 @@ export class LobbyRegistry {
           );
         }
       }
+      for (const decision of releaseDecisions) {
+        const current = row(this.sql.exec('SELECT * FROM room_codes WHERE code = ?', decision.code));
+        if (!current
+          || current.status !== 'RELEASE_PENDING'
+          || current.incarnation !== decision.incarnation
+          || current.updated_at !== decision.updated_at
+          || current.updated_at + RELEASE_RECONCILE_MS > now) continue;
+        retryNeeded = true;
+      }
       this.sql.exec(
         "DELETE FROM creation_requests WHERE status IN ('ACTIVE', 'FAILED') AND expires_at <= ?",
         now,
       );
       await this.scheduleAlarm(retryNeeded ? Date.now() + RECONCILE_RETRY_MS : null);
     });
-    return result({ reconciled: decisions.length });
+    return result({ reconciled: decisions.length + releaseDecisions.length });
   }
 
   alarm() {
@@ -539,9 +589,11 @@ export class LobbyRegistry {
     return this.activateAt(input);
   }
 
-  testMarkReleasePendingAt(input) {
+  async testMarkReleasePendingAt(input) {
     if (this.env.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
-    return this.markReleasePendingAt(input);
+    const marked = this.markReleasePendingAt(input);
+    if (marked?.ok) await this.scheduleAlarm();
+    return marked;
   }
 
   testReleaseAt(input) {

@@ -97,6 +97,17 @@ async function inspectRegistry() {
   return response.body.value;
 }
 
+async function waitForRoom(room, predicate, message, timeoutMs = 3_000) {
+  const deadline = Date.now() + timeoutMs;
+  let latest;
+  while (Date.now() < deadline) {
+    latest = await inspectRoom(room);
+    if (predicate(latest)) return latest;
+    await runtime.wait(25);
+  }
+  assert.fail(`${message}: ${JSON.stringify(latest?.body)}`);
+}
+
 test('non-owner authentication cannot prevent owner timeout, terminal response loss, deletion, or safe reuse', async () => {
   const oldRoom = await createRoom('lifecycle_old_owner');
   const player = await joinRoom(oldRoom, 'LifecycleEast');
@@ -271,8 +282,12 @@ test('owner authentication cancels owner expiry and reconnect cancels one determ
 
   const closedAt = Date.now();
   first.socket.close();
-  await runtime.wait(100);
-  state = await inspectRoom(room);
+  state = await waitForRoom(
+    room,
+    (inspection) => inspection.body?.value?.pendingActions
+      ?.some((action) => action.kind === 'room-expiry'),
+    'timed out waiting for first final-socket expiry',
+  );
   assert.equal(state.status, 200, JSON.stringify(state.body));
   const expiry = state.body.value.pendingActions.filter((action) => action.kind === 'room-expiry');
   assert.equal(expiry.length, 1);
@@ -289,8 +304,12 @@ test('owner authentication cancels owner expiry and reconnect cancels one determ
   assert.equal(state.body.value.alarmAt, null);
 
   reconnected.socket.close();
-  await runtime.wait(100);
-  state = await inspectRoom(room);
+  state = await waitForRoom(
+    room,
+    (inspection) => inspection.body?.value?.pendingActions
+      ?.some((action) => action.kind === 'room-expiry'),
+    'timed out waiting for reconnected final-socket expiry',
+  );
   assert.deepEqual(
     state.body.value.pendingActions.map((action) => action.actionId),
     ['room-expiry'],
@@ -302,6 +321,67 @@ test('owner authentication cancels owner expiry and reconnect cancels one determ
   });
   assert.equal(expired.status, 200, JSON.stringify(expired.body));
   assert.equal((await inspectRoom(room)).body.error.code, 'ROOM_NOT_FOUND');
+});
+
+test('wake clears persisted authority without a matching socket and schedules final-socket expiry', async () => {
+  const room = await createRoom('wake_orphan_owner');
+  const player = await joinRoom(room, 'WakeOrphanEast');
+  const authenticated = await authenticate(room, player);
+  const orphaned = await runtime.room('orphanRoomSessionAuthority', {
+    code: room.roomCode,
+    incarnation: room.incarnation,
+    sessionId: player.sessionId,
+    connectionId: id('missing_attachment'),
+  });
+  assert.equal(orphaned.status, 200, JSON.stringify(orphaned.body));
+
+  await runtime.restartRoom(room.roomCode, room.incarnation);
+  const recovered = await waitForRoom(
+    room,
+    (inspection) => {
+      const value = inspection.body?.value;
+      const recoveredPlayer = value?.sessions?.find(
+        (session) => session.sessionId === player.sessionId,
+      );
+      return recoveredPlayer?.connectionId === null
+        && value.pendingActions.some((action) => action.actionId === 'room-expiry');
+    },
+    'wake did not clear orphaned persisted authority',
+  );
+  assert.equal((await authenticated.socket.closed()).code, WEBSOCKET_CLOSE.SESSION_REPLACED);
+  assert.ok(recovered.body.value.pendingActions.some(
+    (action) => action.actionId === 'owner-auth-expiry',
+  ));
+  assert.equal(recovered.body.value.alarmAt, Math.min(
+    ...recovered.body.value.pendingActions.map((action) => action.dueAt),
+  ));
+  const accounting = await runtime.room('inspectRoomCommandAccounting', {
+    code: room.roomCode,
+    incarnation: room.incarnation,
+  });
+  assert.equal(accounting.status, 200, JSON.stringify(accounting.body));
+  assert.equal(accounting.body.value.cache.ready, true);
+  assert.equal(accounting.body.value.cache.authorityCount, 2);
+  assert.ok(accounting.body.value.lastWake.totalRowsRead <= 17);
+
+  const reconnected = await authenticate(room, authenticated.session);
+  reconnected.socket.send({
+    v: 1,
+    type: 'command',
+    id: id('wake_recovered_command'),
+    name: 'foundation.increment',
+    payload: { expectedRevision: 0 },
+  });
+  const command = JSON.parse(await reconnected.socket.nextMessage());
+  assert.equal(command.type, 'reply');
+  assert.equal(command.payload.revision, 1);
+  const active = await inspectRoom(room);
+  assert.equal(active.body.value.pendingActions.some(
+    (action) => action.actionId === 'room-expiry',
+  ), false);
+  assert.ok(active.body.value.pendingActions.some(
+    (action) => action.actionId === 'owner-auth-expiry',
+  ));
 });
 
 test('release failures keep one action and use bounded exponential retry before deletion', async () => {
@@ -381,6 +461,81 @@ test('release failures keep one action and use bounded exponential retry before 
   assert.equal((await inspectRoom(room)).body.error.code, 'ROOM_NOT_FOUND');
 });
 
+test('registry reconciliation recovers a stale release-pending room whose alarm was lost', async () => {
+  const room = await createRoom('registry_fallback_owner');
+  const before = await inspectRoom(room);
+  const ownerExpiry = before.body.value.pendingActions.find(
+    (action) => action.kind === 'owner-auth-expiry',
+  );
+  const configured = await runtime.registry('setReleaseFault', {
+    code: room.roomCode,
+    incarnation: room.incarnation,
+    type: 'release-once',
+  });
+  assert.equal(configured.status, 200, JSON.stringify(configured.body));
+
+  const firstAlarm = await runtime.room('runRoomAlarmAt', {
+    code: room.roomCode,
+    incarnation: room.incarnation,
+    now: ownerExpiry.dueAt,
+  });
+  assert.equal(firstAlarm.status, 200, JSON.stringify(firstAlarm.body));
+  const closing = await inspectRoom(room);
+  assert.equal(closing.body.value.roomState.status, 'CLOSING');
+  assert.deepEqual(closing.body.value.pendingActions.map((action) => action.actionId), [
+    'registry-release',
+  ]);
+  assert.equal(closing.body.value.pendingActions[0].payload.phase, 'RELEASE');
+
+  const dropped = await runtime.room('dropRoomAlarm', {
+    code: room.roomCode,
+    incarnation: room.incarnation,
+  });
+  assert.equal(dropped.status, 200, JSON.stringify(dropped.body));
+  assert.equal((await inspectRoom(room)).body.value.alarmAt, null);
+
+  const registryBefore = await inspectRegistry();
+  const pending = registryBefore.roomCodes.find((row) => row.code === room.roomCode);
+  assert.equal(pending.status, 'RELEASE_PENDING');
+  const fallbackAt = pending.updatedAt + 60_000;
+  assert.equal(registryBefore.alarmAt, fallbackAt);
+  const releaseWallStart = Date.now();
+  const reconciled = await runtime.registry('reconcile', { now: fallbackAt });
+  assert.equal(reconciled.status, 200, JSON.stringify(reconciled.body));
+  assert.equal((await inspectRoom(room)).body?.error?.code, 'ROOM_NOT_FOUND');
+
+  const registryAfter = await inspectRegistry();
+  const released = registryAfter.roomCodes.find((row) => row.code === room.roomCode);
+  assert.equal(released.incarnation, room.incarnation);
+  assert.equal(released.status, 'TOMBSTONE');
+  assert.ok(released.tombstoneUntil >= releaseWallStart + LIMITS.registryTombstoneMs);
+  assert.ok(released.tombstoneUntil <= Date.now() + LIMITS.registryTombstoneMs);
+});
+
+test('registry fallback is idempotent and cannot release an exact ACTIVE room', async () => {
+  const room = await createRoom('active_fallback_owner');
+  const markedAt = Date.now();
+  const marked = await runtime.registry('markReleasePendingAt', {
+    code: room.roomCode,
+    incarnation: room.incarnation,
+    now: markedAt,
+  });
+  assert.equal(marked.status, 200, JSON.stringify(marked.body));
+
+  for (const now of [markedAt + 60_000, markedAt + 61_000]) {
+    const reconciled = await runtime.registry('reconcile', { now });
+    assert.equal(reconciled.status, 200, JSON.stringify(reconciled.body));
+    const active = await inspectRoom(room);
+    assert.equal(active.body.value.roomState.status, 'ACTIVE');
+    assert.equal(active.body.value.sessions[0].incarnation, room.incarnation);
+    const registry = await inspectRegistry();
+    const pending = registry.roomCodes.find((row) => row.code === room.roomCode);
+    assert.equal(pending.incarnation, room.incarnation);
+    assert.equal(pending.status, 'RELEASE_PENDING');
+    assert.equal(pending.updatedAt, markedAt);
+  }
+});
+
 test('the 64-row cap counts only live actions and rejects an upgrade without partial acceptance', async () => {
   const room = await createRoom('action_capacity_owner');
   const seeded = await runtime.room('seedRoomPendingActions', {
@@ -398,4 +553,57 @@ test('the 64-row cap counts only live actions and rejects an upgrade without par
   assert.equal(after.body.value.pendingActions.length, LIMITS.pendingActions);
   assert.equal(after.body.value.sockets.length, 0);
   assert.equal(after.body.value.alarmAt, before.body.value.alarmAt);
+});
+
+test('a malformed due handshake action is physically deleted without an alarm loop', async () => {
+  const room = await createRoom('malformed_handshake_owner');
+  await authenticate(room, room);
+  const dueAt = Date.now();
+  const seeded = await runtime.room('seedRoomMalformedHandshakeAction', {
+    code: room.roomCode,
+    incarnation: room.incarnation,
+    dueAt,
+  });
+  assert.equal(seeded.status, 200, JSON.stringify(seeded.body));
+
+  const alarm = await runtime.room('runRoomAlarmAt', {
+    code: room.roomCode,
+    incarnation: room.incarnation,
+    now: dueAt,
+  });
+  assert.equal(alarm.status, 200, JSON.stringify(alarm.body));
+  const cleaned = await inspectRoom(room);
+  assert.deepEqual(cleaned.body.value.pendingActions, []);
+  assert.equal(cleaned.body.value.alarmAt, null);
+});
+
+test('final authenticated socket close clears authority and schedules expiry at ordinary action capacity', async () => {
+  const room = await createRoom('capacity_close_owner');
+  const authenticated = await authenticate(room, room);
+  const seeded = await runtime.room('seedRoomPendingActions', {
+    code: room.roomCode,
+    incarnation: room.incarnation,
+    count: LIMITS.pendingActions,
+    dueAt: Date.now() + LIMITS.roomExpiryMs,
+  });
+  assert.equal(seeded.status, 200, JSON.stringify(seeded.body));
+
+  authenticated.socket.close();
+  const closed = await waitForRoom(
+    room,
+    (inspection) => {
+      const value = inspection.body?.value;
+      return value?.sessions?.every((session) => session.connectionId === null)
+        && value.pendingActions.some((action) => action.actionId === 'room-expiry');
+    },
+    'final close rolled back at ordinary action capacity',
+  );
+  assert.equal(closed.body.value.pendingActions.length, LIMITS.pendingActions + 1);
+  const expiry = closed.body.value.pendingActions.find(
+    (action) => action.actionId === 'room-expiry',
+  );
+  assert.equal(closed.body.value.roomState.expiresAt, expiry.dueAt);
+  assert.equal(closed.body.value.alarmAt, Math.min(
+    ...closed.body.value.pendingActions.map((action) => action.dueAt),
+  ));
 });

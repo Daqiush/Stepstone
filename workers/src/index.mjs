@@ -44,6 +44,9 @@ class StepstoneRoom extends DurableObject {
   initialize(input) { return this.implementation.initialize(input); }
   join(input) { return this.implementation.join(input); }
   inspectInitialization(input) { return this.implementation.inspectInitialization(input); }
+  reconcileClosingRelease(input) {
+    return this.implementation.reconcileClosingRelease(input);
+  }
   alarm() { return this.implementation.alarm(); }
   webSocketMessage(socket, message) {
     return this.implementation.webSocketMessage(socket, message);
@@ -69,6 +72,13 @@ class StepstoneRoom extends DurableObject {
   testInspect(input) { return this.implementation.testInspect(input); }
   testInitializeAt(input) { return this.implementation.testInitializeAt(input); }
   testJoinAt(input) { return this.implementation.testJoinAt(input); }
+  testOrphanSessionAuthority(input) {
+    return this.implementation.testOrphanSessionAuthority(input);
+  }
+  testSeedMalformedHandshakeAction(input) {
+    return this.implementation.testSeedMalformedHandshakeAction(input);
+  }
+  testDropAlarm(input) { return this.implementation.testDropAlarm(input); }
   testSeedPendingActions(input) { return this.implementation.testSeedPendingActions(input); }
   testSetReleaseRetryAttempt(input) {
     return this.implementation.testSetReleaseRetryAttempt(input);

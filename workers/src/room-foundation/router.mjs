@@ -272,6 +272,21 @@ async function registryTestBridge(request, env) {
       rpcResult = await env.STEPSTONE_ROOM.get(roomId).testJoinAt(input);
       break;
     }
+    case 'orphanRoomSessionAuthority': {
+      const roomId = env.STEPSTONE_ROOM.idFromName(`${input.code}:${input.incarnation}`);
+      rpcResult = await env.STEPSTONE_ROOM.get(roomId).testOrphanSessionAuthority(input);
+      break;
+    }
+    case 'seedRoomMalformedHandshakeAction': {
+      const roomId = env.STEPSTONE_ROOM.idFromName(`${input.code}:${input.incarnation}`);
+      rpcResult = await env.STEPSTONE_ROOM.get(roomId).testSeedMalformedHandshakeAction(input);
+      break;
+    }
+    case 'dropRoomAlarm': {
+      const roomId = env.STEPSTONE_ROOM.idFromName(`${input.code}:${input.incarnation}`);
+      rpcResult = await env.STEPSTONE_ROOM.get(roomId).testDropAlarm(input);
+      break;
+    }
     case 'seedRoomPendingActions': {
       const roomId = env.STEPSTONE_ROOM.idFromName(`${input.code}:${input.incarnation}`);
       rpcResult = await env.STEPSTONE_ROOM.get(roomId).testSeedPendingActions(input);
