@@ -17,6 +17,8 @@ function sqlTable(statement) {
   if (/\broom_state\b/u.test(normalized)) return 'room_state';
   if (/\bsessions\b/u.test(normalized)) return 'sessions';
   if (/\bpending_actions\b/u.test(normalized)) return 'pending_actions';
+  if (/\broom_codes\b/u.test(normalized)) return 'room_codes';
+  if (/\bcreation_requests\b/u.test(normalized)) return 'creation_requests';
   return 'other';
 }
 
@@ -62,4 +64,39 @@ export function addSqlAccounting(target, source) {
     'sessionRowsRead', 'sessionRowsWritten',
     'actionRowsRead', 'actionRowsWritten',
   ]) target[key] += source[key];
+}
+
+export function createSqlProfileRecorder(rawSql) {
+  let statements = [];
+  const sql = {
+    exec(statement, ...bindings) {
+      const cursor = rawSql.exec(statement, ...bindings);
+      const cachedRows = cursor.toArray();
+      const rowsRead = Number.isSafeInteger(cursor.rowsRead) ? cursor.rowsRead : 0;
+      const rowsWritten = Number.isSafeInteger(cursor.rowsWritten) ? cursor.rowsWritten : 0;
+      statements.push({
+        operation: statement.trimStart().split(/\s+/u, 1)[0].toUpperCase(),
+        table: sqlTable(statement),
+        rowsRead,
+        rowsWritten,
+      });
+      return Object.freeze({
+        rowsRead,
+        rowsWritten,
+        toArray: () => [...cachedRows],
+      });
+    },
+  };
+  return Object.freeze({
+    sql,
+    reset() { statements = []; },
+    snapshot() {
+      const copied = statements.map((statement) => ({ ...statement }));
+      return {
+        statements: copied,
+        totalRowsRead: copied.reduce((sum, statement) => sum + statement.rowsRead, 0),
+        totalRowsWritten: copied.reduce((sum, statement) => sum + statement.rowsWritten, 0),
+      };
+    },
+  });
 }

@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   accountedRows,
+  createSqlProfileRecorder,
   emptySqlAccounting,
   executeAccountedSql,
 } from '../src/room-foundation/sql-accounting.mjs';
@@ -51,4 +52,41 @@ test('records lazy UPDATE metrics only after consuming its cursor', () => {
   assert.equal(accounting.totalRowsRead, 1);
   assert.equal(accounting.totalRowsWritten, 1);
   assert.equal(accounting.roomStateRowsWritten, 1);
+});
+
+test('profile recorder consumes each cursor once and returns cached rows to callers', () => {
+  let consumptions = 0;
+  const raw = {
+    exec(statement) {
+      return {
+        rowsRead: 0,
+        rowsWritten: 0,
+        toArray() {
+          consumptions += 1;
+          this.rowsRead = statement.startsWith('SELECT') ? 7 : 1;
+          this.rowsWritten = statement.startsWith('UPDATE') ? 1 : 0;
+          return [{ value: 1 }];
+        },
+      };
+    },
+  };
+  const recorder = createSqlProfileRecorder(raw);
+
+  recorder.reset();
+  const select = recorder.sql.exec('SELECT * FROM room_codes');
+  assert.deepEqual(select.toArray(), [{ value: 1 }]);
+  assert.deepEqual(select.toArray(), [{ value: 1 }]);
+  const update = recorder.sql.exec('UPDATE room_codes SET status = 1');
+
+  assert.equal(consumptions, 2);
+  assert.equal(select.rowsRead, 7);
+  assert.equal(update.rowsWritten, 1);
+  assert.deepEqual(recorder.snapshot(), {
+    statements: [
+      { operation: 'SELECT', table: 'room_codes', rowsRead: 7, rowsWritten: 0 },
+      { operation: 'UPDATE', table: 'room_codes', rowsRead: 1, rowsWritten: 1 },
+    ],
+    totalRowsRead: 8,
+    totalRowsWritten: 1,
+  });
 });

@@ -1,4 +1,5 @@
 import { LIMITS } from './constants.mjs';
+import { createSqlProfileRecorder } from './sql-accounting.mjs';
 
 const REGISTRY_LEASE_MS = 60_000;
 const RECONCILE_RETRY_MS = 1_000;
@@ -83,7 +84,10 @@ export class LobbyRegistry {
   constructor(ctx, env) {
     this.ctx = ctx;
     this.env = env;
-    this.sql = ctx?.storage?.sql;
+    const rawSql = ctx?.storage?.sql;
+    this.sqlProfiler = rawSql && env?.ROOM_FOUNDATION_TEST === 'true'
+      ? createSqlProfileRecorder(rawSql) : null;
+    this.sql = this.sqlProfiler?.sql ?? rawSql;
     if (!this.sql) return;
     ctx.blockConcurrencyWhile(async () => {
       ctx.storage.transactionSync(() => {
@@ -663,6 +667,48 @@ export class LobbyRegistry {
         creation_requests: indexRows('creation_requests'),
       },
     });
+  }
+
+  testResetSqlAccounting() {
+    if (this.env.ROOM_FOUNDATION_TEST !== 'true' || !this.sqlProfiler) {
+      return failure('ROOM_NOT_FOUND');
+    }
+    this.sqlProfiler.reset();
+    return result({ reset: true });
+  }
+
+  testInspectSqlAccounting() {
+    if (this.env.ROOM_FOUNDATION_TEST !== 'true' || !this.sqlProfiler) {
+      return failure('ROOM_NOT_FOUND');
+    }
+    return result(this.sqlProfiler.snapshot());
+  }
+
+  testSeedBudgetCardinality({ count, now } = {}) {
+    if (this.env.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
+    if (!Number.isSafeInteger(count) || count < 0 || count > 999 || !validTime(now)) {
+      return failure('INVALID_REQUEST');
+    }
+    this.ctx.storage.transactionSync(() => {
+      for (let index = 0; index < count; index += 1) {
+        const code = String(index).padStart(3, '0');
+        const id = `budget_seed_${String(index).padStart(16, '0')}`;
+        this.sql.exec(
+          `INSERT INTO room_codes
+            (code, incarnation, status, lease_id, lease_expires_at, tombstone_until, updated_at)
+           VALUES (?, 1, 'ACTIVE', NULL, NULL, NULL, ?)`,
+          code, now,
+        );
+        this.sql.exec(
+          `INSERT INTO creation_requests
+            (request_id, request_hash, code, incarnation, lease_id, status, response_json, expires_at)
+           VALUES (?, ?, ?, 1, ?, 'ACTIVE', '{}', ?)`,
+          id, 'f'.repeat(64), code, `budget_lease_${String(index).padStart(16, '0')}`,
+          now + LIMITS.creationReplayTtlMs,
+        );
+      }
+    });
+    return result({ count });
   }
 
   testSeedCapacity({ count, now, expiresAt } = {}) {

@@ -34,7 +34,7 @@ const budget = {
   storageBytes: modeled.storage.bytes,
   targets: modeled.targets,
   gates: modeled.gates,
-  model: 'Plan B SQLite table/index/alarm/delete accounting with bounded storage and exact Durable Object request billing.',
+  model: 'Plan B consumed-cursor SQL profiles with cardinality-scaled registry scans, explicit table/index/alarm/delete accounting, bounded storage, and exact Durable Object request billing.',
 };
 
 const reportPath = option('--report');

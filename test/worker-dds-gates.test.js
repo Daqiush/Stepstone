@@ -262,8 +262,8 @@ test('budget simulation counts all 50 room lifecycles and appends row totals', (
     assert.equal(budget.requestsPerDay, 3750);
     assert.equal(budget.handlerExecutionsPerRoom, 1033);
     assert.equal(budget.durationGbSecondsPerDay, 3305.6);
-    assert.equal(budget.readsPerDay, 63950);
-    assert.equal(budget.writesPerDay, 59850);
+    assert.equal(budget.readsPerDay, 211700);
+    assert.equal(budget.writesPerDay, 60850);
     assert.equal(budget.actions['ordinary command'].countPerRoom, 1000);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

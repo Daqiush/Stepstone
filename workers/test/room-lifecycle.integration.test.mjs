@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { after, before, test } from 'node:test';
 
 import { LIMITS, WEBSOCKET_CLOSE } from '../src/room-foundation/constants.mjs';
@@ -7,6 +8,7 @@ import {
   createHandlerLatencyRecorder,
   simulatePlanBBudget,
 } from '../src/room-foundation/budget-model.mjs';
+import { canonicalJson, hashReconnectToken } from '../src/room-foundation/protocol.mjs';
 import { createRoomWorkerRuntime } from './helpers/room-worker-runtime.mjs';
 
 let runtime;
@@ -116,25 +118,140 @@ async function waitForRoom(room, predicate, message, timeoutMs = 3_000) {
 test('all billed handler categories stay below the controlled 500 ms envelope', async () => {
   let now = 0;
   const recorder = createHandlerLatencyRecorder({ now: () => now });
+  const measure = (category, handler, elapsedMs = 120) => recorder.measure(category, async () => {
+    // The real runtime call is inside the measured boundary. The controlled
+    // increment represents its logical active time, so the test is independent
+    // of local process scheduling while still covering the production handler.
+    const value = await handler();
+    now += elapsedMs;
+    return value;
+  });
+  const requestId = id('latency_create');
+  const reconnectToken = token();
+  const createInput = { v: 1, requestId, displayName: 'North', reconnectToken };
+  const requestHash = createHash('sha256').update(canonicalJson(createInput)).digest('hex');
+  const tokenHash = await hashReconnectToken(reconnectToken);
+  const allocatedResponse = await measure('allocation', () => runtime.registry('allocateAt', {
+    requestId,
+    requestHash,
+    now: Date.now(),
+  }));
+  assert.equal(allocatedResponse.status, 200, JSON.stringify(allocatedResponse.body));
+  const allocation = allocatedResponse.body.value;
+  const sessionId = id('latency_session');
+  const initializedResponse = await measure('initialization', () => runtime.room('initializeRoomAt', {
+    code: allocation.code,
+    incarnation: allocation.incarnation,
+    leaseId: allocation.leaseId,
+    leaseExpiresAt: allocation.leaseExpiresAt,
+    requestId,
+    requestHash,
+    tokenHash,
+    sessionId,
+    now: Date.now(),
+  }));
+  assert.equal(initializedResponse.status, 200, JSON.stringify(initializedResponse.body));
+  const room = initializedResponse.body.value.response;
+  const activatedResponse = await measure('activation', () => runtime.registry('activateAt', {
+    requestId,
+    code: room.roomCode,
+    incarnation: room.incarnation,
+    leaseId: allocation.leaseId,
+    response: room,
+    now: Date.now(),
+  }));
+  assert.equal(activatedResponse.status, 200, JSON.stringify(activatedResponse.body));
 
-  for (const category of HANDLER_CATEGORIES) {
-    const result = await recorder.measure(category, async () => {
-      now += 175;
-      // The second clock advance represents awaited cross-object work and is
-      // intentionally inside the initiating handler measurement.
-      await Promise.resolve();
-      now += 175;
-      return category;
+  const player = await measure('join', () => joinRoom(room, 'LatencyEast'));
+  const socket = await measure('upgrade', () => runtime.openWebSocket(wsPath(room)));
+  const nextReconnectToken = token();
+  await measure('initialHello', async () => {
+    socket.send({
+      v: 1,
+      type: 'hello',
+      id: id('latency_hello'),
+      reconnectToken: player.reconnectToken,
+      nextReconnectToken,
     });
-    assert.equal(result, category);
-  }
+    const reply = JSON.parse(await socket.nextMessage());
+    assert.equal(reply.type, 'hello-ok');
+  });
+  socket.close();
+  await runtime.wait(25);
+
+  const reconnectSocket = await runtime.openWebSocket(wsPath(room));
+  const finalReconnectToken = token();
+  await measure('reconnectHello', async () => {
+    reconnectSocket.send({
+      v: 1,
+      type: 'hello',
+      id: id('latency_reconnect'),
+      reconnectToken: nextReconnectToken,
+      nextReconnectToken: finalReconnectToken,
+    });
+    const reply = JSON.parse(await reconnectSocket.nextMessage());
+    assert.equal(reply.type, 'hello-ok');
+  });
+  await measure('ordinaryCommand', async () => {
+    reconnectSocket.send({
+      v: 1,
+      type: 'command',
+      id: id('latency_command'),
+      name: 'foundation.increment',
+      payload: { expectedRevision: 0 },
+    });
+    assert.equal(JSON.parse(await reconnectSocket.nextMessage()).type, 'reply');
+    assert.equal(JSON.parse(await reconnectSocket.nextMessage()).type, 'event');
+  });
+
+  const fault = await runtime.registry('setReleaseFault', {
+    code: room.roomCode,
+    incarnation: room.incarnation,
+    type: 'release-always',
+  });
+  assert.equal(fault.status, 200, JSON.stringify(fault.body));
+  reconnectSocket.close();
+  await runtime.wait(25);
+  const alarmResponse = await measure('alarm', () => runtime.room('runRoomAlarmAt', {
+    code: room.roomCode,
+    incarnation: room.incarnation,
+    now: Date.now() + LIMITS.roomExpiryMs + 1,
+  }));
+  assert.equal(alarmResponse.status, 200, JSON.stringify(alarmResponse.body));
+  const releasedResponse = await measure('releaseCalls', async () => {
+    const cleared = await runtime.registry('setReleaseFault', {
+      code: room.roomCode,
+      incarnation: room.incarnation,
+      type: null,
+    });
+    assert.equal(cleared.status, 200, JSON.stringify(cleared.body));
+    return runtime.registry('releaseAt', {
+      code: room.roomCode,
+      incarnation: room.incarnation,
+      now: Date.now(),
+    });
+  });
+  assert.equal(releasedResponse.status, 200, JSON.stringify(releasedResponse.body));
+  const reusedResponse = await measure('reuse', () => runtime.registry('allocateAt', {
+    requestId: id('latency_reuse'),
+    requestHash: 'b'.repeat(64),
+    now: Date.now() + LIMITS.registryTombstoneMs + 1,
+  }));
+  assert.equal(reusedResponse.status, 200, JSON.stringify(reusedResponse.body));
 
   const summary = recorder.assertComplete();
   assert.deepEqual(Object.keys(summary).sort(), [...HANDLER_CATEGORIES].sort());
   for (const category of HANDLER_CATEGORIES) {
-    assert.equal(summary[category].milliseconds, 350);
+    assert.equal(summary[category].milliseconds, 120);
     assert.equal(summary[category].passed, true);
   }
+
+  let delayedNow = 0;
+  const delayed = createHandlerLatencyRecorder({ now: () => delayedNow });
+  await assert.rejects(delayed.measure('allocation', async () => {
+    await runtime.registry('lookupActive', { code: room.roomCode });
+    delayedNow += 500;
+  }), /allocation exceeded 500 ms/u);
 
   const modeledFallback = simulatePlanBBudget()
     .rows.operations['registry release fallback reservation'];

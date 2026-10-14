@@ -24,6 +24,7 @@ import {
   accountedRow,
   accountedRows,
   addSqlAccounting,
+  createSqlProfileRecorder,
   emptySqlAccounting,
   executeAccountedSql,
 } from './sql-accounting.mjs';
@@ -122,7 +123,10 @@ export class StepstoneRoom {
   constructor(ctx, env) {
     this.ctx = ctx;
     this.env = env;
-    this.sql = ctx?.storage?.sql;
+    const rawSql = ctx?.storage?.sql;
+    this.sqlProfiler = rawSql && env?.ROOM_FOUNDATION_TEST === 'true'
+      ? createSqlProfileRecorder(rawSql) : null;
+    this.sql = this.sqlProfiler?.sql ?? rawSql;
     this.commandState = null;
     this.commandStateJson = null;
     this.sessionAuthorities = new Map();
@@ -1846,6 +1850,23 @@ export class StepstoneRoom {
       );
       return result({ corrupted: true });
     });
+  }
+
+  testResetSqlAccounting({ code, incarnation } = {}) {
+    if (this.env?.ROOM_FOUNDATION_TEST !== 'true' || !this.sqlProfiler) {
+      return failure('ROOM_NOT_FOUND');
+    }
+    if (!validCodeIncarnation(code, incarnation)) return failure('INVALID_REQUEST');
+    this.sqlProfiler.reset();
+    return result({ reset: true });
+  }
+
+  testInspectSqlAccounting({ code, incarnation } = {}) {
+    if (this.env?.ROOM_FOUNDATION_TEST !== 'true' || !this.sqlProfiler) {
+      return failure('ROOM_NOT_FOUND');
+    }
+    if (!validCodeIncarnation(code, incarnation)) return failure('INVALID_REQUEST');
+    return result(this.sqlProfiler.snapshot());
   }
 
   testInspectCommandAccounting({ code, incarnation } = {}) {

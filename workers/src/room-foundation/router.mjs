@@ -212,6 +212,12 @@ async function registryTestBridge(request, env) {
     }
     case 'recoverAlarmAt': rpcResult = await registry.testRecoverAlarmAt(input); break;
     case 'inspect': rpcResult = await registry.testInspect(); break;
+    case 'resetRegistrySqlAccounting': rpcResult = await registry.testResetSqlAccounting(); break;
+    case 'inspectRegistrySqlAccounting': rpcResult = await registry.testInspectSqlAccounting(); break;
+    case 'seedRegistryBudgetCardinality': {
+      rpcResult = await registry.testSeedBudgetCardinality(input);
+      break;
+    }
     case 'seedCapacity': rpcResult = await registry.testSeedCapacity(input); break;
     case 'setRoomInitialization': {
       const roomId = env.STEPSTONE_ROOM.idFromName(`${input.code}:${input.incarnation}`);
@@ -236,6 +242,16 @@ async function registryTestBridge(request, env) {
     case 'setRoomCommandFault': {
       const roomId = env.STEPSTONE_ROOM.idFromName(`${input.code}:${input.incarnation}`);
       rpcResult = await env.STEPSTONE_ROOM.get(roomId).testSetCommandFault(input);
+      break;
+    }
+    case 'resetRoomSqlAccounting': {
+      const roomId = env.STEPSTONE_ROOM.idFromName(`${input.code}:${input.incarnation}`);
+      rpcResult = await env.STEPSTONE_ROOM.get(roomId).testResetSqlAccounting(input);
+      break;
+    }
+    case 'inspectRoomSqlAccounting': {
+      const roomId = env.STEPSTONE_ROOM.idFromName(`${input.code}:${input.incarnation}`);
+      rpcResult = await env.STEPSTONE_ROOM.get(roomId).testInspectSqlAccounting(input);
       break;
     }
     case 'inspectRoomCommandAccounting': {

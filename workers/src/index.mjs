@@ -32,6 +32,11 @@ class LobbyRegistry extends DurableObject {
   }
   testRecoverAlarmAt(input) { return this.implementation.testRecoverAlarmAt(input); }
   testInspect() { return this.implementation.testInspect(); }
+  testResetSqlAccounting() { return this.implementation.testResetSqlAccounting(); }
+  testInspectSqlAccounting() { return this.implementation.testInspectSqlAccounting(); }
+  testSeedBudgetCardinality(input) {
+    return this.implementation.testSeedBudgetCardinality(input);
+  }
   testSeedCapacity(input) { return this.implementation.testSeedCapacity(input); }
 }
 
@@ -63,6 +68,8 @@ class StepstoneRoom extends DurableObject {
   testSetInitializationFault(input) { return this.implementation.testSetInitializationFault(input); }
   testSetAuthFault(input) { return this.implementation.testSetAuthFault(input); }
   testSetCommandFault(input) { return this.implementation.testSetCommandFault(input); }
+  testResetSqlAccounting(input) { return this.implementation.testResetSqlAccounting(input); }
+  testInspectSqlAccounting(input) { return this.implementation.testInspectSqlAccounting(input); }
   testInspectCommandAccounting(input) {
     return this.implementation.testInspectCommandAccounting(input);
   }

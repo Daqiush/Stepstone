@@ -38,6 +38,45 @@ const ZERO_COST = Object.freeze({
   deletedRowsWritten: 0,
 });
 
+export const MEASURED_ROOM_SQL_PROFILES = Object.freeze({
+  initialization: Object.freeze({ rowsRead: 9, rowsWritten: 17 }),
+  // Four scenario joins observe [5, 9, 13, 13] reads as session cardinality
+  // grows from one owner to five total sessions: exactly 40, or 10/join.
+  join: Object.freeze({ rowsRead: 10, rowsWritten: 3 }),
+  upgrade: Object.freeze({ rowsRead: 3, rowsWritten: 3 }),
+  hello: Object.freeze({ rowsRead: 16, rowsWritten: 4 }),
+  reconnectHello: Object.freeze({ rowsRead: 17, rowsWritten: 5 }),
+  command: Object.freeze({ rowsRead: 1, rowsWritten: 1 }),
+  finalSocketClose: Object.freeze({ rowsRead: 10, rowsWritten: 5 }),
+  expiryAlarmWithReleaseRetry: Object.freeze({ rowsRead: 22, rowsWritten: 8 }),
+});
+
+export function measuredRegistrySqlProfiles(cardinality) {
+  if (!Number.isSafeInteger(cardinality) || cardinality < 1) {
+    throw new TypeError('registry cardinality must be a positive integer');
+  }
+  // These formulas are the consumed-cursor profiles asserted by the local
+  // runtime integration suite. They deliberately use the day's maximum
+  // registry cardinality for every room, rather than an average cardinality.
+  return Object.freeze({
+    cardinality,
+    allocation: Object.freeze({ rowsRead: 14 * cardinality + 5, rowsWritten: 4 }),
+    activation: Object.freeze({ rowsRead: 3 * cardinality + 7, rowsWritten: 2 }),
+    markReleasePending: Object.freeze({ rowsRead: 3 * cardinality + 5, rowsWritten: 1 }),
+    release: Object.freeze({ rowsRead: 3 * cardinality + 5, rowsWritten: 1 }),
+    fallbackAlarm: Object.freeze({ rowsRead: 20 * cardinality + 20, rowsWritten: 0 }),
+    reuseAllocation: Object.freeze({ rowsRead: 12 * cardinality + 15, rowsWritten: 3 }),
+    reuseActivation: Object.freeze({ rowsRead: 3 * cardinality + 8, rowsWritten: 2 }),
+  });
+}
+
+export function measuredSqlProfiles({ registryCardinality = 50 } = {}) {
+  return Object.freeze({
+    registry: measuredRegistrySqlProfiles(registryCardinality),
+    room: MEASURED_ROOM_SQL_PROFILES,
+  });
+}
+
 function cost(overrides = {}) {
   return Object.freeze({ ...ZERO_COST, ...overrides });
 }
@@ -47,7 +86,10 @@ function cost(overrides = {}) {
 // corresponding index removals are included in indexRowsWritten.
 const BASE_OPERATIONS = Object.freeze({
   allocation: { countPerRoom: 1, costEach: cost({ rowsRead: 8, tableRowsWritten: 2, indexRowsWritten: 2, alarmRowsWritten: 1 }) },
-  initialization: { countPerRoom: 1, costEach: cost({ rowsRead: 1, tableRowsWritten: 3, indexRowsWritten: 4, alarmRowsWritten: 1 }) },
+  // The first initialization of each incarnation creates three SQL tables
+  // (9 cursor writes) and one due-action index (1 cursor write), then inserts
+  // the room/session/action rows (3 table + 4 index writes).
+  initialization: { countPerRoom: 1, costEach: cost({ rowsRead: 1, tableRowsWritten: 12, indexRowsWritten: 5, alarmRowsWritten: 1 }) },
   activation: { countPerRoom: 1, costEach: cost({ rowsRead: 2, tableRowsWritten: 2, alarmRowsWritten: 1 }) },
   'session join': { countPerRoom: 4, costEach: cost({ rowsRead: 16, tableRowsWritten: 1, indexRowsWritten: 2 }) },
   'WebSocket upgrade': { countPerRoom: 9, costEach: cost({ rowsRead: 2, tableRowsWritten: 1, indexRowsWritten: 2, alarmRowsWritten: 1 }) },
@@ -66,7 +108,7 @@ const BASE_OPERATIONS = Object.freeze({
   'terminal registry release': { countPerRoom: 1, costEach: cost({ rowsRead: 1, tableRowsWritten: 1, alarmRowsWritten: 1 }) },
   'room deleteAll': { countPerRoom: 1, costEach: cost({ indexRowsWritten: 12, alarmRowsWritten: 1, deletedRowsWritten: 7 }) },
   'reuse allocation': { countPerRoom: 1, costEach: cost({ rowsRead: 10, tableRowsWritten: 2, indexRowsWritten: 1, alarmRowsWritten: 1 }) },
-  'reuse initialization': { countPerRoom: 1, costEach: cost({ rowsRead: 1, tableRowsWritten: 3, indexRowsWritten: 4, alarmRowsWritten: 1 }) },
+  'reuse initialization': { countPerRoom: 1, costEach: cost({ rowsRead: 1, tableRowsWritten: 12, indexRowsWritten: 5, alarmRowsWritten: 1 }) },
   'reuse activation': { countPerRoom: 1, costEach: cost({ rowsRead: 2, tableRowsWritten: 2, alarmRowsWritten: 1 }) },
   'creation request retention cleanup': { countPerRoom: 1, costEach: cost({ rowsRead: 2, indexRowsWritten: 2, deletedRowsWritten: 2 }) },
 });
@@ -99,14 +141,40 @@ function validatedRegression(regression = {}) {
   return normalized;
 }
 
-export function simulatePlanBBudget({ roomsPerDay = 50, regression = {} } = {}) {
+export function simulatePlanBBudget({
+  roomsPerDay = 50,
+  regression = {},
+  sqlProfiles = measuredSqlProfiles({ registryCardinality: roomsPerDay }),
+} = {}) {
   if (!Number.isSafeInteger(roomsPerDay) || roomsPerDay <= 0) {
     throw new TypeError('roomsPerDay must be a positive integer');
   }
   const extra = validatedRegression(regression);
-  const operations = Object.fromEntries(
-    Object.entries(BASE_OPERATIONS).map(([name, operation]) => [name, operationWithTotal(operation)]),
-  );
+  const measuredReads = {
+    allocation: sqlProfiles.registry.allocation.rowsRead,
+    initialization: sqlProfiles.room.initialization.rowsRead,
+    activation: sqlProfiles.registry.activation.rowsRead,
+    'session join': sqlProfiles.room.join.rowsRead,
+    'WebSocket upgrade': sqlProfiles.room.upgrade.rowsRead,
+    'initial hello': sqlProfiles.room.hello.rowsRead,
+    'reconnect hello': sqlProfiles.room.reconnectHello.rowsRead,
+    'ordinary command': sqlProfiles.room.command.rowsRead,
+    'final-socket expiry schedule': sqlProfiles.room.finalSocketClose.rowsRead,
+    'begin room closing': sqlProfiles.room.expiryAlarmWithReleaseRetry.rowsRead,
+    'registry release fallback reservation': sqlProfiles.registry.markReleasePending.rowsRead,
+    'registry-release retry': sqlProfiles.registry.fallbackAlarm.rowsRead,
+    'terminal registry release': sqlProfiles.registry.release.rowsRead,
+    'reuse allocation': sqlProfiles.registry.reuseAllocation.rowsRead,
+    'reuse initialization': sqlProfiles.room.initialization.rowsRead,
+    'reuse activation': sqlProfiles.registry.reuseActivation.rowsRead,
+  };
+  const operations = Object.fromEntries(Object.entries(BASE_OPERATIONS).map(([name, operation]) => {
+    const measuredRowsRead = measuredReads[name] ?? operation.costEach.rowsRead;
+    return [name, operationWithTotal({
+      ...operation,
+      costEach: cost({ ...operation.costEach, rowsRead: measuredRowsRead }),
+    })];
+  }));
   operations['hypothetical per-command regression'] = operationWithTotal({
     countPerRoom: 1_000,
     costEach: cost({
@@ -183,6 +251,7 @@ export function simulatePlanBBudget({ roomsPerDay = 50, regression = {} } = {}) 
 
   return {
     scenario: { roomsPerDay, commandsPerRoom: 1_000, initialSocketsPerRoom: 5, reconnectsPerRoom: 4 },
+    sqlProfiles,
     requests,
     duration,
     rows,
