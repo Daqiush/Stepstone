@@ -1,33 +1,58 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 
-const at = process.argv.indexOf('--report');
-const file = at < 0 ? 'workers/test/results/dds-feasibility.json' : process.argv[at + 1];
-if (!file) throw new Error('Missing --report path');
-const report = JSON.parse(readFileSync(file, 'utf8')); // Missing report must fail.
-if (!report || typeof report !== 'object' || !report.benchmark) throw new Error('Missing benchmark report');
+import {
+  assertPlanBBudget,
+  simulatePlanBBudget,
+} from '../workers/src/room-foundation/budget-model.mjs';
 
-const rooms = 50;
-// Each unit denotes one SQL row read or written. An update reads its current
-// row then writes it. The retry reads twice before its successful release.
-const actions = {
-  allocation: { countPerRoom: 1, readsEach: 1, writesEach: 1 },
-  'owner-session insert': { countPerRoom: 1, readsEach: 1, writesEach: 1 },
-  'join-session insert': { countPerRoom: 4, readsEach: 1, writesEach: 1 },
-  'state-row update': { countPerRoom: 1000, readsEach: 1, writesEach: 1 },
-  'token rotation': { countPerRoom: 4, readsEach: 1, writesEach: 1 },
-  'scheduled-action insert/delete pair': { countPerRoom: 1, readsEach: 1, writesEach: 2 },
-  expiry: { countPerRoom: 1, readsEach: 1, writesEach: 1 },
-  'registry-release retry': { countPerRoom: 1, readsEach: 2, writesEach: 1 },
-  'reuse/tombstone cycle': { countPerRoom: 1, readsEach: 2, writesEach: 2 },
+function option(name) {
+  const index = process.argv.indexOf(name);
+  if (index < 0) return null;
+  const value = process.argv[index + 1];
+  if (!value || value.startsWith('--')) throw new Error(`Missing ${name} value`);
+  return value;
+}
+
+const roomsText = option('--rooms');
+const roomsPerDay = roomsText === null ? 50 : Number(roomsText);
+const modeled = assertPlanBBudget(simulatePlanBBudget({ roomsPerDay }));
+
+const budget = {
+  rooms: modeled.scenario.roomsPerDay,
+  actions: modeled.rows.operations,
+  requestsPerRoom: modeled.requests.billedPerRoom,
+  requestsPerDay: modeled.requests.billedPerDay,
+  handlerExecutionsPerRoom: modeled.duration.handlerExecutionsPerRoom,
+  durationGbSecondsPerDay: modeled.duration.gbSecondsPerDay,
+  readsPerRoom: modeled.rows.readPerRoom,
+  writesPerRoom: modeled.rows.writtenPerRoom,
+  readsPerDay: modeled.rows.readPerDay,
+  writesPerDay: modeled.rows.writtenPerDay,
+  indexWritesPerDay: modeled.rows.indexRowsWrittenPerDay,
+  alarmWritesPerDay: modeled.rows.alarmRowsWrittenPerDay,
+  deleteWritesPerDay: modeled.rows.deletedRowsWrittenPerDay,
+  storageBytes: modeled.storage.bytes,
+  targets: modeled.targets,
+  gates: modeled.gates,
+  model: 'Plan B SQLite table/index/alarm/delete accounting with bounded storage and exact Durable Object request billing.',
 };
-const perRoom = Object.values(actions).reduce((total, action) => ({
-  reads: total.reads + action.countPerRoom * action.readsEach,
-  writes: total.writes + action.countPerRoom * action.writesEach,
-}), { reads: 0, writes: 0 });
-report.budget = {
-  rooms, actions, readsPerRoom: perRoom.reads, writesPerRoom: perRoom.writes,
-  readsPerDay: perRoom.reads * rooms, writesPerDay: perRoom.writes * rooms,
-  model: 'SQL row counts: updates read then write one row; registry release retries one read before success.',
-};
-writeFileSync(file, `${JSON.stringify(report, null, 2)}\n`);
-console.log(`Simulated ${rooms} rooms/day: ${report.budget.readsPerDay} SQL row reads, ${report.budget.writesPerDay} SQL row writes`);
+
+const reportPath = option('--report');
+if (reportPath !== null) {
+  const report = JSON.parse(readFileSync(reportPath, 'utf8'));
+  if (!report || typeof report !== 'object' || !report.benchmark) {
+    throw new Error('Missing benchmark report');
+  }
+  report.budget = budget;
+  writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
+}
+
+const format = new Intl.NumberFormat('en-US', { maximumFractionDigits: 3 });
+console.log(
+  `Plan B ${format.format(roomsPerDay)} rooms/day: `
+  + `${format.format(budget.requestsPerDay)} billed requests, `
+  + `${format.format(budget.durationGbSecondsPerDay)} GB-s, `
+  + `${format.format(budget.readsPerDay)} rows read, `
+  + `${format.format(budget.writesPerDay)} rows written, `
+  + `${format.format(budget.storageBytes / (1024 ** 3))} GiB stored`,
+);

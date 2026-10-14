@@ -2,6 +2,11 @@ import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
 
 import { LIMITS, WEBSOCKET_CLOSE } from '../src/room-foundation/constants.mjs';
+import {
+  HANDLER_CATEGORIES,
+  createHandlerLatencyRecorder,
+  simulatePlanBBudget,
+} from '../src/room-foundation/budget-model.mjs';
 import { createRoomWorkerRuntime } from './helpers/room-worker-runtime.mjs';
 
 let runtime;
@@ -107,6 +112,36 @@ async function waitForRoom(room, predicate, message, timeoutMs = 3_000) {
   }
   assert.fail(`${message}: ${JSON.stringify(latest?.body)}`);
 }
+
+test('all billed handler categories stay below the controlled 500 ms envelope', async () => {
+  let now = 0;
+  const recorder = createHandlerLatencyRecorder({ now: () => now });
+
+  for (const category of HANDLER_CATEGORIES) {
+    const result = await recorder.measure(category, async () => {
+      now += 175;
+      // The second clock advance represents awaited cross-object work and is
+      // intentionally inside the initiating handler measurement.
+      await Promise.resolve();
+      now += 175;
+      return category;
+    });
+    assert.equal(result, category);
+  }
+
+  const summary = recorder.assertComplete();
+  assert.deepEqual(Object.keys(summary).sort(), [...HANDLER_CATEGORIES].sort());
+  for (const category of HANDLER_CATEGORIES) {
+    assert.equal(summary[category].milliseconds, 350);
+    assert.equal(summary[category].passed, true);
+  }
+
+  const modeledFallback = simulatePlanBBudget()
+    .rows.operations['registry release fallback reservation'];
+  assert.equal(modeledFallback.countPerRoom, 1);
+  assert.equal(modeledFallback.costEach.tableRowsWritten, 1);
+  assert.equal(modeledFallback.costEach.alarmRowsWritten, 1);
+});
 
 test('non-owner authentication cannot prevent owner timeout, terminal response loss, deletion, or safe reuse', async () => {
   const oldRoom = await createRoom('lifecycle_old_owner');

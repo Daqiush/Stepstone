@@ -4,6 +4,7 @@ import test, { after, before } from 'node:test';
 import { createHash, randomBytes } from 'node:crypto';
 
 import { WEBSOCKET_CLOSE } from '../src/room-foundation/constants.mjs';
+import { simulatePlanBBudget } from '../src/room-foundation/budget-model.mjs';
 import { createRoomWorkerRuntime } from './helpers/room-worker-runtime.mjs';
 
 let runtime;
@@ -390,6 +391,10 @@ test('normal mutations update exactly one room_state row and no command table or
     table: statement.table,
     rowsWritten: statement.rowsWritten,
   })), [{ operation: 'UPDATE', table: 'room_state', rowsWritten: 1 }]);
+  const modeled = simulatePlanBBudget().rows.operations['ordinary command'].costEach;
+  assert.equal(modeled.rowsRead, measured.lastCommand.totalRowsRead);
+  assert.equal(modeled.tableRowsWritten, measured.lastCommand.totalRowsWritten);
+  assert.equal(modeled.indexRowsWritten, 0);
   const projectedRowsRead = measured.lastCommand.totalRowsRead * 50_000
     + measured.lastWake.totalRowsRead * 50;
   assert.ok(projectedRowsRead <= 250_000, `${projectedRowsRead} projected rows read`);
