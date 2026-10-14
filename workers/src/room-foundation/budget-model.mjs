@@ -2,16 +2,16 @@ const GIB = 1024 ** 3;
 
 export const HANDLER_CATEGORIES = Object.freeze([
   'allocation',
-  'initialization',
-  'activation',
+  'initializeActivate',
   'join',
   'upgrade',
   'initialHello',
   'reconnectHello',
   'ordinaryCommand',
   'alarm',
-  'releaseCalls',
-  'reuse',
+  'releaseWorkflow',
+  'reuseWorkflow',
+  'fallbackReconcile',
 ]);
 
 export const PLAN_B_TARGETS = Object.freeze({
@@ -271,8 +271,9 @@ export function assertPlanBBudget(report) {
   return report;
 }
 
-export function createHandlerLatencyRecorder({ now, limitMs = 500 } = {}) {
+export function createHandlerLatencyRecorder({ now, logicalNow = () => 0, limitMs = 500 } = {}) {
   if (typeof now !== 'function') throw new TypeError('A controlled clock is required');
+  if (typeof logicalNow !== 'function') throw new TypeError('logicalNow must be a function');
   if (!Number.isFinite(limitMs) || limitMs <= 0) throw new TypeError('limitMs must be positive');
   const observed = new Map();
 
@@ -280,9 +281,12 @@ export function createHandlerLatencyRecorder({ now, limitMs = 500 } = {}) {
     async measure(category, handler) {
       if (!HANDLER_CATEGORIES.includes(category)) throw new TypeError(`Unknown handler category: ${category}`);
       if (typeof handler !== 'function') throw new TypeError('handler must be a function');
+      const logicalStartedAt = await logicalNow();
       const startedAt = now();
       const value = await handler();
-      const milliseconds = now() - startedAt;
+      const endedAt = now();
+      const logicalEndedAt = await logicalNow();
+      const milliseconds = (endedAt - startedAt) + (logicalEndedAt - logicalStartedAt);
       if (!Number.isFinite(milliseconds) || milliseconds < 0) {
         throw new TypeError(`Invalid controlled duration for ${category}`);
       }

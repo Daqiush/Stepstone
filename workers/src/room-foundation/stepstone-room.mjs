@@ -28,6 +28,7 @@ import {
   emptySqlAccounting,
   executeAccountedSql,
 } from './sql-accounting.mjs';
+import { createTestLatencyController } from './test-latency.mjs';
 
 const REQUEST_ID = /^[A-Za-z0-9_-]{16,64}$/u;
 const REQUEST_HASH = /^[0-9a-f]{64}$/u;
@@ -123,6 +124,7 @@ export class StepstoneRoom {
   constructor(ctx, env) {
     this.ctx = ctx;
     this.env = env;
+    this.testLatency = createTestLatencyController(env);
     const rawSql = ctx?.storage?.sql;
     this.sqlProfiler = rawSql && env?.ROOM_FOUNDATION_TEST === 'true'
       ? createSqlProfileRecorder(rawSql) : null;
@@ -422,6 +424,7 @@ export class StepstoneRoom {
       || request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
       return new Response(null, { status: 404 });
     }
+    this.testLatency?.advance('upgrade');
     const incarnation = Number(match[2]);
     const identity = this.cachedRoomIdentity();
     if (!identity
@@ -673,6 +676,7 @@ export class StepstoneRoom {
   }
 
   async processRegistryRelease(now) {
+    this.testLatency?.advance('releaseWorkflow');
     const action = row(this.sql.exec(
       `SELECT * FROM pending_actions
        WHERE action_id = ? AND kind = 'registry-release' LIMIT 1`,
@@ -745,6 +749,7 @@ export class StepstoneRoom {
     if (!validCodeIncarnation(code, incarnation) || !validTime(now)) {
       return failure('INVALID_REQUEST');
     }
+    this.testLatency?.advance('fallbackReconcile');
     const identity = this.roomIdentity();
     if (!identity
       || identity.state.roomCode !== code
@@ -784,6 +789,7 @@ export class StepstoneRoom {
   }
 
   async consumeDueActions(now) {
+    this.testLatency?.advance('alarm');
     if (this.deleted) return result({ consumed: true });
     const due = rows(this.sql.exec(
       'SELECT * FROM pending_actions WHERE due_at <= ? ORDER BY due_at, action_id', now,
@@ -848,6 +854,7 @@ export class StepstoneRoom {
       || !validHash(tokenHash)
       || !validIdentity(proposedSessionId)
       || !validTime(now)) return failure('INVALID_REQUEST');
+    this.testLatency?.advance('initialize');
 
     const fault = this.env?.ROOM_FOUNDATION_TEST === 'true'
       ? await this.ctx.storage.get('roomInitializationFault') : null;
@@ -952,6 +959,7 @@ export class StepstoneRoom {
       || (requestedRole !== 'player' && requestedRole !== 'spectator')) {
       return failure('INVALID_REQUEST');
     }
+    this.testLatency?.advance('join');
     if (this.deleted || !this.commandState) return failure('ROOM_NOT_FOUND');
 
     let createdAuthority = null;
@@ -1132,6 +1140,7 @@ export class StepstoneRoom {
   }
 
   async handleCommand(socket, attachment, frame) {
+    this.testLatency?.advance('command');
     let command;
     let requestHash;
     try {
@@ -1361,6 +1370,7 @@ export class StepstoneRoom {
   }
 
   async authenticateSocket(socket, attachment, frame, identity) {
+    this.testLatency?.advance('helloAuth');
     let parsed;
     try { parsed = parseHelloFrame(frame); }
     catch (error) {
@@ -1685,6 +1695,7 @@ export class StepstoneRoom {
       || !validTime(leaseExpiresAt)) {
       return { initialized: false };
     }
+    this.testLatency?.advance('fallbackInspect');
     if (this.deleted) return { initialized: false };
     if (this.env?.ROOM_FOUNDATION_TEST === 'true') {
       const fault = await this.ctx.storage.get('registryInspectionFault');
@@ -1867,6 +1878,20 @@ export class StepstoneRoom {
     }
     if (!validCodeIncarnation(code, incarnation)) return failure('INVALID_REQUEST');
     return result(this.sqlProfiler.snapshot());
+  }
+
+  testConfigureLatency({ code, incarnation, delays } = {}) {
+    if (!validCodeIncarnation(code, incarnation)
+      || !this.testLatency
+      || !this.testLatency.configure({ delays })) return failure('INVALID_REQUEST');
+    return result({ configured: true });
+  }
+
+  testInspectLatency({ code, incarnation } = {}) {
+    if (!validCodeIncarnation(code, incarnation) || !this.testLatency) {
+      return failure('INVALID_REQUEST');
+    }
+    return result(this.testLatency.snapshot());
   }
 
   testInspectCommandAccounting({ code, incarnation } = {}) {

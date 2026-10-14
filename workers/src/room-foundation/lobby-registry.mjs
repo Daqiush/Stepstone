@@ -1,5 +1,6 @@
 import { LIMITS } from './constants.mjs';
 import { createSqlProfileRecorder } from './sql-accounting.mjs';
+import { createTestLatencyController } from './test-latency.mjs';
 
 const REGISTRY_LEASE_MS = 60_000;
 const RECONCILE_RETRY_MS = 1_000;
@@ -84,6 +85,7 @@ export class LobbyRegistry {
   constructor(ctx, env) {
     this.ctx = ctx;
     this.env = env;
+    this.testLatency = createTestLatencyController(env);
     const rawSql = ctx?.storage?.sql;
     this.sqlProfiler = rawSql && env?.ROOM_FOUNDATION_TEST === 'true'
       ? createSqlProfileRecorder(rawSql) : null;
@@ -250,6 +252,7 @@ export class LobbyRegistry {
 
   async allocateAt({ requestId, requestHash, now } = {}) {
     if (!assertRequest(requestId, requestHash) || !validTime(now)) return failure('INVALID_REQUEST');
+    this.testLatency?.advance('allocation');
     await this.reconcile(now);
     const leaseId = crypto.randomUUID();
     const leaseExpiresAt = now + REGISTRY_LEASE_MS;
@@ -311,6 +314,7 @@ export class LobbyRegistry {
 
   lookupActive({ code } = {}) {
     if (typeof code !== 'string' || !ROOM_CODE.test(code)) return failure('ROOM_NOT_FOUND');
+    this.testLatency?.advance('lookupActive');
     const current = row(this.sql.exec(
       "SELECT code, incarnation FROM room_codes WHERE code = ? AND status = 'ACTIVE'", code,
     ));
@@ -325,6 +329,7 @@ export class LobbyRegistry {
       || !assertLeaseId(leaseId) || !validTime(now)) return failure('INVALID_REQUEST');
     const normalizedResponse = normalizeCreateResponse(response, { requestId, code, incarnation });
     if (normalizedResponse === null) return failure('INVALID_REQUEST');
+    this.testLatency?.advance('activation');
     const responseJson = JSON.stringify(normalizedResponse);
 
     return this.ctx.storage.transaction(async () => {
@@ -378,6 +383,7 @@ export class LobbyRegistry {
 
   async markReleasePendingAt({ code, incarnation, now } = {}, { failAfterMark = false } = {}) {
     if (!assertCodeIncarnation(code, incarnation) || !validTime(now)) return failure('INVALID_REQUEST');
+    this.testLatency?.advance('markReleasePending');
     return this.ctx.storage.transaction(async () => {
       const current = row(this.sql.exec('SELECT * FROM room_codes WHERE code = ?', code));
       if (!current) return failure('INVALID_STATE');
@@ -415,6 +421,7 @@ export class LobbyRegistry {
 
   async releaseAt({ code, incarnation, now } = {}) {
     if (!assertCodeIncarnation(code, incarnation) || !validTime(now)) return failure('INVALID_REQUEST');
+    this.testLatency?.advance('release');
     return this.ctx.storage.transaction(async () => {
       const current = row(this.sql.exec('SELECT * FROM room_codes WHERE code = ?', code));
       if (!current) return failure('INVALID_STATE');
@@ -440,6 +447,7 @@ export class LobbyRegistry {
 
   async reconcile(now = Date.now()) {
     if (!validTime(now)) return failure('INVALID_REQUEST');
+    this.testLatency?.advance('reconcile');
     const expired = rows(this.sql.exec(
       `SELECT rooms.code, rooms.incarnation, rooms.lease_id, rooms.lease_expires_at,
         requests.request_id
@@ -682,6 +690,16 @@ export class LobbyRegistry {
       return failure('ROOM_NOT_FOUND');
     }
     return result(this.sqlProfiler.snapshot());
+  }
+
+  testConfigureLatency(input) {
+    if (!this.testLatency || !this.testLatency.configure(input)) return failure('INVALID_REQUEST');
+    return result({ configured: true });
+  }
+
+  testInspectLatency() {
+    if (!this.testLatency) return failure('ROOM_NOT_FOUND');
+    return result(this.testLatency.snapshot());
   }
 
   testSeedBudgetCardinality({ count, now } = {}) {
