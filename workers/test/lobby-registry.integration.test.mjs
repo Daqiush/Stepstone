@@ -238,11 +238,13 @@ test('keeps exact provisioning state for a malformed inspection response', async
 
 test('reconciles an expired lease through the Durable Object alarm handler', async () => {
   const id = requestId('alarmrun');
+  const controlledNow = now + 30 * 60_000;
   const allocation = await ok('allocateAt', {
-    requestId: id, requestHash: requestHash('a'), now: Date.now() - 59_500,
+    requestId: id, requestHash: requestHash('a'), now: controlledNow,
   });
   const response = createResponse(id, allocation);
   await ok('setRoomInitialization', { ...allocation, response });
+  await ok('runAlarmAt', { now: allocation.leaseExpiresAt });
 
   const inspection = await waitForInspection((state) => (
     roomRow(state, allocation)?.status === 'ACTIVE'
@@ -252,8 +254,9 @@ test('reconciles an expired lease through the Durable Object alarm handler', asy
 
 test('reconstructs with a provisioning alarm due and subsequently reconciles it', async () => {
   const id = requestId('restartdue');
+  const controlledNow = now + 45 * 60_000;
   const allocation = await ok('allocateAt', {
-    requestId: id, requestHash: requestHash('b'), now: Date.now() - 59_500,
+    requestId: id, requestHash: requestHash('b'), now: controlledNow,
   });
   const response = createResponse(id, allocation);
   await ok('setRoomInitialization', { ...allocation, response });
@@ -261,11 +264,111 @@ test('reconstructs with a provisioning alarm due and subsequently reconciles it'
   assert.equal(beforeRestart.alarmAt, allocation.leaseExpiresAt);
   await runtime.restartRegistry();
 
-  await runtime.wait(750);
+  await ok('runAlarmAt', { now: allocation.leaseExpiresAt });
   const inspection = await waitForInspection((state) => (
     roomRow(state, allocation)?.status === 'ACTIVE'
   ));
   assert.equal(creationRequest(inspection, id).status, 'ACTIVE');
+});
+
+test('terminal release atomically replaces its fallback alarm with earliest live work', async () => {
+  const isolated = await createRoomWorkerRuntime();
+  const call = async (action, input = {}) => {
+    const response = await isolated.registry(action, input);
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+    assert.equal(response.body.ok, true, JSON.stringify(response.body));
+    return response.body.value;
+  };
+  try {
+    const markAt = Date.now() + 10 * 60_000;
+    const id = requestId('alarmclear');
+    const allocation = await call('allocateAt', {
+      requestId: id,
+      requestHash: requestHash('c'),
+      now: markAt - 2,
+    });
+    const response = createResponse(id, allocation);
+    await call('activateAt', {
+      requestId: id,
+      code: allocation.code,
+      incarnation: allocation.incarnation,
+      leaseId: allocation.leaseId,
+      response,
+      now: markAt - 1,
+    });
+    await call('markReleasePendingAt', {
+      code: allocation.code,
+      incarnation: allocation.incarnation,
+      now: markAt,
+    });
+    let inspection = await call('inspect');
+    assert.equal(inspection.alarmAt, markAt + 60_000);
+
+    assert.deepEqual(await call('releaseAt', {
+      code: allocation.code,
+      incarnation: allocation.incarnation,
+      now: markAt + 1,
+    }), { result: 'RELEASED' });
+    inspection = await call('inspect');
+    const replay = creationRequest(inspection, id);
+    assert.equal(inspection.alarmAt, replay.expires_at);
+    assert.notEqual(inspection.alarmAt, markAt + 60_000);
+
+    await call('reconcile', { now: replay.expires_at });
+    inspection = await call('inspect');
+    assert.equal(inspection.alarmAt, null);
+  } finally {
+    await isolated.close();
+  }
+});
+
+test('mark-release transition and fallback alarm roll back together at the crash window', async () => {
+  const isolated = await createRoomWorkerRuntime();
+  const call = async (action, input = {}) => {
+    const response = await isolated.registry(action, input);
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+    assert.equal(response.body.ok, true, JSON.stringify(response.body));
+    return response.body.value;
+  };
+  try {
+    const activatedAt = Date.now() + 20 * 60_000;
+    const id = requestId('markatomic');
+    const allocation = await call('allocateAt', {
+      requestId: id,
+      requestHash: requestHash('d'),
+      now: activatedAt - 1,
+    });
+    const response = createResponse(id, allocation);
+    await call('activateAt', {
+      requestId: id,
+      code: allocation.code,
+      incarnation: allocation.incarnation,
+      leaseId: allocation.leaseId,
+      response,
+      now: activatedAt,
+    });
+    const before = await call('inspect');
+    await call('setReleaseFault', {
+      code: allocation.code,
+      incarnation: allocation.incarnation,
+      type: 'after-mark-before-alarm',
+    });
+
+    await assert.rejects(isolated.request('/api/rooms/__test/registry', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        action: 'markReleasePending',
+        code: allocation.code,
+        incarnation: allocation.incarnation,
+      }),
+    }), /injected registry mark\/alarm crash window/u);
+    const after = await call('inspect');
+    assert.equal(roomRow(after, allocation).status, 'ACTIVE');
+    assert.equal(after.alarmAt, before.alarmAt);
+  } finally {
+    await isolated.close();
+  }
 });
 
 test('resets an already-due provisioning alarm to now before reconciliation', async () => {
@@ -279,7 +382,7 @@ test('resets an already-due provisioning alarm to now before reconciliation', as
   const recovery = await ok('recoverAlarmAt', { now: allocation.leaseExpiresAt });
   assert.equal(recovery.beforeAlarmAt, allocation.leaseExpiresAt);
   assert.ok(recovery.beforeAlarmAt <= recovery.recoveryNow);
-  assert.ok(recovery.afterAlarmAt <= recovery.wallClockNow);
+  assert.ok(recovery.afterAlarmAt <= recovery.wallClockNow, JSON.stringify(recovery));
 
   const inspection = await waitForInspection((state) => (
     roomRow(state, allocation)?.status === 'ACTIVE'

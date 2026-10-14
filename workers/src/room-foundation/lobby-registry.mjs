@@ -356,31 +356,37 @@ export class LobbyRegistry {
   }
 
   async markReleasePending({ code, incarnation } = {}) {
-    const marked = this.markReleasePendingAt({ code, incarnation, now: Date.now() });
-    if (marked?.ok) await this.scheduleAlarm();
-    if (this.env?.ROOM_FOUNDATION_TEST === 'true' && marked?.ok) {
-      const fault = await this.ctx.storage.get('registryReleaseFault');
-      const exact = fault?.code === code && fault?.incarnation === incarnation;
-      if (exact && fault.type === 'after-mark-before-response') {
-        await this.ctx.storage.delete('registryReleaseFault');
-        throw new Error('injected registry mark response loss');
-      }
+    const fault = this.env?.ROOM_FOUNDATION_TEST === 'true'
+      ? await this.ctx.storage.get('registryReleaseFault') : null;
+    const exact = fault?.code === code && fault?.incarnation === incarnation;
+    const failAfterMark = exact && fault.type === 'after-mark-before-alarm';
+    if (failAfterMark) await this.ctx.storage.delete('registryReleaseFault');
+    const marked = await this.markReleasePendingAt(
+      { code, incarnation, now: Date.now() },
+      { failAfterMark },
+    );
+    if (marked?.ok && exact && fault.type === 'after-mark-before-response') {
+      await this.ctx.storage.delete('registryReleaseFault');
+      throw new Error('injected registry mark response loss');
     }
     return marked;
   }
 
-  markReleasePendingAt({ code, incarnation, now } = {}) {
+  async markReleasePendingAt({ code, incarnation, now } = {}, { failAfterMark = false } = {}) {
     if (!assertCodeIncarnation(code, incarnation) || !validTime(now)) return failure('INVALID_REQUEST');
-    return this.ctx.storage.transactionSync(() => {
+    return this.ctx.storage.transaction(async () => {
       const current = row(this.sql.exec('SELECT * FROM room_codes WHERE code = ?', code));
       if (!current) return failure('INVALID_STATE');
       if (current.incarnation !== incarnation) return failure('INCARNATION_MISMATCH');
-      if (current.status === 'RELEASE_PENDING') return result({ status: 'RELEASE_PENDING' });
-      if (current.status !== 'ACTIVE') return failure('INVALID_STATE');
-      this.sql.exec(
-        "UPDATE room_codes SET status = 'RELEASE_PENDING', updated_at = ? WHERE code = ?",
-        now, code,
-      );
+      if (current.status !== 'RELEASE_PENDING') {
+        if (current.status !== 'ACTIVE') return failure('INVALID_STATE');
+        this.sql.exec(
+          "UPDATE room_codes SET status = 'RELEASE_PENDING', updated_at = ? WHERE code = ?",
+          now, code,
+        );
+        if (failAfterMark) throw new Error('injected registry mark/alarm crash window');
+      }
+      await this.scheduleAlarm();
       return result({ status: 'RELEASE_PENDING' });
     });
   }
@@ -393,7 +399,7 @@ export class LobbyRegistry {
         if (fault.type === 'release-once') await this.ctx.storage.delete('registryReleaseFault');
         throw new Error('injected registry release failure');
       }
-      const released = this.releaseAt({ code, incarnation, now: Date.now() });
+      const released = await this.releaseAt({ code, incarnation, now: Date.now() });
       if (exact && fault.type === 'after-release-before-response') {
         await this.ctx.storage.delete('registryReleaseFault');
         throw new Error('injected terminal registry response loss');
@@ -403,20 +409,27 @@ export class LobbyRegistry {
     return this.releaseAt({ code, incarnation, now: Date.now() });
   }
 
-  releaseAt({ code, incarnation, now } = {}) {
+  async releaseAt({ code, incarnation, now } = {}) {
     if (!assertCodeIncarnation(code, incarnation) || !validTime(now)) return failure('INVALID_REQUEST');
-    return this.ctx.storage.transactionSync(() => {
+    return this.ctx.storage.transaction(async () => {
       const current = row(this.sql.exec('SELECT * FROM room_codes WHERE code = ?', code));
       if (!current) return failure('INVALID_STATE');
-      if (current.incarnation > incarnation) return result({ result: 'SUPERSEDED' });
+      if (current.incarnation > incarnation) {
+        await this.scheduleAlarm();
+        return result({ result: 'SUPERSEDED' });
+      }
       if (current.incarnation < incarnation) return failure('INCARNATION_MISMATCH');
-      if (current.status === 'TOMBSTONE') return result({ result: 'RELEASED' });
+      if (current.status === 'TOMBSTONE') {
+        await this.scheduleAlarm();
+        return result({ result: 'RELEASED' });
+      }
       if (current.status !== 'RELEASE_PENDING') return failure('INVALID_STATE');
       this.sql.exec(
         `UPDATE room_codes SET status = 'TOMBSTONE', lease_id = NULL, lease_expires_at = NULL,
           tombstone_until = ?, updated_at = ? WHERE code = ?`,
         now + LIMITS.registryTombstoneMs, now, code,
       );
+      await this.scheduleAlarm();
       return result({ result: 'RELEASED' });
     });
   }
@@ -555,6 +568,11 @@ export class LobbyRegistry {
     return this.reconcile(now);
   }
 
+  testAlarmAt({ now } = {}) {
+    if (this.env.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
+    return this.reconcile(now);
+  }
+
   async testScheduleRetryWithoutAlarm({ retryAt } = {}) {
     if (this.env.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
     if (!validTime(retryAt)) return failure('INVALID_REQUEST');
@@ -591,9 +609,7 @@ export class LobbyRegistry {
 
   async testMarkReleasePendingAt(input) {
     if (this.env.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
-    const marked = this.markReleasePendingAt(input);
-    if (marked?.ok) await this.scheduleAlarm();
-    return marked;
+    return this.markReleasePendingAt(input);
   }
 
   testReleaseAt(input) {
@@ -607,6 +623,7 @@ export class LobbyRegistry {
       || ![
         'release-once',
         'release-always',
+        'after-mark-before-alarm',
         'after-mark-before-response',
         'after-release-before-response',
         null,

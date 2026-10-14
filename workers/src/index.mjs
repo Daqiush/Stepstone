@@ -26,6 +26,7 @@ class LobbyRegistry extends DurableObject {
   testReleaseAt(input) { return this.implementation.testReleaseAt(input); }
   testSetReleaseFault(input) { return this.implementation.testSetReleaseFault(input); }
   testReconcile(input) { return this.implementation.testReconcile(input); }
+  testAlarmAt(input) { return this.implementation.testAlarmAt(input); }
   testScheduleRetryWithoutAlarm(input) {
     return this.implementation.testScheduleRetryWithoutAlarm(input);
   }

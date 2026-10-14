@@ -211,14 +211,9 @@ test('non-owner authentication cannot prevent owner timeout, terminal response l
     now: reuseNow + 1,
   })).body.value, { result: 'SUPERSEDED' });
 
-  authenticated.socket.send({
-    v: 1,
-    type: 'command',
-    id: id('delayed_old_command'),
-    name: 'foundation.increment',
-    payload: { expectedRevision: 0 },
-  });
-  await runtime.wait(25);
+  const delayedCommandRejection = await authenticated.socket.closed();
+  assert.equal(delayedCommandRejection.code, WEBSOCKET_CLOSE.ROOM_EXPIRED);
+  assert.equal(authenticated.socket.raw.readyState, WebSocket.CLOSED);
   const newInspection = await inspectRoom({
     roomCode: nextRoom.code,
     incarnation: nextRoom.incarnation,
@@ -577,6 +572,86 @@ test('a malformed due handshake action is physically deleted without an alarm lo
   assert.equal(cleaned.body.value.alarmAt, null);
 });
 
+test('room expiry reserves one slot outside the 64 ordinary-action allowance', async () => {
+  const room = await createRoom('reserved_expiry_owner');
+  const authenticated = await authenticate(room, room);
+  const seeded = await runtime.room('seedRoomPendingActions', {
+    code: room.roomCode,
+    incarnation: room.incarnation,
+    count: LIMITS.pendingActions - 1,
+    dueAt: Date.now() + LIMITS.roomExpiryMs,
+  });
+  assert.equal(seeded.status, 200, JSON.stringify(seeded.body));
+
+  authenticated.socket.close();
+  await waitForRoom(
+    room,
+    (inspection) => inspection.body?.value?.pendingActions
+      ?.some((action) => action.actionId === 'room-expiry'),
+    'final close did not schedule the reserved room expiry',
+  );
+
+  const socket = await runtime.openWebSocket(wsPath(room));
+  const admitted = await waitForRoom(
+    room,
+    (inspection) => inspection.body?.value?.pendingActions?.length === LIMITS.pendingActions + 1,
+    '64th ordinary action was not admitted beside the reserved expiry',
+  );
+  assert.equal(admitted.body.value.pendingActions.filter(
+    (action) => action.actionId !== 'room-expiry',
+  ).length, LIMITS.pendingActions);
+
+  const nextReconnectToken = token();
+  socket.send({
+    v: 1,
+    type: 'hello',
+    id: id('reserved_expiry_rotation'),
+    reconnectToken: authenticated.session.reconnectToken,
+    nextReconnectToken,
+  });
+  const reply = JSON.parse(await socket.nextMessage());
+  assert.equal(reply.type, 'hello-ok');
+  const connected = await inspectRoom(room);
+  assert.equal(connected.body.value.pendingActions.length, LIMITS.pendingActions - 1);
+  assert.equal(connected.body.value.pendingActions.some(
+    (action) => action.actionId === 'room-expiry',
+  ), false);
+  socket.close();
+});
+
+test('concurrent reconnects cannot exceed the reserved-plus-ordinary hard bound', async () => {
+  const room = await createRoom('reserved_expiry_race_owner');
+  const authenticated = await authenticate(room, room);
+  const seeded = await runtime.room('seedRoomPendingActions', {
+    code: room.roomCode,
+    incarnation: room.incarnation,
+    count: LIMITS.pendingActions - 1,
+    dueAt: Date.now() + LIMITS.roomExpiryMs,
+  });
+  assert.equal(seeded.status, 200, JSON.stringify(seeded.body));
+  authenticated.socket.close();
+  await waitForRoom(
+    room,
+    (inspection) => inspection.body?.value?.pendingActions
+      ?.some((action) => action.actionId === 'room-expiry'),
+    'race setup did not schedule the reserved room expiry',
+  );
+
+  const attempts = await Promise.allSettled([
+    runtime.openWebSocket(wsPath(room)),
+    runtime.openWebSocket(wsPath(room)),
+  ]);
+  const accepted = attempts.filter((attempt) => attempt.status === 'fulfilled');
+  const rejected = attempts.filter((attempt) => attempt.status === 'rejected');
+  assert.equal(accepted.length, 1);
+  assert.equal(rejected.length, 1);
+  assert.match(rejected[0].reason.message, /upgrade failed/u);
+  const bounded = await inspectRoom(room);
+  assert.equal(bounded.body.value.pendingActions.length, LIMITS.pendingActions + 1);
+  assert.equal(bounded.body.value.sockets.length, 1);
+  accepted[0].value.close();
+});
+
 test('final authenticated socket close clears authority and schedules expiry at ordinary action capacity', async () => {
   const room = await createRoom('capacity_close_owner');
   const authenticated = await authenticate(room, room);
@@ -606,4 +681,8 @@ test('final authenticated socket close clears authority and schedules expiry at 
   assert.equal(closed.body.value.alarmAt, Math.min(
     ...closed.body.value.pendingActions.map((action) => action.dueAt),
   ));
+  await assert.rejects(runtime.openWebSocket(wsPath(room)), /upgrade failed/u);
+  const rejected = await inspectRoom(room);
+  assert.equal(rejected.body.value.pendingActions.length, LIMITS.pendingActions + 1);
+  assert.equal(rejected.body.value.sockets.length, 0);
 });

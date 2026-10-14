@@ -205,6 +205,7 @@ async function registryTestBridge(request, env) {
     case 'releaseAt': rpcResult = await registry.testReleaseAt(input); break;
     case 'setReleaseFault': rpcResult = await registry.testSetReleaseFault(input); break;
     case 'reconcile': rpcResult = await registry.testReconcile(input); break;
+    case 'runAlarmAt': rpcResult = await registry.testAlarmAt(input); break;
     case 'scheduleRetryWithoutAlarm': {
       rpcResult = await registry.testScheduleRetryWithoutAlarm(input);
       break;

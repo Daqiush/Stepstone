@@ -429,8 +429,16 @@ export class StepstoneRoom {
     if (this.unauthenticatedSocketCount() >= LIMITS.unauthenticatedSockets) {
       return publicErrorResponse('SERVICE_CAPACITY');
     }
-    const pendingCount = row(this.sql.exec('SELECT COUNT(*) AS count FROM pending_actions')).count;
-    if (pendingCount >= LIMITS.pendingActions) return publicErrorResponse('SERVICE_CAPACITY');
+    const pendingCounts = row(this.sql.exec(
+      `SELECT COUNT(*) AS total,
+        COALESCE(SUM(CASE WHEN action_id = ? THEN 0 ELSE 1 END), 0) AS ordinary
+       FROM pending_actions`,
+      ROOM_EXPIRY_ACTION_ID,
+    ));
+    if (pendingCounts.ordinary >= LIMITS.pendingActions
+      || pendingCounts.total >= LIMITS.pendingActions + 1) {
+      return publicErrorResponse('SERVICE_CAPACITY');
+    }
 
     const connectionId = crypto.randomUUID();
     const acceptedAt = Date.now();
