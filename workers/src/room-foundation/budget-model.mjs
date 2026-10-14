@@ -1,4 +1,6 @@
-const GIB = 1024 ** 3;
+import { PUBLIC_ROOM_ROUTER_DO_CALL_GRAPH } from './router-call-graph.mjs';
+
+const GB = 1_000_000_000;
 
 export const HANDLER_CATEGORIES = Object.freeze([
   'allocation',
@@ -19,7 +21,7 @@ export const PLAN_B_TARGETS = Object.freeze({
   durationGbSecondsPerDay: 9_100,
   rowsReadPerDay: 250_000,
   rowsWrittenPerDay: 70_000,
-  storageBytes: 3.5 * GIB,
+  storageBytes: 3.5 * GB,
 });
 
 export const PLAN_B_FREE_ALLOWANCES = Object.freeze({
@@ -27,7 +29,7 @@ export const PLAN_B_FREE_ALLOWANCES = Object.freeze({
   durationGbSecondsPerDay: 13_000,
   rowsReadPerDay: 5_000_000,
   rowsWrittenPerDay: 100_000,
-  storageBytes: 5 * GIB,
+  storageBytes: 5 * GB,
 });
 
 const ZERO_COST = Object.freeze({
@@ -39,40 +41,56 @@ const ZERO_COST = Object.freeze({
 });
 
 export const MEASURED_ROOM_SQL_PROFILES = Object.freeze({
-  initialization: Object.freeze({ rowsRead: 9, rowsWritten: 17 }),
-  // Four scenario joins observe [5, 9, 13, 13] reads as session cardinality
-  // grows from one owner to five total sessions: exactly 40, or 10/join.
-  join: Object.freeze({ rowsRead: 10, rowsWritten: 3 }),
-  upgrade: Object.freeze({ rowsRead: 3, rowsWritten: 3 }),
-  hello: Object.freeze({ rowsRead: 16, rowsWritten: 4 }),
-  reconnectHello: Object.freeze({ rowsRead: 17, rowsWritten: 5 }),
+  initialization: Object.freeze({ rowsRead: 12, rowsWritten: 23 }),
+  // Four scenario joins observe [8, 13, 18, 19] reads as the compact
+  // authority cache is refreshed: exactly 58, or 14.5/join.
+  join: Object.freeze({ rowsRead: 14.5, rowsWritten: 5 }),
+  upgrade: Object.freeze({ rowsRead: 2, rowsWritten: 3 }),
+  hello: Object.freeze({ rowsRead: 22, rowsWritten: 5 }),
+  reconnectHello: Object.freeze({ rowsRead: 23, rowsWritten: 6 }),
   command: Object.freeze({ rowsRead: 1, rowsWritten: 1 }),
-  finalSocketClose: Object.freeze({ rowsRead: 10, rowsWritten: 5 }),
-  expiryAlarmWithReleaseRetry: Object.freeze({ rowsRead: 22, rowsWritten: 8 }),
+  wakeReconstruction: Object.freeze({ rowsRead: 2, rowsWritten: 0 }),
+  finalSocketClose: Object.freeze({ rowsRead: 16, rowsWritten: 6 }),
+  expiryAlarmWithReleaseRetry: Object.freeze({ rowsRead: 19, rowsWritten: 8 }),
 });
 
 export function measuredRegistrySqlProfiles(cardinality) {
-  if (!Number.isSafeInteger(cardinality) || cardinality < 1) {
+  const roomCodeCount = Number.isSafeInteger(cardinality)
+    ? cardinality : cardinality?.roomCodeCount;
+  const creationRequestCount = Number.isSafeInteger(cardinality)
+    ? cardinality : cardinality?.creationRequestCount;
+  if (!Number.isSafeInteger(roomCodeCount) || roomCodeCount < 1
+    || !Number.isSafeInteger(creationRequestCount) || creationRequestCount < roomCodeCount) {
     throw new TypeError('registry cardinality must be a positive integer');
   }
-  // These formulas are the consumed-cursor profiles asserted by the local
-  // runtime integration suite. They deliberately use the day's maximum
-  // registry cardinality for every room, rather than an average cardinality.
+  // These consumed-cursor profiles are asserted by the local runtime suite at
+  // the day's maximum overlapping cardinality, never an average. The indexed
+  // due scans are constant; allocation still counts every retained replay row
+  // for the enforced capacity check.
   return Object.freeze({
-    cardinality,
-    allocation: Object.freeze({ rowsRead: 14 * cardinality + 5, rowsWritten: 4 }),
-    activation: Object.freeze({ rowsRead: 3 * cardinality + 7, rowsWritten: 2 }),
-    markReleasePending: Object.freeze({ rowsRead: 3 * cardinality + 5, rowsWritten: 1 }),
-    release: Object.freeze({ rowsRead: 3 * cardinality + 5, rowsWritten: 1 }),
-    fallbackAlarm: Object.freeze({ rowsRead: 20 * cardinality + 20, rowsWritten: 0 }),
-    reuseAllocation: Object.freeze({ rowsRead: 12 * cardinality + 15, rowsWritten: 3 }),
-    reuseActivation: Object.freeze({ rowsRead: 3 * cardinality + 8, rowsWritten: 2 }),
+    cardinality: roomCodeCount,
+    roomCodeCount,
+    creationRequestCount,
+    lookupActive: Object.freeze({ rowsRead: 1, rowsWritten: 0 }),
+    allocation: Object.freeze({ rowsRead: creationRequestCount + 29, rowsWritten: 9 }),
+    activation: Object.freeze({ rowsRead: 11, rowsWritten: 7 }),
+    markReleasePending: Object.freeze({ rowsRead: 9, rowsWritten: 4 }),
+    release: Object.freeze({ rowsRead: 9, rowsWritten: 4 }),
+    fallbackAlarm: Object.freeze({ rowsRead: 22, rowsWritten: 0 }),
+    reuseAllocation: Object.freeze({ rowsRead: creationRequestCount + 29, rowsWritten: 8 }),
+    reuseActivation: Object.freeze({ rowsRead: 11, rowsWritten: 7 }),
   });
 }
 
-export function measuredSqlProfiles({ registryCardinality = 50 } = {}) {
+export function measuredSqlProfiles({
+  registryRoomCodeCount = 50,
+  registryCreationRequestCount = 100,
+} = {}) {
   return Object.freeze({
-    registry: measuredRegistrySqlProfiles(registryCardinality),
+    registry: measuredRegistrySqlProfiles({
+      roomCodeCount: registryRoomCodeCount,
+      creationRequestCount: registryCreationRequestCount,
+    }),
     room: MEASURED_ROOM_SQL_PROFILES,
   });
 }
@@ -85,32 +103,34 @@ function cost(overrides = {}) {
 // deletes remain visible. deletedRowsWritten counts deleted table rows; the
 // corresponding index removals are included in indexRowsWritten.
 const BASE_OPERATIONS = Object.freeze({
-  allocation: { countPerRoom: 1, costEach: cost({ rowsRead: 8, tableRowsWritten: 2, indexRowsWritten: 2, alarmRowsWritten: 1 }) },
-  // The first initialization of each incarnation creates three SQL tables
-  // (9 cursor writes) and one due-action index (1 cursor write), then inserts
-  // the room/session/action rows (3 table + 4 index writes).
-  initialization: { countPerRoom: 1, costEach: cost({ rowsRead: 1, tableRowsWritten: 12, indexRowsWritten: 5, alarmRowsWritten: 1 }) },
-  activation: { countPerRoom: 1, costEach: cost({ rowsRead: 2, tableRowsWritten: 2, alarmRowsWritten: 1 }) },
-  'session join': { countPerRoom: 4, costEach: cost({ rowsRead: 16, tableRowsWritten: 1, indexRowsWritten: 2 }) },
+  allocation: { countPerRoom: 1, costEach: cost({ rowsRead: 8, tableRowsWritten: 2, indexRowsWritten: 7, alarmRowsWritten: 1 }) },
+  // The first initialization creates the room schema, authority-cache triggers,
+  // and authoritative room/session/action/cache rows. The write split below is
+  // the consumed runtime profile, including schema and secondary-index writes.
+  initialization: { countPerRoom: 1, costEach: cost({ rowsRead: 1, tableRowsWritten: 18, indexRowsWritten: 5, alarmRowsWritten: 1 }) },
+  activation: { countPerRoom: 1, costEach: cost({ rowsRead: 2, tableRowsWritten: 2, indexRowsWritten: 5, alarmRowsWritten: 1 }) },
+  'join registry lookup': { countPerRoom: 4, costEach: cost({ rowsRead: 1 }) },
+  'session join': { countPerRoom: 4, costEach: cost({ rowsRead: 16, tableRowsWritten: 3, indexRowsWritten: 2 }) },
+  'WebSocket registry lookup': { countPerRoom: 9, costEach: cost({ rowsRead: 1 }) },
   'WebSocket upgrade': { countPerRoom: 9, costEach: cost({ rowsRead: 2, tableRowsWritten: 1, indexRowsWritten: 2, alarmRowsWritten: 1 }) },
   'initial hello': { countPerRoom: 5, costEach: cost({ rowsRead: 16, tableRowsWritten: 1, indexRowsWritten: 4, alarmRowsWritten: 1, deletedRowsWritten: 1 }) },
   'owner-auth action cancellation': { countPerRoom: 1, costEach: cost({ indexRowsWritten: 2, deletedRowsWritten: 1 }) },
   'reconnect hello': { countPerRoom: 4, costEach: cost({ rowsRead: 16, tableRowsWritten: 1, indexRowsWritten: 4, alarmRowsWritten: 1, deletedRowsWritten: 1 }) },
   'expiry cancellation': { countPerRoom: 1, costEach: cost({ rowsRead: 1, tableRowsWritten: 1, indexRowsWritten: 2, deletedRowsWritten: 1 }) },
   'ordinary command': { countPerRoom: 1_000, costEach: cost({ rowsRead: 1, tableRowsWritten: 1 }) },
-  'final-socket expiry schedule': { countPerRoom: 1, costEach: cost({ rowsRead: 8, tableRowsWritten: 3, indexRowsWritten: 2, alarmRowsWritten: 1 }) },
+  'final-socket expiry schedule': { countPerRoom: 1, costEach: cost({ rowsRead: 8, tableRowsWritten: 4, indexRowsWritten: 2, alarmRowsWritten: 1 }) },
   'begin room closing': { countPerRoom: 1, costEach: cost({ rowsRead: 12, tableRowsWritten: 2, indexRowsWritten: 4, alarmRowsWritten: 1, deletedRowsWritten: 1 }) },
   // markReleasePending reserves the registry's independent stale-release
   // alarm, even though the normal room retry resolves before it fires.
-  'registry release fallback reservation': { countPerRoom: 1, costEach: cost({ rowsRead: 1, tableRowsWritten: 1, alarmRowsWritten: 1 }) },
+  'registry release fallback reservation': { countPerRoom: 1, costEach: cost({ rowsRead: 1, tableRowsWritten: 1, indexRowsWritten: 3, alarmRowsWritten: 1 }) },
   'release phase checkpoint': { countPerRoom: 1, costEach: cost({ rowsRead: 1, tableRowsWritten: 1, alarmRowsWritten: 1 }) },
   'registry-release retry': { countPerRoom: 1, costEach: cost({ rowsRead: 3, tableRowsWritten: 1, indexRowsWritten: 2, alarmRowsWritten: 1 }) },
-  'terminal registry release': { countPerRoom: 1, costEach: cost({ rowsRead: 1, tableRowsWritten: 1, alarmRowsWritten: 1 }) },
-  'room deleteAll': { countPerRoom: 1, costEach: cost({ indexRowsWritten: 12, alarmRowsWritten: 1, deletedRowsWritten: 7 }) },
-  'reuse allocation': { countPerRoom: 1, costEach: cost({ rowsRead: 10, tableRowsWritten: 2, indexRowsWritten: 1, alarmRowsWritten: 1 }) },
-  'reuse initialization': { countPerRoom: 1, costEach: cost({ rowsRead: 1, tableRowsWritten: 12, indexRowsWritten: 5, alarmRowsWritten: 1 }) },
-  'reuse activation': { countPerRoom: 1, costEach: cost({ rowsRead: 2, tableRowsWritten: 2, alarmRowsWritten: 1 }) },
-  'creation request retention cleanup': { countPerRoom: 1, costEach: cost({ rowsRead: 2, indexRowsWritten: 2, deletedRowsWritten: 2 }) },
+  'terminal registry release': { countPerRoom: 1, costEach: cost({ rowsRead: 1, tableRowsWritten: 1, indexRowsWritten: 3, alarmRowsWritten: 1 }) },
+  'room deleteAll': { countPerRoom: 1, costEach: cost({ indexRowsWritten: 12, alarmRowsWritten: 1, deletedRowsWritten: 8 }) },
+  'reuse allocation': { countPerRoom: 1, costEach: cost({ rowsRead: 10, tableRowsWritten: 2, indexRowsWritten: 6, alarmRowsWritten: 1 }) },
+  'reuse initialization': { countPerRoom: 1, costEach: cost({ rowsRead: 1, tableRowsWritten: 18, indexRowsWritten: 5, alarmRowsWritten: 1 }) },
+  'reuse activation': { countPerRoom: 1, costEach: cost({ rowsRead: 2, tableRowsWritten: 2, indexRowsWritten: 5, alarmRowsWritten: 1 }) },
+  'creation request retention cleanup': { countPerRoom: 1, costEach: cost({ rowsRead: 2, indexRowsWritten: 6, deletedRowsWritten: 2 }) },
 });
 
 function operationWithTotal(operation) {
@@ -129,6 +149,10 @@ function gate(name, actual, target, allowance) {
   return Object.freeze({ name, actual, target, allowance, passed: actual <= target });
 }
 
+function rounded(value) {
+  return Number(value.toFixed(6));
+}
+
 function validatedRegression(regression = {}) {
   const normalized = {
     commandTableRowsWritten: regression.commandTableRowsWritten ?? 0,
@@ -144,7 +168,10 @@ function validatedRegression(regression = {}) {
 export function simulatePlanBBudget({
   roomsPerDay = 50,
   regression = {},
-  sqlProfiles = measuredSqlProfiles({ registryCardinality: roomsPerDay }),
+  sqlProfiles = measuredSqlProfiles({
+    registryRoomCodeCount: roomsPerDay,
+    registryCreationRequestCount: roomsPerDay * 2,
+  }),
 } = {}) {
   if (!Number.isSafeInteger(roomsPerDay) || roomsPerDay <= 0) {
     throw new TypeError('roomsPerDay must be a positive integer');
@@ -154,7 +181,9 @@ export function simulatePlanBBudget({
     allocation: sqlProfiles.registry.allocation.rowsRead,
     initialization: sqlProfiles.room.initialization.rowsRead,
     activation: sqlProfiles.registry.activation.rowsRead,
+    'join registry lookup': sqlProfiles.registry.lookupActive.rowsRead,
     'session join': sqlProfiles.room.join.rowsRead,
+    'WebSocket registry lookup': sqlProfiles.registry.lookupActive.rowsRead,
     'WebSocket upgrade': sqlProfiles.room.upgrade.rowsRead,
     'initial hello': sqlProfiles.room.hello.rowsRead,
     'reconnect hello': sqlProfiles.room.reconnectHello.rowsRead,
@@ -186,9 +215,27 @@ export function simulatePlanBBudget({
 
   const websocketMessages = 5 + 1_000 + 4;
   const websocketMessageBillingGroups = Math.ceil(websocketMessages / 20);
-  const billedPerRoom = 3 + 4 + 9 + websocketMessageBillingGroups + 2 + 3 + 3;
-  const handlerExecutionsPerRoom = 3 + 4 + 9 + websocketMessages + 2 + 3 + 3;
-  const durationGbSecondsPerDay = roomsPerDay * handlerExecutionsPerRoom * 0.5 * 0.128;
+  const createRpcs = PUBLIC_ROOM_ROUTER_DO_CALL_GRAPH.create.length;
+  const joinLookupRpcs = 4;
+  const joinRoomRpcs = 4 * (PUBLIC_ROOM_ROUTER_DO_CALL_GRAPH.join.length - 1);
+  const websocketLookupRpcs = 9;
+  const websocketRoomRequests = 9
+    * (PUBLIC_ROOM_ROUTER_DO_CALL_GRAPH.websocket.length - 1);
+  const billedPerRoom = createRpcs + joinLookupRpcs + joinRoomRpcs
+    + websocketLookupRpcs + websocketRoomRequests + websocketMessageBillingGroups + 2 + 3 + 3;
+  const requestTriggeredHandlerExecutionsPerRoom = createRpcs + joinLookupRpcs + joinRoomRpcs
+    + websocketLookupRpcs + websocketRoomRequests
+    + websocketMessages + 2 + 3 + 3;
+  const websocketCloseHandlersPerRoom = 9;
+  const handlerExecutionsPerRoom = requestTriggeredHandlerExecutionsPerRoom
+    + websocketCloseHandlersPerRoom;
+  operations['worst-case room wake reconstruction'] = operationWithTotal({
+    countPerRoom: handlerExecutionsPerRoom,
+    costEach: cost({ rowsRead: sqlProfiles.room.wakeReconstruction.rowsRead }),
+  });
+  const durationGbSecondsPerDay = rounded(
+    roomsPerDay * handlerExecutionsPerRoom * 0.5 * 0.128,
+  );
 
   const readPerRoom = sumOperations(operations, 'rowsRead');
   const tableRowsWrittenPerRoom = sumOperations(operations, 'tableRowsWritten');
@@ -206,9 +253,11 @@ export function simulatePlanBBudget({
 
   const requests = {
     perRoomFormula: {
-      createRpcs: 3,
-      joinRpcs: 4,
-      websocketConnections: 9,
+      createRpcs,
+      joinLookupRpcs,
+      joinRoomRpcs,
+      websocketLookupRpcs,
+      websocketRoomRequests,
       websocketMessages,
       websocketMessageBillingGroups,
       alarmInvocations: 2,
@@ -219,6 +268,12 @@ export function simulatePlanBBudget({
     billedPerDay: billedPerRoom * roomsPerDay,
   };
   const duration = {
+    requestTriggeredHandlerExecutionsPerRoom,
+    requestTriggeredHandlerExecutionsPerDay: requestTriggeredHandlerExecutionsPerRoom * roomsPerDay,
+    requestTriggeredGbSecondsPerDay: rounded(
+      roomsPerDay * requestTriggeredHandlerExecutionsPerRoom * 0.5 * 0.128,
+    ),
+    websocketCloseHandlersPerRoom,
     handlerExecutionsPerRoom,
     handlerExecutionsPerDay: handlerExecutionsPerRoom * roomsPerDay,
     activeSecondsPerHandler: 0.5,
@@ -240,7 +295,7 @@ export function simulatePlanBBudget({
     writtenPerRoom,
     writtenPerDay: writtenPerRoom * roomsPerDay,
   };
-  const storage = { bytes: storageBytes, gibibytes: storageBytes / GIB };
+  const storage = { bytes: storageBytes, gigabytes: storageBytes / GB };
   const gates = [
     gate('billedRequests', requests.billedPerDay, PLAN_B_TARGETS.billedRequestsPerDay, PLAN_B_FREE_ALLOWANCES.billedRequestsPerDay),
     gate('duration', duration.gbSecondsPerDay, PLAN_B_TARGETS.durationGbSecondsPerDay, PLAN_B_FREE_ALLOWANCES.durationGbSecondsPerDay),
@@ -264,7 +319,47 @@ export function simulatePlanBBudget({
 }
 
 export function assertPlanBBudget(report) {
-  const failed = report?.gates?.filter((item) => item.passed !== true) ?? [];
+  const expectedNames = ['billedRequests', 'duration', 'rowsRead', 'rowsWritten', 'storage'];
+  const expectedActuals = {
+    billedRequests: report?.requests?.billedPerDay,
+    duration: report?.duration?.gbSecondsPerDay,
+    rowsRead: report?.rows?.readPerDay,
+    rowsWritten: report?.rows?.writtenPerDay,
+    storage: report?.storage?.bytes,
+  };
+  const expectedTargets = {
+    billedRequests: PLAN_B_TARGETS.billedRequestsPerDay,
+    duration: PLAN_B_TARGETS.durationGbSecondsPerDay,
+    rowsRead: PLAN_B_TARGETS.rowsReadPerDay,
+    rowsWritten: PLAN_B_TARGETS.rowsWrittenPerDay,
+    storage: PLAN_B_TARGETS.storageBytes,
+  };
+  const expectedAllowances = {
+    billedRequests: PLAN_B_FREE_ALLOWANCES.billedRequestsPerDay,
+    duration: PLAN_B_FREE_ALLOWANCES.durationGbSecondsPerDay,
+    rowsRead: PLAN_B_FREE_ALLOWANCES.rowsReadPerDay,
+    rowsWritten: PLAN_B_FREE_ALLOWANCES.rowsWrittenPerDay,
+    storage: PLAN_B_FREE_ALLOWANCES.storageBytes,
+  };
+  if (report === null || typeof report !== 'object' || !Array.isArray(report.gates)
+    || report.gates.length !== expectedNames.length) {
+    throw new TypeError('Invalid or missing Plan B budget gates');
+  }
+  const names = new Set();
+  for (const item of report.gates) {
+    if (item === null || typeof item !== 'object' || !expectedNames.includes(item.name)
+      || names.has(item.name) || !Number.isFinite(item.actual) || item.actual < 0
+      || !Number.isFinite(item.target) || item.target < 0
+      || !Number.isFinite(item.allowance) || item.allowance < 0
+      || item.actual !== expectedActuals[item.name]
+      || item.target !== expectedTargets[item.name]
+      || item.allowance !== expectedAllowances[item.name]
+      || typeof item.passed !== 'boolean' || item.passed !== (item.actual <= item.target)) {
+      throw new TypeError('Invalid or missing Plan B budget gates');
+    }
+    names.add(item.name);
+  }
+  const failed = report.gates.filter((item) => item.passed !== true);
   if (failed.length > 0) {
     throw new Error(`Plan B budget exceeded: ${failed.map((item) => item.name).join(', ')}`);
   }

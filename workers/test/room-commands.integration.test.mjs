@@ -415,7 +415,7 @@ test('wake reconstructs cached room and authority once and fails closed on malfo
   assert.equal(reconstructed.cache.ready, true);
   assert.equal(reconstructed.cache.revision, 1);
   assert.equal(reconstructed.cache.authorityCount, 1);
-  assert.ok(reconstructed.lastWake.totalRowsRead <= 17);
+  assert.equal(reconstructed.lastWake.totalRowsRead, 2);
   assert.deepEqual(reconstructed.lastCommand.statements, []);
 
   const corrupted = await runtime.room('corruptRoomCommandCache', {
@@ -429,6 +429,44 @@ test('wake reconstructs cached room and authority once and fails closed on malfo
   const persisted = await inspect(room);
   assert.equal(persisted.roomState.revision, 1);
   assert.equal(persisted.roomState.foundationCounter, 1);
+});
+
+test('repeated forced wakes keep auth and commands correct with a constant private authority read', async () => {
+  const room = await createRoom('bounded_wake_owner');
+  for (const [role, label] of [
+    ['player', 'bounded_wake_east'],
+    ['player', 'bounded_wake_south'],
+    ['player', 'bounded_wake_west'],
+    ['spectator', 'bounded_wake_watch'],
+  ]) await join(room, role, label);
+
+  let authenticated = await authenticate(room, room);
+  for (let revision = 0; revision < 3; revision += 1) {
+    await runtime.restartRoom(room.roomCode, room.incarnation);
+    authenticated.socket.send(increment(id('bounded_wake_command'), revision));
+    const reply = await parseMessage(authenticated.socket);
+    assert.equal(reply.type, 'reply');
+    assert.equal(reply.payload.revision, revision + 1);
+    publicSnapshot(reply.payload.snapshot, revision + 1, revision + 1);
+    await parseMessage(authenticated.socket);
+    const measured = await accounting(room);
+    assert.equal(
+      measured.lastWake.totalRowsRead,
+      simulatePlanBBudget().rows.operations['worst-case room wake reconstruction'].costEach.rowsRead,
+    );
+
+    await runtime.restartRoom(room.roomCode, room.incarnation);
+    const replacedSocket = authenticated.socket;
+    const replacement = await authenticate(room, authenticated.session);
+    assert.equal((await replacedSocket.closed()).code, WEBSOCKET_CLOSE.SESSION_REPLACED);
+    assert.equal(replacement.hello.payload.revision, revision + 1);
+    publicSnapshot(replacement.hello.payload.snapshot, revision + 1, revision + 1);
+    authenticated = replacement;
+    assert.equal(
+      (await accounting(room)).lastWake.totalRowsRead,
+      simulatePlanBBudget().rows.operations['worst-case room wake reconstruction'].costEach.rowsRead,
+    );
+  }
 });
 
 test('two sockets racing the same expected revision commit exactly once', async () => {

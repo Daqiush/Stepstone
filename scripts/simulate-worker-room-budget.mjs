@@ -22,6 +22,8 @@ const budget = {
   actions: modeled.rows.operations,
   requestsPerRoom: modeled.requests.billedPerRoom,
   requestsPerDay: modeled.requests.billedPerDay,
+  requestTriggeredHandlerExecutionsPerRoom:
+    modeled.duration.requestTriggeredHandlerExecutionsPerRoom,
   handlerExecutionsPerRoom: modeled.duration.handlerExecutionsPerRoom,
   durationGbSecondsPerDay: modeled.duration.gbSecondsPerDay,
   readsPerRoom: modeled.rows.readPerRoom,
@@ -34,7 +36,7 @@ const budget = {
   storageBytes: modeled.storage.bytes,
   targets: modeled.targets,
   gates: modeled.gates,
-  model: 'Plan B consumed-cursor SQL profiles with cardinality-scaled registry scans, explicit table/index/alarm/delete accounting, bounded storage, and exact Durable Object request billing.',
+  model: 'Plan B consumed-cursor SQL profiles at 50 room rows and 100 retained replay rows, explicit table/index/alarm/delete accounting, one two-row room reconstruction per handler, decimal-GB storage, and exact Durable Object request billing.',
 };
 
 const reportPath = option('--report');
@@ -54,5 +56,5 @@ console.log(
   + `${format.format(budget.durationGbSecondsPerDay)} GB-s, `
   + `${format.format(budget.readsPerDay)} rows read, `
   + `${format.format(budget.writesPerDay)} rows written, `
-  + `${format.format(budget.storageBytes / (1024 ** 3))} GiB stored`,
+  + `${format.format(budget.storageBytes / 1_000_000_000)} GB stored`,
 );

@@ -4,9 +4,77 @@ import { test } from 'node:test';
 
 import {
   LobbyRegistry,
+  PUBLIC_ROOM_ROUTER_DO_CALL_GRAPH,
   StepstoneRoom,
   fetchWorker,
 } from '../src/room-foundation/router.mjs';
+
+test('published router call graph matches actual public Durable Object fan-out', async () => {
+  const calls = [];
+  const registry = {
+    allocate: async () => {
+      calls.push('registry.allocate');
+      return { ok: true, value: {
+        status: 'PROVISIONING', code: '123', incarnation: 7,
+        leaseId: 'lease_identifier_1234', leaseExpiresAt: Date.now() + 60_000,
+      } };
+    },
+    activate: async ({ response }) => {
+      calls.push('registry.activate');
+      return { ok: true, value: { response } };
+    },
+    lookupActive: async () => {
+      calls.push('registry.lookupActive');
+      return { ok: true, value: { code: '123', incarnation: 7 } };
+    },
+  };
+  const room = {
+    initialize: async ({ requestId }) => {
+      calls.push('room.initialize');
+      return { ok: true, value: { response: {
+        v: 1, requestId, roomCode: '123', incarnation: 7,
+        sessionId: 'session_identifier_1234', role: 'OWNER', seat: 'N',
+      } } };
+    },
+    join: async ({ requestId }) => {
+      calls.push('room.join');
+      return { ok: true, value: { response: {
+        v: 1, requestId, roomCode: '123', incarnation: 7,
+        sessionId: 'joined_session_id_1234', role: 'PLAYER', seat: 'E',
+      } } };
+    },
+    fetch: async () => {
+      calls.push('room.fetch');
+      return new Response(null, { status: 200 });
+    },
+  };
+  const binding = (stub) => ({ idFromName: (name) => name, get: () => stub });
+  const env = {
+    ROOM_FOUNDATION_TEST: 'true',
+    LOBBY_REGISTRY: binding(registry),
+    STEPSTONE_ROOM: binding(room),
+  };
+  const token = 'A'.repeat(43);
+  const post = (path, body) => fetchWorker(new Request(`https://example.test${path}`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+  }), env);
+
+  await post('/api/rooms', {
+    v: 1, requestId: 'create_request_id_1234', displayName: 'North', reconnectToken: token,
+  });
+  assert.deepEqual(calls.splice(0), PUBLIC_ROOM_ROUTER_DO_CALL_GRAPH.create);
+  await post('/api/rooms/123/join', {
+    v: 1, requestId: 'join_request_id_12345', displayName: 'East',
+    reconnectToken: token, requestedRole: 'player',
+  });
+  assert.deepEqual(calls.splice(0), PUBLIC_ROOM_ROUTER_DO_CALL_GRAPH.join);
+
+  const websocketRequest = new Request('https://example.test/api/rooms/123/7/ws', {
+    method: 'GET', headers: { upgrade: 'websocket' },
+  });
+  await fetchWorker(websocketRequest, env);
+  assert.deepEqual(calls.splice(0), PUBLIC_ROOM_ROUTER_DO_CALL_GRAPH.websocket);
+});
 
 function request(path, method = 'POST') {
   return new Request(`https://example.test${path}`, { method });

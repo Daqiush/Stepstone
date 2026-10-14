@@ -17,6 +17,7 @@ function sqlTable(statement) {
   if (/\broom_state\b/u.test(normalized)) return 'room_state';
   if (/\bsessions\b/u.test(normalized)) return 'sessions';
   if (/\bpending_actions\b/u.test(normalized)) return 'pending_actions';
+  if (/\bauthority_cache\b/u.test(normalized)) return 'authority_cache';
   if (/\broom_codes\b/u.test(normalized)) return 'room_codes';
   if (/\bcreation_requests\b/u.test(normalized)) return 'creation_requests';
   return 'other';

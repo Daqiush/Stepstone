@@ -259,11 +259,12 @@ test('budget simulation counts all 50 room lifecycles and appends row totals', (
     assert.equal(result.status, 0, result.stderr);
     const { budget } = require(file);
     assert.equal(budget.rooms, 50);
-    assert.equal(budget.requestsPerDay, 3750);
-    assert.equal(budget.handlerExecutionsPerRoom, 1033);
-    assert.equal(budget.durationGbSecondsPerDay, 3305.6);
-    assert.equal(budget.readsPerDay, 211700);
-    assert.equal(budget.writesPerDay, 60850);
+    assert.equal(budget.requestsPerDay, 4400);
+    assert.equal(budget.requestTriggeredHandlerExecutionsPerRoom, 1046);
+    assert.equal(budget.handlerExecutionsPerRoom, 1055);
+    assert.equal(budget.durationGbSecondsPerDay, 3376);
+    assert.equal(budget.readsPerDay, 189200);
+    assert.equal(budget.writesPerDay, 63450);
     assert.equal(budget.actions['ordinary command'].countPerRoom, 1000);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

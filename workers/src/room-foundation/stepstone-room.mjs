@@ -171,7 +171,32 @@ export class StepstoneRoom {
           kind TEXT NOT NULL,
           payload_json TEXT NOT NULL
         )`);
+        this.sql.exec(`CREATE TABLE IF NOT EXISTS authority_cache (
+          singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+          incarnation INTEGER NOT NULL,
+          authorities_json TEXT NOT NULL
+        )`);
         this.sql.exec('CREATE INDEX IF NOT EXISTS pending_actions_due_at ON pending_actions(due_at)');
+        for (const event of ['INSERT', 'UPDATE', 'DELETE']) {
+          this.sql.exec(`CREATE TRIGGER IF NOT EXISTS sessions_authority_after_${event.toLowerCase()}
+            AFTER ${event} ON sessions BEGIN
+              INSERT OR REPLACE INTO authority_cache
+                (singleton, incarnation, authorities_json)
+              SELECT 1, COALESCE(MAX(incarnation), 0),
+                COALESCE(json_group_array(json_object(
+                  'sessionId', session_id,
+                  'incarnation', incarnation,
+                  'role', role,
+                  'seat', seat,
+                  'connectionId', current_connection_id,
+                  'connectionEpoch', connection_epoch,
+                  'expiresAt', expires_at
+                )), '[]')
+              FROM (SELECT session_id, incarnation, role, seat,
+                    current_connection_id, connection_epoch, expires_at
+                    FROM sessions ORDER BY rowid);
+            END`);
+        }
       });
       this.rebuildCommandAuthority();
       await this.reconcileWebSockets(Date.now());
@@ -197,7 +222,11 @@ export class StepstoneRoom {
       const stored = accountedRow(
         this.sql,
         accounting,
-        'SELECT * FROM room_state LIMIT 1',
+        `SELECT state.*, cache.incarnation AS authority_incarnation,
+                cache.authorities_json
+         FROM room_state AS state
+         LEFT JOIN authority_cache AS cache ON cache.singleton = 1
+         LIMIT 1`,
       );
       if (!stored) {
         this.commandState = null;
@@ -223,34 +252,54 @@ export class StepstoneRoom {
         && isValidCommandCache(state.recentCommands);
       if (!validState) throw new TypeError('invalid persisted command state');
 
-      const persistedSessions = accountedRows(
-        this.sql,
-        accounting,
-        `SELECT session_id, incarnation, role, seat, current_connection_id,
-                connection_epoch, expires_at FROM sessions ORDER BY rowid`,
-      );
+      let persistedSessions;
+      if (typeof stored.authorities_json === 'string') {
+        persistedSessions = JSON.parse(stored.authorities_json);
+      } else {
+        // One-time upgrade path for a pre-cache object. New objects populate
+        // the cache atomically through the session mutation triggers.
+        persistedSessions = accountedRows(
+          this.sql,
+          accounting,
+          `SELECT session_id AS sessionId, incarnation, role, seat,
+                  current_connection_id AS connectionId,
+                  connection_epoch AS connectionEpoch, expires_at AS expiresAt
+           FROM sessions ORDER BY rowid`,
+        );
+        executeAccountedSql(
+          this.sql,
+          accounting,
+          `INSERT OR REPLACE INTO authority_cache
+            (singleton, incarnation, authorities_json) VALUES (1, ?, ?)`,
+          state.incarnation,
+          JSON.stringify(persistedSessions),
+        );
+      }
+      if (!Array.isArray(persistedSessions)
+        || stored.authority_incarnation !== state.incarnation) {
+        throw new TypeError('invalid persisted authority cache');
+      }
       const authorities = new Map();
       for (const session of persistedSessions) {
-        const validSession = validIdentity(session.session_id)
+        const validSession = validIdentity(session.sessionId)
           && session.incarnation === state.incarnation
           && ['OWNER', 'PLAYER', 'SPECTATOR'].includes(session.role)
           && (session.seat === null || ['N', 'E', 'S', 'W'].includes(session.seat))
-          && (session.current_connection_id === null
-            || validIdentity(session.current_connection_id))
-          && Number.isSafeInteger(session.connection_epoch)
-          && session.connection_epoch >= 0
-          && (session.expires_at === null || validTime(session.expires_at));
-        if (!validSession || authorities.has(session.session_id)) {
+          && (session.connectionId === null || validIdentity(session.connectionId))
+          && Number.isSafeInteger(session.connectionEpoch)
+          && session.connectionEpoch >= 0
+          && (session.expiresAt === null || validTime(session.expiresAt));
+        if (!validSession || authorities.has(session.sessionId)) {
           throw new TypeError('invalid persisted session authority');
         }
-        authorities.set(session.session_id, {
-          sessionId: session.session_id,
+        authorities.set(session.sessionId, {
+          sessionId: session.sessionId,
           incarnation: session.incarnation,
           role: session.role,
           seat: session.seat,
-          connectionId: session.current_connection_id,
-          connectionEpoch: session.connection_epoch,
-          expiresAt: session.expires_at,
+          connectionId: session.connectionId,
+          connectionEpoch: session.connectionEpoch,
+          expiresAt: session.expiresAt,
         });
       }
       this.commandState = state;
@@ -2175,6 +2224,7 @@ export class StepstoneRoom {
         'bootstrap_request_hash', 'bootstrap_response_json', 'role', 'seat',
       ]],
       ['pending_actions', ['action_id', 'kind', 'payload_json']],
+      ['authority_cache', ['authorities_json']],
     ];
     let plaintextOccurrences = 0;
     let digestOutsideCredentialOccurrences = 0;

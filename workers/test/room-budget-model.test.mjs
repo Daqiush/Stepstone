@@ -7,6 +7,8 @@ import test from 'node:test';
 
 import {
   MEASURED_ROOM_SQL_PROFILES,
+  PLAN_B_TARGETS,
+  assertPlanBBudget,
   createHandlerLatencyRecorder,
   measuredRegistrySqlProfiles,
   simulatePlanBBudget,
@@ -18,20 +20,48 @@ test('models the approved Plan B request and duration envelope exactly', () => {
   assert.equal(report.scenario.roomsPerDay, 50);
   assert.deepEqual(report.requests.perRoomFormula, {
     createRpcs: 3,
-    joinRpcs: 4,
-    websocketConnections: 9,
+    joinLookupRpcs: 4,
+    joinRoomRpcs: 4,
+    websocketLookupRpcs: 9,
+    websocketRoomRequests: 9,
     websocketMessages: 1_009,
     websocketMessageBillingGroups: 51,
     alarmInvocations: 2,
     releaseRpcs: 3,
     reuseRpcs: 3,
   });
-  assert.equal(report.requests.billedPerRoom, 75);
-  assert.equal(report.requests.billedPerDay, 3_750);
-  assert.equal(report.duration.handlerExecutionsPerRoom, 1_033);
+  assert.equal(report.requests.billedPerRoom, 88);
+  assert.equal(report.requests.billedPerDay, 4_400);
+  assert.equal(report.duration.requestTriggeredHandlerExecutionsPerRoom, 1_046);
+  assert.equal(report.duration.websocketCloseHandlersPerRoom, 9);
+  assert.equal(report.duration.handlerExecutionsPerRoom, 1_055);
   assert.equal(report.duration.activeSecondsPerHandler, 0.5);
   assert.equal(report.duration.memoryGb, 0.128);
-  assert.equal(report.duration.gbSecondsPerDay, 3_305.6);
+  assert.equal(report.duration.requestTriggeredGbSecondsPerDay, 3_347.2);
+  assert.equal(report.duration.gbSecondsPerDay, 3_376);
+  assert.equal(PLAN_B_TARGETS.storageBytes, 3_500_000_000);
+  assert.equal(report.storage.gigabytes, report.storage.bytes / 1_000_000_000);
+});
+
+test('fails closed when any budget gate is missing or malformed', () => {
+  const valid = simulatePlanBBudget();
+  assert.equal(assertPlanBBudget(valid), valid);
+  for (const malformed of [
+    undefined,
+    {},
+    { gates: [] },
+    { gates: valid.gates.slice(1) },
+    { gates: valid.gates.map((gate) => ({ ...gate, passed: undefined })) },
+    { gates: valid.gates.map((gate) => ({ ...gate, actual: Number.NaN })) },
+    { ...valid, gates: valid.gates.map((gate, index) => (
+      index === 0 ? { ...gate, target: gate.target + 1 } : gate
+    )) },
+    { ...valid, gates: valid.gates.map((gate, index) => (
+      index === 0 ? { ...gate, actual: gate.actual - 1 } : gate
+    )) },
+  ]) {
+    assert.throws(() => assertPlanBBudget(malformed), /invalid|missing|exceeded/iu);
+  }
 });
 
 test('counts current table, index, alarm, retention, and deleteAll write costs', () => {
@@ -60,37 +90,53 @@ test('counts current table, index, alarm, retention, and deleteAll write costs',
     tableRowsWritten: 0,
     indexRowsWritten: 12,
     alarmRowsWritten: 1,
-    deletedRowsWritten: 7,
+    deletedRowsWritten: 8,
   });
   assert.equal(
     report.rows.operations['creation request retention cleanup'].total.deletedRowsWritten
       + report.rows.operations['creation request retention cleanup'].total.indexRowsWritten,
-    4,
+    8,
   );
   assert.ok(report.rows.operations['registry release fallback reservation']);
-  assert.equal(report.rows.writtenPerRoom, 1_217);
-  assert.equal(report.rows.writtenPerDay, 60_850);
-  assert.equal(report.rows.readPerDay, 211_700);
-  assert.equal(report.rows.indexRowsWrittenPerDay, 5_050);
+  for (const [operationName, profileName] of [
+    ['allocation', 'allocation'],
+    ['activation', 'activation'],
+    ['registry release fallback reservation', 'markReleasePending'],
+    ['terminal registry release', 'release'],
+    ['reuse allocation', 'reuseAllocation'],
+    ['reuse activation', 'reuseActivation'],
+  ]) {
+    const operation = report.rows.operations[operationName].costEach;
+    assert.equal(
+      operation.tableRowsWritten + operation.indexRowsWritten,
+      report.sqlProfiles.registry[profileName].rowsWritten,
+      operationName,
+    );
+  }
+  assert.equal(report.rows.writtenPerRoom, 1_269);
+  assert.equal(report.rows.writtenPerDay, 63_450);
+  assert.equal(report.rows.readPerDay, 189_200);
+  assert.equal(report.rows.indexRowsWrittenPerDay, 6_550);
   assert.equal(report.rows.alarmRowsWrittenPerDay, 1_550);
-  assert.equal(report.rows.deletedRowsWrittenPerDay, 1_050);
+  assert.equal(report.rows.deletedRowsWrittenPerDay, 1_100);
   assert.ok(report.rows.readPerDay <= report.targets.rowsReadPerDay);
   assert.ok(report.storage.bytes <= report.targets.storageBytes);
   assert.equal(report.gates.every((gate) => gate.passed), true);
 });
 
 test('derives registry scans from measured cardinality formulas and explicit runtime profiles', () => {
-  const ten = measuredRegistrySqlProfiles(10);
-  const fifty = measuredRegistrySqlProfiles(50);
-  assert.deepEqual(ten.allocation, { rowsRead: 145, rowsWritten: 4 });
-  assert.deepEqual(fifty.allocation, { rowsRead: 705, rowsWritten: 4 });
-  assert.deepEqual(fifty.activation, { rowsRead: 157, rowsWritten: 2 });
-  assert.deepEqual(fifty.markReleasePending, { rowsRead: 155, rowsWritten: 1 });
-  assert.deepEqual(fifty.release, { rowsRead: 155, rowsWritten: 1 });
-  assert.deepEqual(fifty.reuseAllocation, { rowsRead: 615, rowsWritten: 3 });
-  assert.deepEqual(fifty.reuseActivation, { rowsRead: 158, rowsWritten: 2 });
+  const ten = measuredRegistrySqlProfiles({ roomCodeCount: 10, creationRequestCount: 20 });
+  const fifty = measuredRegistrySqlProfiles({ roomCodeCount: 50, creationRequestCount: 100 });
+  assert.deepEqual(ten.allocation, { rowsRead: 49, rowsWritten: 9 });
+  assert.deepEqual(fifty.allocation, { rowsRead: 129, rowsWritten: 9 });
+  assert.deepEqual(fifty.activation, { rowsRead: 11, rowsWritten: 7 });
+  assert.deepEqual(fifty.markReleasePending, { rowsRead: 9, rowsWritten: 4 });
+  assert.deepEqual(fifty.release, { rowsRead: 9, rowsWritten: 4 });
+  assert.deepEqual(fifty.reuseAllocation, { rowsRead: 129, rowsWritten: 8 });
+  assert.deepEqual(fifty.reuseActivation, { rowsRead: 11, rowsWritten: 7 });
   assert.deepEqual(MEASURED_ROOM_SQL_PROFILES.command, { rowsRead: 1, rowsWritten: 1 });
-  assert.ok(fifty.fallbackAlarm.rowsRead >= 902);
+  assert.equal(fifty.fallbackAlarm.rowsRead, 22);
+  assert.ok(fifty.allocation.rowsRead > ten.allocation.rowsRead);
 
   const injected = simulatePlanBBudget({
     sqlProfiles: {
@@ -99,7 +145,7 @@ test('derives registry scans from measured cardinality formulas and explicit run
     },
   });
   assert.equal(injected.rows.operations.allocation.costEach.rowsRead, 900);
-  assert.equal(injected.rows.readPerDay, 221_450);
+  assert.equal(injected.rows.readPerDay, 227_750);
 });
 
 test('fails the write gate for a command table or a command-maintained secondary index', () => {
@@ -141,8 +187,8 @@ test('room budget simulator runs independently and can merge an optional DDS rep
     encoding: 'utf8',
   });
   assert.equal(standalone.status, 0, standalone.stderr);
-  assert.match(standalone.stdout, /3,750 billed requests/u);
-  assert.match(standalone.stdout, /3,305\.6 GB-s/u);
+  assert.match(standalone.stdout, /4,400 billed requests/u);
+  assert.match(standalone.stdout, /3,376 GB-s/u);
 
   const directory = mkdtempSync(join(tmpdir(), 'stepstone-room-budget-'));
   const reportPath = join(directory, 'dds-report.json');
@@ -156,9 +202,10 @@ test('room budget simulator runs independently and can merge an optional DDS rep
   assert.equal(merged.status, 0, merged.stderr);
   const saved = JSON.parse(readFileSync(reportPath, 'utf8'));
   assert.equal(saved.budget.rooms, 50);
-  assert.equal(saved.budget.requestsPerDay, 3_750);
-  assert.equal(saved.budget.handlerExecutionsPerRoom, 1_033);
-  assert.equal(saved.budget.durationGbSecondsPerDay, 3_305.6);
-  assert.equal(saved.budget.writesPerDay, 60_850);
-  assert.equal(saved.budget.readsPerDay, 211_700);
+  assert.equal(saved.budget.requestsPerDay, 4_400);
+  assert.equal(saved.budget.requestTriggeredHandlerExecutionsPerRoom, 1_046);
+  assert.equal(saved.budget.handlerExecutionsPerRoom, 1_055);
+  assert.equal(saved.budget.durationGbSecondsPerDay, 3_376);
+  assert.equal(saved.budget.writesPerDay, 63_450);
+  assert.equal(saved.budget.readsPerDay, 189_200);
 });

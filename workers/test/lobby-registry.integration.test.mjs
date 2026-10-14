@@ -597,7 +597,7 @@ test('release is exact, terminal, and cannot affect a reused incarnation', async
   assert.equal(current.incarnation, 2);
 });
 
-test('bounds live replay records, physically expires them, and creates only primary-key indexes', async () => {
+test('bounds live replay records, physically expires them, and keeps only budgeted indexes', async () => {
   const capacityNow = now + 6 * 60 * 60 * 1000;
   await ok('seedCapacity', {
     count: LIMITS.creationRequests,
@@ -615,7 +615,14 @@ test('bounds live replay records, physically expires them, and creates only prim
 
   const inspection = await ok('inspect');
   assert.ok(inspection.creationRequests.length < LIMITS.creationRequests);
-  for (const [table, indexes] of Object.entries(inspection.indexes)) {
-    assert.ok(indexes.every((index) => index.origin === 'pk'), `${table} has a secondary index`);
-  }
+  assert.deepEqual(
+    inspection.indexes.room_codes.filter((index) => index.origin === 'c')
+      .map((index) => index.name).sort(),
+    ['room_codes_available', 'room_codes_due_lease', 'room_codes_due_release'],
+  );
+  assert.deepEqual(
+    inspection.indexes.creation_requests.filter((index) => index.origin === 'c')
+      .map((index) => index.name).sort(),
+    ['creation_requests_due', 'creation_requests_lease'],
+  );
 });

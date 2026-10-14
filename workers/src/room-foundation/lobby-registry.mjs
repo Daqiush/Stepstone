@@ -112,6 +112,16 @@ export class LobbyRegistry {
           response_json TEXT,
           expires_at INTEGER NOT NULL
         )`);
+        this.sql.exec(`CREATE INDEX IF NOT EXISTS room_codes_due_lease
+          ON room_codes(status, lease_expires_at)`);
+        this.sql.exec(`CREATE INDEX IF NOT EXISTS room_codes_due_release
+          ON room_codes(status, updated_at)`);
+        this.sql.exec(`CREATE INDEX IF NOT EXISTS room_codes_available
+          ON room_codes(status, tombstone_until, code)`);
+        this.sql.exec(`CREATE INDEX IF NOT EXISTS creation_requests_due
+          ON creation_requests(status, expires_at)`);
+        this.sql.exec(`CREATE INDEX IF NOT EXISTS creation_requests_lease
+          ON creation_requests(code, incarnation, lease_id, status)`);
       });
       await this.recoverAlarm();
     });
@@ -235,15 +245,21 @@ export class LobbyRegistry {
     ));
     if (available) return available;
 
-    const occupied = new Set(rows(this.sql.exec('SELECT code FROM room_codes')).map((item) => item.code));
-    for (let number = 0; number < 1_000; number += 1) {
-      const code = String(number).padStart(3, '0');
-      if (!occupied.has(code)) return {
-        code, incarnation: 0, status: 'FREE', lease_id: null,
-        lease_expires_at: null, tombstone_until: null, updated_at: now,
-      };
-    }
-    return null;
+    // Codes are inserted monotonically and retained through FREE/TOMBSTONE
+    // states, so the first never-created code is exactly max(code) + 1.
+    // This keeps allocation bounded instead of scanning every occupied code.
+    const highest = row(this.sql.exec('SELECT code FROM room_codes ORDER BY code DESC LIMIT 1'));
+    const number = highest === null ? 0 : Number(highest.code) + 1;
+    if (!Number.isSafeInteger(number) || number < 0 || number >= 1_000) return null;
+    return {
+      code: String(number).padStart(3, '0'),
+      incarnation: 0,
+      status: 'FREE',
+      lease_id: null,
+      lease_expires_at: null,
+      tombstone_until: null,
+      updated_at: now,
+    };
   }
 
   allocate({ requestId, requestHash } = {}) {
@@ -702,13 +718,16 @@ export class LobbyRegistry {
     return result(this.testLatency.snapshot());
   }
 
-  testSeedBudgetCardinality({ count, now } = {}) {
+  testSeedBudgetCardinality({ count, roomCodeCount = count, creationRequestCount = count, now } = {}) {
     if (this.env.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
-    if (!Number.isSafeInteger(count) || count < 0 || count > 999 || !validTime(now)) {
+    if (!Number.isSafeInteger(roomCodeCount) || roomCodeCount < 0 || roomCodeCount > 999
+      || !Number.isSafeInteger(creationRequestCount) || creationRequestCount < roomCodeCount
+      || (roomCodeCount === 0 && creationRequestCount !== 0)
+      || creationRequestCount > LIMITS.creationRequests || !validTime(now)) {
       return failure('INVALID_REQUEST');
     }
     this.ctx.storage.transactionSync(() => {
-      for (let index = 0; index < count; index += 1) {
+      for (let index = 0; index < roomCodeCount; index += 1) {
         const code = String(index).padStart(3, '0');
         const id = `budget_seed_${String(index).padStart(16, '0')}`;
         this.sql.exec(
@@ -725,8 +744,19 @@ export class LobbyRegistry {
           now + LIMITS.creationReplayTtlMs,
         );
       }
+      for (let index = roomCodeCount; index < creationRequestCount; index += 1) {
+        const code = String(index % roomCodeCount).padStart(3, '0');
+        const id = `budget_prior_${String(index).padStart(16, '0')}`;
+        this.sql.exec(
+          `INSERT INTO creation_requests
+            (request_id, request_hash, code, incarnation, lease_id, status, response_json, expires_at)
+           VALUES (?, ?, ?, 1, ?, 'ACTIVE', '{}', ?)`,
+          id, 'e'.repeat(64), code, `prior_lease_${String(index).padStart(16, '0')}`,
+          now + LIMITS.creationReplayTtlMs,
+        );
+      }
     });
-    return result({ count });
+    return result({ roomCodeCount, creationRequestCount });
   }
 
   testSeedCapacity({ count, now, expiresAt } = {}) {

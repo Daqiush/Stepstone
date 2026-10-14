@@ -26,9 +26,11 @@ async function registry(action, input = {}) {
   return response.body.value;
 }
 
-test('registry allocation accounting observes consumed scans at 50-room cardinality', async () => {
+test('registry allocation accounting observes indexed scans at 50 rooms and 100 replay records', async () => {
   const now = Date.now();
-  await registry('seedRegistryBudgetCardinality', { count: 50, now });
+  await registry('seedRegistryBudgetCardinality', {
+    roomCodeCount: 50, creationRequestCount: 100, now,
+  });
   await registry('resetRegistrySqlAccounting');
 
   await registry('allocateAt', {
@@ -37,17 +39,49 @@ test('registry allocation accounting observes consumed scans at 50-room cardinal
     now,
   });
   const observed = await registry('inspectRegistrySqlAccounting');
-  const modeled = measuredRegistrySqlProfiles(50).allocation;
+  const modeled = measuredRegistrySqlProfiles({ roomCodeCount: 50, creationRequestCount: 100 }).allocation;
 
   assert.equal(observed.totalRowsRead, modeled.rowsRead, JSON.stringify(observed));
   assert.equal(observed.totalRowsWritten, modeled.rowsWritten, JSON.stringify(observed));
-  assert.ok(observed.statements.some((statement) => (
-    statement.table === 'room_codes' && statement.rowsRead >= 50
-  )));
+  assert.ok(observed.totalRowsRead < 150, JSON.stringify(observed));
   assert.ok(observed.statements.every((statement) => Number.isSafeInteger(statement.rowsRead)));
 });
 
-test('registry allocation scan cost scales with actual 10 and 50 row cardinalities', async () => {
+test('registry lookup profile is measured at 50 rooms for every join and WebSocket lookup', async () => {
+  const isolated = await createRoomWorkerRuntime();
+  try {
+    const call = async (action, input = {}) => {
+      const response = await isolated.registry(action, input);
+      assert.equal(response.status, 200, JSON.stringify(response.body));
+      return response.body.value;
+    };
+    const now = Date.now();
+    await call('seedRegistryBudgetCardinality', {
+      roomCodeCount: 50, creationRequestCount: 100, now,
+    });
+    await call('resetRegistrySqlAccounting');
+    await call('lookupActive', { code: '049' });
+    const accounting = await call('inspectRegistrySqlAccounting');
+    const observed = {
+      rowsRead: accounting.totalRowsRead,
+      rowsWritten: accounting.totalRowsWritten,
+    };
+    const profiles = measuredRegistrySqlProfiles({
+      roomCodeCount: 50, creationRequestCount: 100,
+    });
+    assert.deepEqual(observed, profiles.lookupActive);
+    const report = simulatePlanBBudget({ sqlProfiles: {
+      registry: profiles,
+      room: MEASURED_ROOM_SQL_PROFILES,
+    } });
+    assert.equal(report.rows.operations['join registry lookup'].countPerRoom, 4);
+    assert.equal(report.rows.operations['WebSocket registry lookup'].countPerRoom, 9);
+  } finally {
+    await isolated.close();
+  }
+});
+
+test('registry allocation scan cost scales with 10/20 and 50/100 retained cardinalities', async () => {
   for (const count of [10, 50]) {
     const isolated = await createRoomWorkerRuntime();
     try {
@@ -57,7 +91,9 @@ test('registry allocation scan cost scales with actual 10 and 50 row cardinaliti
         assert.equal(response.status, 200, JSON.stringify(response.body));
         return response.body.value;
       };
-      await call('seedRegistryBudgetCardinality', { count, now });
+      await call('seedRegistryBudgetCardinality', {
+        roomCodeCount: count, creationRequestCount: count * 2, now,
+      });
       await call('resetRegistrySqlAccounting');
       await call('allocateAt', {
         requestId: `scale_allocate_${String(count).padStart(16, '0')}`,
@@ -65,7 +101,9 @@ test('registry allocation scan cost scales with actual 10 and 50 row cardinaliti
         now,
       });
       const observed = await call('inspectRegistrySqlAccounting');
-      assert.equal(observed.totalRowsRead, measuredRegistrySqlProfiles(count).allocation.rowsRead);
+      assert.equal(observed.totalRowsRead, measuredRegistrySqlProfiles({
+        roomCodeCount: count, creationRequestCount: count * 2,
+      }).allocation.rowsRead);
     } finally {
       await isolated.close();
     }
@@ -81,8 +119,10 @@ test('registry lifecycle and fallback profiles cover nextDue scans at 50 rows', 
       return response.body.value;
     };
     const now = Date.now();
-    const profiles = measuredRegistrySqlProfiles(50);
-    await call('seedRegistryBudgetCardinality', { count: 50, now });
+    const profiles = measuredRegistrySqlProfiles({ roomCodeCount: 50, creationRequestCount: 100 });
+    await call('seedRegistryBudgetCardinality', {
+      roomCodeCount: 50, creationRequestCount: 100, now,
+    });
     const allocation = await call('allocateAt', {
       requestId: 'lifecycle_allocate_000001',
       requestHash: 'd'.repeat(64),
@@ -175,13 +215,14 @@ test('registry lifecycle and fallback profiles cover nextDue scans at 50 rows', 
         assert.equal(result.status, 200, JSON.stringify(result.body));
         return result.body.value;
       };
-      await fallback('seedRegistryBudgetCardinality', { count: 50, now });
+      await fallback('seedRegistryBudgetCardinality', {
+        roomCodeCount: 50, creationRequestCount: 100, now,
+      });
       await fallback('markReleasePendingAt', { code: '000', incarnation: 1, now });
       await fallback('resetRegistrySqlAccounting');
       await fallback('reconcile', { now: now + 60_001 });
       const observed = await fallback('inspectRegistrySqlAccounting');
-      assert.ok(observed.totalRowsRead > 50, JSON.stringify(observed));
-      assert.ok(observed.totalRowsRead <= profiles.fallbackAlarm.rowsRead, JSON.stringify(observed));
+      assert.equal(observed.totalRowsRead, profiles.fallbackAlarm.rowsRead, JSON.stringify(observed));
     } finally {
       await fallbackRuntime.close();
     }
@@ -256,7 +297,7 @@ test('room initialization, join, auth, command, action, and alarm SQL match meas
       assert.equal(joined.status, 200, joined.text);
       joinReads.push((await roomCall('inspectRoomSqlAccounting')).totalRowsRead);
     }
-    assert.deepEqual(joinReads, [5, 9, 13, 13]);
+    assert.deepEqual(joinReads, [8, 13, 18, 19]);
     assert.equal(
       joinReads.reduce((sum, value) => sum + value, 0),
       MEASURED_ROOM_SQL_PROFILES.join.rowsRead * 4,
@@ -267,8 +308,14 @@ test('room initialization, join, auth, command, action, and alarm SQL match meas
     const socket = await isolated.openWebSocket(`/api/rooms/${room.roomCode}/${room.incarnation}/ws`);
     const upgradeRoom = await roomCall('inspectRoomSqlAccounting');
     const upgradeRegistry = await registryCall('inspectRegistrySqlAccounting');
-    assert.equal(upgradeRoom.totalRowsRead + upgradeRegistry.totalRowsRead, MEASURED_ROOM_SQL_PROFILES.upgrade.rowsRead);
-    assert.equal(upgradeRoom.totalRowsWritten + upgradeRegistry.totalRowsWritten, MEASURED_ROOM_SQL_PROFILES.upgrade.rowsWritten);
+    assert.equal(upgradeRoom.totalRowsRead, MEASURED_ROOM_SQL_PROFILES.upgrade.rowsRead);
+    assert.equal(upgradeRoom.totalRowsWritten, MEASURED_ROOM_SQL_PROFILES.upgrade.rowsWritten);
+    assert.deepEqual({
+      rowsRead: upgradeRegistry.totalRowsRead,
+      rowsWritten: upgradeRegistry.totalRowsWritten,
+    }, measuredRegistrySqlProfiles({
+      roomCodeCount: 1, creationRequestCount: 1,
+    }).lookupActive);
 
     await roomCall('resetRoomSqlAccounting');
     const nextToken = token();
@@ -330,7 +377,7 @@ test('room initialization, join, auth, command, action, and alarm SQL match meas
     assert.equal(closing.status, 200, JSON.stringify(closing.body));
     const deleteAll = simulatePlanBBudget().rows.operations['room deleteAll'].costEach;
     assert.equal(1 + closing.body.value.sessions.length + closing.body.value.pendingActions.length, 7);
-    assert.equal(deleteAll.deletedRowsWritten, 7);
+    assert.equal(deleteAll.deletedRowsWritten, 8);
     assert.equal(
       closing.body.value.sessions.length * 2 + closing.body.value.pendingActions.length * 2,
       deleteAll.indexRowsWritten,

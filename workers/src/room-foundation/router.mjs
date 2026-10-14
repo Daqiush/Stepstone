@@ -11,6 +11,7 @@ import {
 } from './protocol.mjs';
 import { LobbyRegistry } from './lobby-registry.mjs';
 import { StepstoneRoom } from './stepstone-room.mjs';
+export { PUBLIC_ROOM_ROUTER_DO_CALL_GRAPH } from './router-call-graph.mjs';
 
 const ROOM_ROOT = '/api/rooms';
 const JOIN_ROUTE = /^\/api\/rooms\/[0-9]{3}\/join$/u;

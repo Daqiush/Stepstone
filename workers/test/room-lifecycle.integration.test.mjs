@@ -691,7 +691,7 @@ test('wake clears persisted authority without a matching socket and schedules fi
   assert.equal(accounting.status, 200, JSON.stringify(accounting.body));
   assert.equal(accounting.body.value.cache.ready, true);
   assert.equal(accounting.body.value.cache.authorityCount, 2);
-  assert.ok(accounting.body.value.lastWake.totalRowsRead <= 17);
+  assert.equal(accounting.body.value.lastWake.totalRowsRead, 2);
 
   const reconnected = await authenticate(room, authenticated.session);
   reconnected.socket.send({
