@@ -110,7 +110,7 @@ test('registry allocation scan cost scales with 10/20 and 50/100 retained cardin
   }
 });
 
-test('registry lifecycle and fallback profiles cover nextDue scans at 50 rows', async () => {
+test('registry lifecycle, fallback, and maximum reuse profiles cover 50/100 cardinality', async () => {
   const isolated = await createRoomWorkerRuntime();
   try {
     const call = async (action, input = {}) => {
@@ -121,7 +121,7 @@ test('registry lifecycle and fallback profiles cover nextDue scans at 50 rows', 
     const now = Date.now();
     const profiles = measuredRegistrySqlProfiles({ roomCodeCount: 50, creationRequestCount: 100 });
     await call('seedRegistryBudgetCardinality', {
-      roomCodeCount: 50, creationRequestCount: 100, now,
+      roomCodeCount: 50, creationRequestCount: 99, eligibleTombstoneCount: 50, now,
     });
     const allocation = await call('allocateAt', {
       requestId: 'lifecycle_allocate_000001',
@@ -161,13 +161,21 @@ test('registry lifecycle and fallback profiles cover nextDue scans at 50 rows', 
       assert.equal(observed.totalRowsWritten, profiles[name].rowsWritten, name);
     }
 
+    const reuseNow = now + LIMITS.registryTombstoneMs + 4;
+    const maximumReuseState = await call('inspect');
+    assert.equal(maximumReuseState.roomCodes.length, 50);
+    assert.equal(maximumReuseState.creationRequests.length, 100);
+    assert.equal(maximumReuseState.roomCodes.filter((item) => (
+      item.status === 'TOMBSTONE' && item.tombstoneUntil <= reuseNow
+    )).length, 50);
     await call('resetRegistrySqlAccounting');
     const reused = await call('allocateAt', {
       requestId: 'lifecycle_reuse_00000001',
       requestHash: 'e'.repeat(64),
-      now: now + LIMITS.registryTombstoneMs + 4,
+      now: reuseNow,
     });
     const reuseAllocationProfile = await call('inspectRegistrySqlAccounting');
+    assert.equal(reuseAllocationProfile.totalRowsRead, 226, JSON.stringify(reuseAllocationProfile));
     assert.equal(reuseAllocationProfile.totalRowsRead, profiles.reuseAllocation.rowsRead);
     assert.equal(reuseAllocationProfile.totalRowsWritten, profiles.reuseAllocation.rowsWritten);
     const initializedReuse = await isolated.room('initializeRoomAt', {

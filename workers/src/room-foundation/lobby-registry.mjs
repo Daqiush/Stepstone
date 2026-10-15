@@ -718,11 +718,19 @@ export class LobbyRegistry {
     return result(this.testLatency.snapshot());
   }
 
-  testSeedBudgetCardinality({ count, roomCodeCount = count, creationRequestCount = count, now } = {}) {
+  testSeedBudgetCardinality({
+    count,
+    roomCodeCount = count,
+    creationRequestCount = count,
+    eligibleTombstoneCount = 0,
+    now,
+  } = {}) {
     if (this.env.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
     if (!Number.isSafeInteger(roomCodeCount) || roomCodeCount < 0 || roomCodeCount > 999
       || !Number.isSafeInteger(creationRequestCount) || creationRequestCount < roomCodeCount
       || (roomCodeCount === 0 && creationRequestCount !== 0)
+      || !Number.isSafeInteger(eligibleTombstoneCount) || eligibleTombstoneCount < 0
+      || eligibleTombstoneCount > roomCodeCount
       || creationRequestCount > LIMITS.creationRequests || !validTime(now)) {
       return failure('INVALID_REQUEST');
     }
@@ -730,11 +738,13 @@ export class LobbyRegistry {
       for (let index = 0; index < roomCodeCount; index += 1) {
         const code = String(index).padStart(3, '0');
         const id = `budget_seed_${String(index).padStart(16, '0')}`;
+        const eligibleForReuse = index < eligibleTombstoneCount;
         this.sql.exec(
           `INSERT INTO room_codes
             (code, incarnation, status, lease_id, lease_expires_at, tombstone_until, updated_at)
-           VALUES (?, 1, 'ACTIVE', NULL, NULL, NULL, ?)`,
-          code, now,
+           VALUES (?, 1, ?, NULL, NULL, ?, ?)`,
+          code, eligibleForReuse ? 'TOMBSTONE' : 'ACTIVE',
+          eligibleForReuse ? now : null, now,
         );
         this.sql.exec(
           `INSERT INTO creation_requests
@@ -756,7 +766,7 @@ export class LobbyRegistry {
         );
       }
     });
-    return result({ roomCodeCount, creationRequestCount });
+    return result({ roomCodeCount, creationRequestCount, eligibleTombstoneCount });
   }
 
   testSeedCapacity({ count, now, expiresAt } = {}) {

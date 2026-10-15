@@ -115,7 +115,7 @@ test('counts current table, index, alarm, retention, and deleteAll write costs',
   }
   assert.equal(report.rows.writtenPerRoom, 1_269);
   assert.equal(report.rows.writtenPerDay, 63_450);
-  assert.equal(report.rows.readPerDay, 189_200);
+  assert.equal(report.rows.readPerDay, 194_050);
   assert.equal(report.rows.indexRowsWrittenPerDay, 6_550);
   assert.equal(report.rows.alarmRowsWrittenPerDay, 1_550);
   assert.equal(report.rows.deletedRowsWrittenPerDay, 1_100);
@@ -132,7 +132,7 @@ test('derives registry scans from measured cardinality formulas and explicit run
   assert.deepEqual(fifty.activation, { rowsRead: 11, rowsWritten: 7 });
   assert.deepEqual(fifty.markReleasePending, { rowsRead: 9, rowsWritten: 4 });
   assert.deepEqual(fifty.release, { rowsRead: 9, rowsWritten: 4 });
-  assert.deepEqual(fifty.reuseAllocation, { rowsRead: 129, rowsWritten: 8 });
+  assert.deepEqual(fifty.reuseAllocation, { rowsRead: 226, rowsWritten: 8 });
   assert.deepEqual(fifty.reuseActivation, { rowsRead: 11, rowsWritten: 7 });
   assert.deepEqual(MEASURED_ROOM_SQL_PROFILES.command, { rowsRead: 1, rowsWritten: 1 });
   assert.equal(fifty.fallbackAlarm.rowsRead, 22);
@@ -145,7 +145,7 @@ test('derives registry scans from measured cardinality formulas and explicit run
     },
   });
   assert.equal(injected.rows.operations.allocation.costEach.rowsRead, 900);
-  assert.equal(injected.rows.readPerDay, 227_750);
+  assert.equal(injected.rows.readPerDay, 232_600);
 });
 
 test('fails the write gate for a command table or a command-maintained secondary index', () => {
@@ -207,5 +207,5 @@ test('room budget simulator runs independently and can merge an optional DDS rep
   assert.equal(saved.budget.handlerExecutionsPerRoom, 1_055);
   assert.equal(saved.budget.durationGbSecondsPerDay, 3_376);
   assert.equal(saved.budget.writesPerDay, 63_450);
-  assert.equal(saved.budget.readsPerDay, 189_200);
+  assert.equal(saved.budget.readsPerDay, 194_050);
 });

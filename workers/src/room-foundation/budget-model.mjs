@@ -77,7 +77,12 @@ export function measuredRegistrySqlProfiles(cardinality) {
     markReleasePending: Object.freeze({ rowsRead: 9, rowsWritten: 4 }),
     release: Object.freeze({ rowsRead: 9, rowsWritten: 4 }),
     fallbackAlarm: Object.freeze({ rowsRead: 22, rowsWritten: 0 }),
-    reuseAllocation: Object.freeze({ rowsRead: creationRequestCount + 29, rowsWritten: 8 }),
+    // Worst-case reuse has every retained room row eligible as a tombstone.
+    // SQLite's consumed-cursor profile is 226 reads at the 50/100 gate state.
+    reuseAllocation: Object.freeze({
+      rowsRead: creationRequestCount + (2 * roomCodeCount) + 26,
+      rowsWritten: 8,
+    }),
     reuseActivation: Object.freeze({ rowsRead: 11, rowsWritten: 7 }),
   });
 }

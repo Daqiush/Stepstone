@@ -36,7 +36,7 @@ const budget = {
   storageBytes: modeled.storage.bytes,
   targets: modeled.targets,
   gates: modeled.gates,
-  model: 'Plan B consumed-cursor SQL profiles at 50 room rows and 100 retained replay rows, explicit table/index/alarm/delete accounting, one two-row room reconstruction per handler, decimal-GB storage, and exact Durable Object request billing.',
+  model: 'Plan B consumed-cursor SQL profiles at 50 room rows and 100 retained replay rows with all tombstones eligible for worst-case reuse, explicit table/index/alarm/delete accounting, one two-row room reconstruction per handler, decimal-GB storage, and exact Durable Object request billing.',
 };
 
 const reportPath = option('--report');
