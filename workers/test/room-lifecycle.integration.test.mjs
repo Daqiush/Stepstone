@@ -164,9 +164,11 @@ test('real handlers and compound cross-object workflows stay below 500 ms', asyn
     return recorder.measure(category, handler);
   };
 
-  // The monotonic boundary begins immediately before and ends immediately
-  // after each real call below. The logical component can move only through
-  // test-gated delay providers invoked inside the actual Registry/Room path.
+  // Every real workflow is wrapped by a monotonic boundary for diagnostics.
+  // The deterministic gate itself uses only logical time advanced by
+  // test-gated delay providers inside the actual Registry/Room path, so host
+  // scheduling load cannot turn this CPU-budget assertion into a wall-clock
+  // flake.
   const requestId = id('latency_create');
   const reconnectToken = token();
   const createInput = { v: 1, requestId, displayName: 'North', reconnectToken };

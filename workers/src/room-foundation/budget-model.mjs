@@ -371,33 +371,47 @@ export function assertPlanBBudget(report) {
   return report;
 }
 
-export function createHandlerLatencyRecorder({ now, logicalNow = () => 0, limitMs = 500 } = {}) {
+export function createHandlerLatencyRecorder({ now, logicalNow, limitMs = 500 } = {}) {
   if (typeof now !== 'function') throw new TypeError('A controlled clock is required');
-  if (typeof logicalNow !== 'function') throw new TypeError('logicalNow must be a function');
+  if (logicalNow !== undefined && typeof logicalNow !== 'function') {
+    throw new TypeError('logicalNow must be a function');
+  }
   if (!Number.isFinite(limitMs) || limitMs <= 0) throw new TypeError('limitMs must be positive');
   const observed = new Map();
+  const usesLogicalClock = typeof logicalNow === 'function';
 
   return Object.freeze({
     async measure(category, handler) {
       if (!HANDLER_CATEGORIES.includes(category)) throw new TypeError(`Unknown handler category: ${category}`);
       if (typeof handler !== 'function') throw new TypeError('handler must be a function');
-      const logicalStartedAt = await logicalNow();
+      const logicalStartedAt = usesLogicalClock ? await logicalNow() : 0;
       const startedAt = now();
       const value = await handler();
       const endedAt = now();
-      const logicalEndedAt = await logicalNow();
-      const milliseconds = (endedAt - startedAt) + (logicalEndedAt - logicalStartedAt);
-      if (!Number.isFinite(milliseconds) || milliseconds < 0) {
+      const logicalEndedAt = usesLogicalClock ? await logicalNow() : 0;
+      const wallMilliseconds = endedAt - startedAt;
+      const logicalMilliseconds = logicalEndedAt - logicalStartedAt;
+      const milliseconds = usesLogicalClock ? logicalMilliseconds : wallMilliseconds;
+      if (!Number.isFinite(milliseconds) || milliseconds < 0
+        || !Number.isFinite(wallMilliseconds) || wallMilliseconds < 0) {
         throw new TypeError(`Invalid controlled duration for ${category}`);
       }
       const passed = milliseconds < limitMs;
-      observed.set(category, Object.freeze({ milliseconds, limitMs, passed }));
+      observed.set(category, Object.freeze({
+        milliseconds,
+        wallMilliseconds,
+        logicalMilliseconds: usesLogicalClock ? logicalMilliseconds : null,
+        limitMs,
+        passed,
+      }));
       if (!passed) throw new Error(`${category} exceeded ${limitMs} ms`);
       return value;
     },
-    assertComplete() {
-      const missing = HANDLER_CATEGORIES.filter((category) => !observed.has(category));
-      if (missing.length > 0) throw new Error(`Missing handler latency categories: ${missing.join(', ')}`);
+    assertComplete({ requireAll = true } = {}) {
+      if (requireAll) {
+        const missing = HANDLER_CATEGORIES.filter((category) => !observed.has(category));
+        if (missing.length > 0) throw new Error(`Missing handler latency categories: ${missing.join(', ')}`);
+      }
       return Object.fromEntries(observed);
     },
   });

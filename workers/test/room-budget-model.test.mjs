@@ -172,13 +172,35 @@ test('fails the read gate for per-command recipient SQL', () => {
 });
 
 test('rejects a controlled handler duration at the 500 ms envelope', async () => {
-  let now = 0;
-  const recorder = createHandlerLatencyRecorder({ now: () => now });
+  let logicalNow = 0;
+  const recorder = createHandlerLatencyRecorder({
+    now: () => 0,
+    logicalNow: () => logicalNow,
+  });
 
   await assert.rejects(
-    recorder.measure('ordinaryCommand', async () => { now += 500; }),
+    recorder.measure('ordinaryCommand', async () => { logicalNow += 500; }),
     /ordinaryCommand exceeded 500 ms/u,
   );
+});
+
+test('controlled handler gate ignores host scheduling delay while retaining wall diagnostics', async () => {
+  let wallNow = 0;
+  let logicalNow = 0;
+  const recorder = createHandlerLatencyRecorder({
+    now: () => wallNow,
+    logicalNow: () => logicalNow,
+  });
+
+  await recorder.measure('ordinaryCommand', async () => {
+    wallNow += 5_000;
+    logicalNow += 10;
+  });
+
+  const summary = recorder.assertComplete({ requireAll: false });
+  assert.equal(summary.ordinaryCommand.milliseconds, 10);
+  assert.equal(summary.ordinaryCommand.wallMilliseconds, 5_000);
+  assert.equal(summary.ordinaryCommand.passed, true);
 });
 
 test('room budget simulator runs independently and can merge an optional DDS report', () => {
