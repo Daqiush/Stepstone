@@ -16,7 +16,10 @@ test('npm test commands use one cross-platform runner without shell globs', () =
   );
 
   assert.equal(packageJson.scripts.test, 'node scripts/run-node-tests.js test');
-  assert.equal(packageJson.scripts['test:workers'], 'node scripts/run-node-tests.js workers/test');
+  assert.equal(
+    packageJson.scripts['test:workers'],
+    'node scripts/run-node-tests.js --test-concurrency=1 workers/test',
+  );
   assert.equal(packageJson.scripts['test:commands'], 'node --test test/package-test-command.test.js');
 
   for (const [name, command] of Object.entries(packageJson.scripts)) {
@@ -51,7 +54,11 @@ test('cross-platform runner recursively executes only sorted Node test files', (
 
     const childEnv = { ...process.env, STEPSTONE_TEST_MARKER_ROOT: fixtureRoot };
     delete childEnv.NODE_TEST_CONTEXT;
-    const result = spawnSync(process.execPath, [TEST_RUNNER, fixtureRoot], {
+    const result = spawnSync(process.execPath, [
+      TEST_RUNNER,
+      '--test-concurrency=1',
+      fixtureRoot,
+    ], {
       cwd: ROOT,
       encoding: 'utf8',
       env: childEnv,

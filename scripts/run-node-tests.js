@@ -5,6 +5,7 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const TEST_FILE = /\.test\.(?:cjs|js|mjs)$/;
+const TEST_CONCURRENCY = /^--test-concurrency=([1-9]\d*)$/;
 
 function comparePaths(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
@@ -32,12 +33,28 @@ function discoverTestFiles(rootPath) {
 }
 
 function main(argv = process.argv.slice(2)) {
-  if (argv.length === 0) throw new TypeError('Usage: node scripts/run-node-tests.js <test-directory> [...]');
+  const roots = [];
+  const nodeTestOptions = [];
+  for (const argument of argv) {
+    const concurrency = TEST_CONCURRENCY.exec(argument);
+    if (concurrency) {
+      const value = Number(concurrency[1]);
+      if (!Number.isSafeInteger(value)) throw new TypeError(`Invalid test concurrency: ${argument}`);
+      nodeTestOptions.push(argument);
+    } else if (argument.startsWith('--')) {
+      throw new TypeError(`Unsupported test runner option: ${argument}`);
+    } else {
+      roots.push(argument);
+    }
+  }
+  if (roots.length === 0) {
+    throw new TypeError('Usage: node scripts/run-node-tests.js [--test-concurrency=N] <test-directory> [...]');
+  }
 
-  const testFiles = argv.flatMap(discoverTestFiles).sort(comparePaths);
-  if (testFiles.length === 0) throw new Error(`No Node test files found under: ${argv.join(', ')}`);
+  const testFiles = roots.flatMap(discoverTestFiles).sort(comparePaths);
+  if (testFiles.length === 0) throw new Error(`No Node test files found under: ${roots.join(', ')}`);
 
-  const result = spawnSync(process.execPath, ['--test', ...testFiles], {
+  const result = spawnSync(process.execPath, ['--test', ...nodeTestOptions, ...testFiles], {
     cwd: process.cwd(),
     env: process.env,
     stdio: 'inherit',
