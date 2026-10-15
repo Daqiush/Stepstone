@@ -90,8 +90,22 @@ async function inspect(room) {
   return response.body.value;
 }
 
-async function parseMessage(socket) {
-  return JSON.parse(await socket.nextMessage());
+async function parseMessage(socket, timeoutMs) {
+  return JSON.parse(await socket.nextMessage(timeoutMs));
+}
+
+async function waitForAuthHook(room) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const response = await runtime.room('inspectRoomAuthHook', {
+      code: room.roomCode,
+      incarnation: room.incarnation,
+    });
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+    if (response.body.value.reached) return;
+    await runtime.wait(10);
+  }
+  assert.fail('authentication overlap hook was not reached');
 }
 
 async function authenticate(room, session, options = {}) {
@@ -375,12 +389,12 @@ test('overlapping distinct rotations authorize exactly one socket', async () => 
   assert.equal(configured.status, 200, JSON.stringify(configured.body));
 
   first.send(firstHello.frame);
-  await runtime.wait(25);
+  await waitForAuthHook(room);
   second.send(secondHello.frame);
-  const winner = await parseMessage(second);
+  const winner = await parseMessage(second, 5_000);
   assert.equal(winner.id, secondHello.rotationId);
   assert.equal(winner.payload.connectionEpoch, 1);
-  assert.equal((await first.closed()).code, WEBSOCKET_CLOSE.AUTH_INVALID);
+  assert.equal((await first.closed(5_000)).code, WEBSOCKET_CLOSE.AUTH_INVALID);
 
   const state = await inspect(room);
   assert.equal(state.sessions[0].connectionEpoch, 1);

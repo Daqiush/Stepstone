@@ -147,7 +147,8 @@ async function collectMessages(socket, count) {
 }
 
 async function waitForCommandHook(room, commandId) {
-  for (let attempt = 0; attempt < 50; attempt += 1) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
     const response = await runtime.room('inspectRoomCommandHook', {
       code: room.roomCode,
       incarnation: room.incarnation,
@@ -155,7 +156,7 @@ async function waitForCommandHook(room, commandId) {
     });
     assert.equal(response.status, 200);
     if (response.body.value.reached) return;
-    await runtime.wait(5);
+    await runtime.wait(10);
   }
   assert.fail('command overlap hook was not reached');
 }
@@ -538,8 +539,8 @@ test('a command held after hashing loses authority to a connection takeover befo
     reconnectToken: first.session.reconnectToken,
     nextReconnectToken: replacementToken,
   });
-  assert.equal((await parseMessage(replacementSocket)).payload.connectionEpoch, 2);
-  assert.equal((await first.socket.closed()).code, WEBSOCKET_CLOSE.SESSION_REPLACED);
+  assert.equal((await parseMessage(replacementSocket, 5_000)).payload.connectionEpoch, 2);
+  assert.equal((await first.socket.closed(5_000)).code, WEBSOCKET_CLOSE.SESSION_REPLACED);
   await replacementSocket.expectNoMessage(350);
   const persisted = await inspect(room);
   assert.equal(persisted.roomState.revision, 0);

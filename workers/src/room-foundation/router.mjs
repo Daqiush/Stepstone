@@ -242,6 +242,11 @@ async function registryTestBridge(request, env) {
       rpcResult = await env.STEPSTONE_ROOM.get(roomId).testSetAuthFault(input);
       break;
     }
+    case 'inspectRoomAuthHook': {
+      const roomId = env.STEPSTONE_ROOM.idFromName(`${input.code}:${input.incarnation}`);
+      rpcResult = await env.STEPSTONE_ROOM.get(roomId).testInspectAuthHook(input);
+      break;
+    }
     case 'setRoomCommandFault': {
       const roomId = env.STEPSTONE_ROOM.idFromName(`${input.code}:${input.incarnation}`);
       rpcResult = await env.STEPSTONE_ROOM.get(roomId).testSetCommandFault(input);

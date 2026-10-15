@@ -1441,6 +1441,11 @@ export class StepstoneRoom {
 
     const fault = await this.takeAuthFault(identity.state.roomCode, identity.stored.incarnation);
     if (fault?.type === 'delay-before-transaction') {
+      await this.ctx.storage.put('roomAuthHook', {
+        code: identity.state.roomCode,
+        incarnation: identity.stored.incarnation,
+        reached: true,
+      });
       await new Promise((resolve) => setTimeout(resolve, fault.delayMs));
     }
     let authenticated;
@@ -1839,6 +1844,7 @@ export class StepstoneRoom {
       || (!['before-commit', 'after-commit-before-reply', null].includes(type) && !delayed)) {
       return failure('INVALID_REQUEST');
     }
+    await this.ctx.storage.delete('roomAuthHook');
     if (type === null) await this.ctx.storage.delete('roomAuthFault');
     else await this.ctx.storage.put('roomAuthFault', {
       code,
@@ -1847,6 +1853,17 @@ export class StepstoneRoom {
       ...(delayed ? { delayMs } : {}),
     });
     return result({ configured: type !== null });
+  }
+
+  async testInspectAuthHook({ code, incarnation } = {}) {
+    if (this.env?.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
+    if (!validCodeIncarnation(code, incarnation)) return failure('INVALID_REQUEST');
+    const hook = await this.ctx.storage.get('roomAuthHook');
+    return result({
+      reached: hook?.code === code
+        && hook?.incarnation === incarnation
+        && hook?.reached === true,
+    });
   }
 
   async testSetCommandFault({
