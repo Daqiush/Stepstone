@@ -75,9 +75,11 @@ The core API is:
 
 ```js
 applyClassicCommand(currentState, command, context)
-// -> { ok: true, state, events, effects, reply }
-// -> { ok: false, code, details? }
+// -> { ok: true, state, events, effects, reply: { name, phase } }
+// -> { ok: false, code }
 ```
+
+Successful results always contain `events` and `effects` arrays, even when empty. Domain failures are data, never exceptions, and do not expose internal details. An unexpected exception is caught by the adapter and mapped to the platform's generic capacity error.
 
 `command` contains only the validated command name and payload. `context` contains trusted adapter data:
 
@@ -90,6 +92,13 @@ applyClassicCommand(currentState, command, context)
 ```
 
 The adapter, not the client, supplies `deal`. Tests inject fixed deals. Node uses its existing shuffle semantics; the Worker uses `crypto.getRandomValues`. Given the same current state, command, and context, the core returns byte-equivalent JSON.
+
+Validation ownership is closed and explicit:
+
+- The transport parser validates the generic frame, protocol version, command ID, command name, revision type, the 8 KiB frame ceiling, and rejects unknown top-level envelope keys.
+- The classic engine validates exact classic payload keys and types, the complete state invariant set, actor/phase/turn permissions, bid and card legality, and the trusted deal shape.
+- Adapters construct `actor`, `occupiedSeats`, and `deal` only from server-owned identity and deal sources. No client field can override them.
+- The view layer accepts only a validated engine state and a trusted viewer identity.
 
 ### 4.2 Canonical classic state
 
@@ -118,10 +127,39 @@ The engine state is JSON-serializable and contains only game data:
   nsTricks,
   ewTricks,
   dummyRevealed,
+  claimSettlement,
   boardScores,
-  ddTable
+  ddTable,
+  ddsStatus
 }
 ```
+
+The closed field contract is:
+
+| Field group | Type and invariant | Reset/transition rule |
+|---|---|---|
+| `schemaVersion`, `mode` | Exactly `1` and `'classic'`. | Never changed by a command. |
+| `phase` | One of `LOBBY/BIDDING/PLAYING/SCORING`. | Changes only through the transition table below. |
+| `dealNumber`, `boardInfo` | In `LOBBY`, exactly `0` and `null`. In other phases, a positive safe integer plus the existing duplicate-board object. | Created by `classic.start` and incremented exactly once when all four seats ready the next board. |
+| `hands`, `initialHands` | In `LOBBY`, exact N/E/S/W maps of empty arrays. In other phases, exact maps of unique legal cards that form the trusted 52-card deal when reconstructed with played cards. | `hands` loses one held card per play; `initialHands` is immutable for the deal and never enters a public view. |
+| `readyStatus` | Exact N/E/S/W boolean map. | All false on deal start; only the actor's seat toggles in `SCORING`. |
+| Auction fields | In `LOBBY`, empty history, null bidder/contract, and zero passes. Otherwise, array plus nullable bidder/contract and safe integer pass count. Each history entry has exact `{seat,bid,alert,explain,qa}` shape, where `alert` is `true` or `null`, `explain` is `null` or bounded text, and `qa` is an array of exact `{asker,question,answer,answerer}` records with nullable answer fields. Names remain adapter identity data and are joined only into targeted Node events/views. | Cleared on deal start; call fields update only by `classic.bid`; annotations update only through the compatibility helpers. |
+| Play fields | In `LOBBY/BIDDING`, nullable seats, empty trick lists, zero totals, `dummyRevealed:false`, and `claimSettlement:null`. In `PLAYING`, trick totals equal completed tricks and claim settlement is null. In normal played `SCORING`, totals and completed tricks all equal 13. In claimed `SCORING`, totals sum to 13 while `claimSettlement:{claimer,tricksToWin,reason,completedAtClaim}` exactly accounts for the difference from the shorter completed-trick list. A passed-out board has zero play totals. All held/played cards still reconstruct the deal. | Initialized when bidding ends; updated only by legal play or accepted claim; cleared on the next deal. |
+| `boardScores` | Existing serializable score-history shape. | Appended exactly once on passed-out or played-board completion. |
+| `ddTable` | `null` or the validated DDS table shape. | Reset to `null` at deal start; filled only by a trusted matching DDS completion. |
+| `ddsStatus` | Exactly `IDLE` in `LOBBY`; otherwise `PENDING/READY/FAILED`, with `READY` iff `ddTable` is valid. | `PENDING` at deal start; then exactly one of `READY` or `FAILED`; reset only by the next deal. |
+
+The only public phase transitions are:
+
+| From | Command/condition | To |
+|---|---|---|
+| `LOBBY` | `classic.start` with four occupied seats and a trusted deal | `BIDDING` |
+| `BIDDING` | Three passes after a contract | `PLAYING` |
+| `BIDDING` | Four opening passes | `SCORING` with one passed-out score entry |
+| `PLAYING` | Thirteenth completed trick | `SCORING` with one played-board score entry |
+| `SCORING` | Fourth ready seat, with next trusted deal supplied | `BIDDING` |
+
+No other transition is legal. Scoring is guarded by the phase and history invariant so duplicate delivery cannot append a second result.
 
 Socket IDs, reconnect token hashes, session IDs, player names, pending lifecycle actions, and the Durable Object command cache remain outside the classic engine.
 
@@ -131,33 +169,37 @@ Node keeps the existing top-level room fields as canonical storage. Its adapter 
 
 The public game command allowlist is:
 
-| Command | Actor | Valid phase | Result |
+| Command | Exact payload | Actor and phase | Result |
 |---|---|---|---|
-| `classic.start` | Owner | `LOBBY` | Requires all four occupied seats; starts bidding with a trusted deal. |
-| `classic.bid` | Player/owner seat | `BIDDING` | Applies one legal bid and may finish bidding or pass out the board. |
-| `classic.play` | Player/owner seat | `PLAYING` | Plays one legal card; declarer may act for dummy. |
-| `classic.ready-next` | Player/owner seat | `SCORING` | Toggles that seat's readiness; four ready seats start the next deal. |
-| `room.sync` | Any authenticated session | Any | Read-only per-viewer snapshot; no revision increment. |
+| `classic.start` | `{expectedRevision}` | Owner in `LOBBY` | Requires all four occupied seats; adapter supplies the trusted deal and starts bidding. |
+| `classic.bid` | `{expectedRevision,bid,alert,explain}` | Seated player/owner in `BIDDING` | `bid` is `Pass`, `X`, `XX`, or a legal level/suit token; `alert` is boolean; `explain` is `null` or at most 500 Unicode scalar values and must be `null` when `alert` is false. |
+| `classic.play` | `{expectedRevision,card:{suit,rank}}` | Seated player/owner in `PLAYING` | `suit` is exactly `S/H/D/C`; `rank` is an integer 2–14; declarer may act for dummy. |
+| `classic.ready-next` | `{expectedRevision}` | Seated player/owner in `SCORING` | Toggles only the actor seat; on the fourth ready seat the adapter supplies the next trusted deal. |
+| `room.sync` | `{}` | Any authenticated session in any phase | Read-only per-viewer snapshot; no revision increment. |
 
 Spectators cannot mutate state. Unknown command names fail closed. The old foundation counter mutation remains available only when `ROOM_FOUNDATION_TEST === 'true'` so existing infrastructure tests stay isolated from production behavior.
 
-Commands continue to use the foundation envelope's command ID and `expectedRevision`. Exact retries return the cached compact reply. Conflicting reuse or stale revisions do not write or broadcast.
+Every object above rejects unknown or missing keys. `expectedRevision` is a nonnegative safe integer inside the command payload, matching the existing foundation protocol; the envelope continues to carry the command ID. Exact retries return the cached compact reply `{name,phase}` plus a freshly composed current snapshot. Conflicting ID reuse or stale revisions do not write or broadcast. The trusted deal is never accepted from a client payload.
 
 ### 4.4 Events
 
-The engine emits stable domain events in transition order:
+The engine emits stable domain events in transition order with exact payloads:
 
-- `classic.started`
-- `classic.bidding-updated`
-- `classic.bidding-ended`
-- `classic.dummy-revealed`
-- `classic.card-played`
-- `classic.trick-ended`
-- `classic.finished`
-- `classic.ready-updated`
-- `classic.dd-table-ready`
+| Event | Payload |
+|---|---|
+| `classic.started` | `{dealNumber,boardInfo}` |
+| `classic.bidding-updated` | `{biddingHistory,currentBidder,currentContract,consecutivePasses}` |
+| `classic.bidding-ended` | `{contract,declarer,dummy,leader,biddingHistory}` |
+| `classic.dummy-revealed` | `{dummy}` |
+| `classic.card-played` | `{seat,card,currentTrick}` |
+| `classic.trick-ended` | `{trick,winner,nsTricks,ewTricks}` |
+| `classic.finished` | Passed out: `{reason:'passed-out',dealNumber,score}`; played: `{reason:'played',dealNumber,contract,declarer,nsTricks,ewTricks,score}`; accepted claim: `{reason:'claimed',dealNumber,contract,declarer,nsTricks,ewTricks,score,claim:{claimer,tricksToWin,reason}}`. |
+| `classic.ready-updated` | `{readyStatus}` |
+| `classic.dd-table-ready` | `{dealNumber,ddTable}`; emitted only by the trusted DDS completion path, not by a client command. |
 
-The Node adapter maps these events to the existing Socket.IO names and payload ordering (`gameStart`, `biddingUpdate`, `biddingEnd`, `playUpdate`, and so on). The Worker broadcasts protocol-versioned event frames plus a recipient-specific `room.snapshot` only after persistence commits.
+Event payloads never carry `hands`, `initialHands`, trusted deal material, identity data, or command-cache data. Authorized hand changes are learned from the recipient-specific snapshot accompanying the persisted revision. `classic.bidding-updated` and `classic.bidding-ended` are internal full-state domain events; before delivery, both adapters call the same `classicEventFor(event, viewer)` projection used by `classicViewFor`. Its `biddingHistory` applies the self/opponent/partner/spectator filtering below, including Q&A fields. The Worker sends a separately serialized event frame to each authenticated recipient and never broadcasts one unfiltered auction frame to the room.
+
+The Node adapter maps these events to the existing Socket.IO names and payload ordering (`gameStart`, `biddingUpdate`, `biddingEnd`, `playUpdate`, and so on). After persistence commits, the Worker sends each domain event as `{v:1,type:'event',name,payload:{revision,event}}`, followed by the existing recipient-specific `room.snapshot` frame. Command replies remain `{v:1,type:'reply',id,name,payload:{revision,snapshot}}`.
 
 Duplicate command delivery sends the cached reply and current snapshot but does not replay animation events such as `classic.card-played` or `classic.trick-ended`.
 
@@ -174,6 +216,20 @@ Duplicate command delivery sends the cached reply and current snapshot but does 
 
 Node retains its current seat-specific bidding alert filtering. Worker snapshots apply the same rule: a player sees full alert details only for their own calls and opponents' calls; partner calls expose only seat and bid. Spectators receive bid, seat, alert flag, and explanation because they have no partnership role and are read-only.
 
+The Worker snapshot is an additive extension of the current foundation snapshot, with this exact outer shape:
+
+```js
+{
+  schemaVersion, roomCode, incarnation, revision, status,
+  foundationCounter, createdAt, expiresAt,
+  viewer: { role, seat },
+  playerNames: { N, E, S, W },
+  classic: classicViewFor(state.classic, viewer)
+}
+```
+
+Create and join already validate `displayName`; this milestone passes that value through the router, persists it as a non-null session column, and includes it in the reconstructed authority cache. `playerNames` is derived from that cache, so ordinary commands add no session-table read. One composer builds sync replies, stale-revision conflict snapshots, command reply snapshots, reconnect snapshots, post-commit broadcasts, and hibernation-restored snapshots; no parallel snapshot shape is permitted.
+
 ## 5. Node Integration
 
 Create `classic/node-adapter.js` with four responsibilities:
@@ -183,7 +239,34 @@ Create `classic/node-adapter.js` with four responsibilities:
 3. Apply only engine-owned fields back to the room.
 4. Translate domain events and effects into existing Socket.IO emissions and local DDS calls.
 
-`server.js` delegates `startGame`, standard `bid`, standard `playCard`, passed-out/normal scoring, and standard `nextDeal` readiness to the adapter. Ultimate and teaching branches remain on their existing code paths. Existing claim and auxiliary classic handlers continue using the top-level room fields; an accepted claim invokes the engine's trusted settlement helper so scoring remains single-sourced.
+`server.js` delegates `startGame`, standard `bid`, standard `playCard`, passed-out/normal scoring, and standard `nextDeal` readiness to the adapter only when `mode === 'classic' && !teachingMode`. Ultimate, problem, complex, and teaching branches remain entirely on their existing code paths.
+
+Deferred Node-only classic features must not directly mutate engine-owned fields. Create `classic/node-compat.cjs` with pure, validated helpers over the same canonical state:
+
+- `settleClassicClaim(state, { claimer, tricksToWin, reason })`
+- `editClassicBidAnnotation(state, { seat, bidIndex, alert, explain })`
+- `appendClassicBidQuestion(state, { bidIndex, asker, question })`
+- `answerClassicBidQuestion(state, { bidIndex, qaIdx, answerer, answer })`
+- `applyClassicDdsCompletion(state, { dealNumber, ddTable, failed })`
+
+Each helper returns the same success/domain-failure shape as `applyClassicCommand`, including arrays and compact reply, and validates exact argument keys. Text fields use the existing 500-scalar bound; indices must be in range; only the original bidder may edit/answer; an asker cannot be the bidder or bidder's partner. Claim settlement is legal only in `PLAYING` and validates the remaining-trick partition. DDS completion is legal only for the matching pending deal and validates the table before setting `READY`; `{failed:true,ddTable:null}` sets `FAILED`.
+
+Claim request/vote metadata stays adapter-owned; only an accepted claim calls `settleClassicClaim`, which records `claimSettlement` including `completedAtClaim`, awards the remaining tricks so totals reach 13, appends the score once, moves to `SCORING`, and emits `classic.finished` with `{reason:'claimed',dealNumber,contract,declarer,nsTricks,ewTricks,score,claim:{claimer,tricksToWin,reason}}`. Last-trick view/vote metadata stays adapter-owned and never changes canonical play state. Alert edits and bid Q&A call the matching compatibility helper, so `biddingHistory` is never mutated by a second implementation. Canonical Q&A stores seats but not names; the Node adapter joins names from `playerNames` into its current targeted Socket.IO messages. Annotation helpers emit no domain animation event and the shared snapshot reflects the stored result.
+
+The Node DDS promise calls `applyClassicDdsCompletion` against the current projected room state when it settles. A mismatched/stale deal is a no-op. Success updates `ddTable/ddsStatus` and emits the existing compatible DD-table notification; final failure sets `FAILED` without a gameplay error. This is the only Node path permitted to mutate DDS fields.
+
+The required Node traceability is:
+
+| Current behavior | New owner | Compatibility evidence |
+|---|---|---|
+| `startGame` standard branch | Adapter + `classic.start` | Same deal semantics and `gameStart` payload/order. |
+| Standard bid handler and `finishBidding` | Adapter + `classic.bid` | Same auction legality, passed-out result, declarer/dummy/leader, and emits. |
+| Standard `playCard`, `processPlay`, `endGame` | Adapter + `classic.play` | Same dummy control, follow suit, trick order, totals, score, and emits. |
+| Standard `nextDeal` readiness | Adapter + `classic.ready-next` | Same readiness messages and automatic next board. |
+| Accepted claim | `node-compat.cjs` settlement helper | Existing vote UI plus single-source score transition. |
+| Last-trick voting | Existing adapter metadata | Characterization proves canonical state is unchanged. |
+| Alert edit / bid Q&A | `node-compat.cjs` annotation helpers | Existing filtered payloads preserved. |
+| Reconnect | Shared view projection | Existing per-seat hand and alert visibility preserved. |
 
 The refactor is performed behavior-by-behavior with characterization tests before each delegation. The browser-visible event sequence and payloads are treated as compatibility requirements.
 
@@ -191,30 +274,42 @@ The refactor is performed behavior-by-behavior with characterization tests befor
 
 Create `workers/src/room-foundation/classic-command.mjs` as the Worker adapter. `StepstoneRoom.handleCommand` keeps its existing authority, deduplication, revision, transaction, CAS, and post-commit broadcast flow, but delegates allowlisted classic commands to this adapter.
 
-The adapter receives the authenticated session from the existing authority cache. It does not query SQL per command. Occupied seats come from the already reconstructed in-memory session authority map, preserving the measured one-row command SQL profile.
+The adapter receives the authenticated session, including persisted display name, from the existing authority cache. It does not query SQL per command. Occupied seats and player names come from the already reconstructed in-memory session authority map, preserving the measured one-row ordinary-command SQL profile.
 
 On successful mutation:
 
 1. Build `proposed.classic` from the engine result.
-2. Store the existing bounded command-cache entry in the same `room_state` JSON.
-3. Enforce the 512 KiB serialized snapshot limit.
-4. Commit with the existing revision/state JSON compare-and-swap.
-5. Update the in-memory cache.
-6. Send the actor's command reply.
-7. Broadcast filtered events and snapshots.
-8. Run non-blocking post-commit effects.
+2. Materialize any recoverable effect as its bounded pending-action row; ordinary effects create no row.
+3. Store the existing bounded command-cache entry in the same `room_state` JSON.
+4. Enforce the 512 KiB serialized snapshot limit.
+5. In one storage transaction, commit the revision/state compare-and-swap together with the pending-action upsert and alarm scheduling. A deal-start commit therefore cannot become visible without its DDS recovery record.
+6. Update the in-memory cache.
+7. Send the actor's command reply.
+8. Broadcast filtered events and snapshots.
+9. Start the recoverable action's immediate non-blocking attempt; the already committed alarm remains the crash/eviction backstop.
 
 If any pre-commit step fails, no event is sent. If delivery fails after commit, the client's existing sync/retry path repairs the view without another state mutation.
 
 ## 7. DDS Effect
 
-Starting a deal emits a `classic.compute-dd-table` post-commit effect containing the committed incarnation, deal number, and a copy of the initial hands. Node invokes `calcDDTable` as it does today.
+Starting a deal returns a `classic.compute-dd-table` effect and sets `ddsStatus: 'PENDING'`. Node invokes `calcDDTable` as it does today and discards a result whose deal number no longer matches.
 
-The Worker invokes the existing embedded DDS Worker binding after commit. A successful response is applied only if the room incarnation and deal number still match, then persisted as a trusted internal update and broadcast as `classic.dd-table-ready`. A late response for an older board is discarded. DDS failure leaves `ddTable: null`, records no game failure, and does not block bidding, play, scoring, or the next board.
+For the Worker, DDS is a recoverable at-least-once internal action rather than an in-memory promise:
+
+1. In the same transaction as the deal-start state, upsert one `pending_actions` row whose unique key is `(room incarnation, 'classic-dd-table')`, with a fresh opaque action ID, deal number, attempt `1`, and due time. Starting the next deal atomically replaces any older row. Do not duplicate hands in the row; the matching persisted `initialHands` is the trusted input.
+2. Set or advance the Durable Object alarm to the earliest due action. After commit, also start an immediate best-effort attempt.
+3. Call the existing embedded DDS Worker binding outside the state transaction.
+4. On completion, enter the Durable Object's existing serialized mutation gate, open a new transaction, read the latest state and action, and require the same incarnation, action ID, deal number, and `ddsStatus: 'PENDING'`.
+5. On success, apply the table to that latest state—never to the pre-await copy—set `ddsStatus: 'READY'`, delete the action, and atomically persist the trusted update at `revision + 1`. Then update the in-memory cache and broadcast `classic.dd-table-ready` plus recipient snapshots carrying the new revision.
+6. A completion for an old action ID/deal/incarnation cannot delete its replacement and is simply discarded. If the matching stale action still exists because the room incarnation is ending, lifecycle cleanup may delete it. Repeated completion is idempotent because the matching action is absent or status is no longer pending.
+7. Retry a failed call at 5 seconds and 30 seconds by updating only the still-matching action row. After attempt 3, use the same serialized mutation path to set `ddsStatus: 'FAILED'`, keep `ddTable: null`, delete the action, increment revision, and broadcast the new-revision snapshot. Gameplay never fails or blocks.
+8. On eviction/restart the alarm reconstructs the pending action from storage, so no in-memory promise is required.
+
+A player command that commits while DDS is in flight therefore cannot be overwritten: completion always merges into the latest persisted state under the matching action guard. Conversely, a command sent with the pre-DDS revision receives the existing revision-conflict response and authoritative snapshot, making every observable state change monotonic and distinguishable.
 
 ## 8. Error Model
 
-The engine returns stable codes rather than transport-specific text:
+The engine returns stable domain codes rather than transport-specific text:
 
 - `CLASSIC_WRONG_PHASE`
 - `CLASSIC_FORBIDDEN`
@@ -223,19 +318,28 @@ The engine returns stable codes rather than transport-specific text:
 - `CLASSIC_INVALID_BID`
 - `CLASSIC_CARD_NOT_HELD`
 - `CLASSIC_MUST_FOLLOW_SUIT`
-- `CLASSIC_STATE_INVALID`
+- `CLASSIC_INVALID_DEAL_CONTEXT` (internal adapter/test diagnostic only; never returned to a client)
 
-Node maps codes to its existing Chinese `appError` messages. Worker returns the code through the existing opaque command-error envelope. Malformed engine state fails closed as `SERVICE_CAPACITY`; it is never repaired by guessing or partially overwriting persisted state.
+The mapping is closed:
+
+| Failure class | Worker result | Node result |
+|---|---|---|
+| Malformed generic frame, classic payload, unknown/missing keys, or invalid type | Existing `INVALID_COMMAND` envelope | Existing matching input `appError`; no mutation. |
+| Wrong phase, authorization, turn, bid, held card, or follow-suit rule | Matching public `CLASSIC_*` code | Existing Chinese `appError` text. |
+| Corrupted persisted state, invalid trusted deal/context, unexpected exception, or serialized state over 512 KiB | Generic `SERVICE_CAPACITY`; no internal detail | Generic server error; diagnostic logged server-side. |
+| DDS call/validation failure | No command error; retry/`FAILED` state only | No gameplay error; `ddTable` remains unavailable. |
+
+Invalid state is never repaired by guessing or partially overwriting persisted data. Public clients never receive `CLASSIC_STATE_INVALID`, stack traces, SQL text, DDS bodies, or validation internals.
 
 ## 9. Persistence, Size, and Free-Plan Budget
 
-- Every successful classic mutation updates exactly the existing single `room_state` row.
-- No command-specific SQL table or index is added.
+- Every successful ordinary classic command updates exactly the existing single `room_state` row.
+- One bounded `pending_actions` row and its due-time index are added for the recoverable DDS action; there is at most one classic DDS action per room.
 - The command cache remains bounded at 128 entries per session and 24 hours.
 - The engine state is covered by the existing 512 KiB snapshot limit.
 - One complete board has at most 52 play commands, a bounded monotonic bidding sequence, four ready commands, and one start command. This stays far below the already gated 1,000 ordinary commands per room.
-- DDS completion adds at most one trusted state update and one DDS binding request per deal.
-- Budget tests must include a maximum-length legal auction, all 52 plays, reconnect snapshots, and the DDS update while keeping the existing Free-plan gates green.
+- DDS adds one action insert, alarm scheduling, up to three binding requests, one action delete, and one trusted state update per deal; these are modeled separately from ordinary client commands.
+- Budget tests must include a maximum-length legal auction, all 52 plays, reconnect snapshots, eviction between deal start and DDS completion, three-attempt DDS failure, and successful DDS completion while keeping the existing Free-plan gates green.
 
 ## 10. Testing Strategy
 
@@ -244,15 +348,18 @@ All implementation follows red-green-refactor.
 ### Pure unit tests
 
 - Exact board cycle, scoring matrix, bid ordering, X/XX ownership, declarer selection, legal play, follow suit, trick winner, dummy control, passed-out board, and next-board readiness.
+- Valid `LOBBY` empty state and every phase-specific invariant, including card conservation and score-once behavior.
 - Immutability and stable JSON output.
 - Invalid and corrupted states fail closed.
 - Viewer projections prove concealed-hand and partner-alert privacy.
+- Compatibility helpers cover accepted claims, alert editing, Q&A authorization/schema, matching/stale DDS success, and DDS terminal failure.
 
 ### Node characterization and adapter tests
 
 - Fixed deals exercise the current Socket.IO event order and payloads from start through scoring.
 - Existing standard classic behavior remains byte-equivalent for supported payload fields.
 - Claims still settle through the shared scorer without moving claim voting into the core command scope.
+- DDS completion is applied to the latest room state, while stale completion is ignored and failure remains nonfatal.
 - Teaching, ultimate, problem, and complex routing remain on their prior paths.
 
 ### Durable Object integration tests
@@ -261,7 +368,8 @@ All implementation follows red-green-refactor.
 - Bidding/play/scoring through real Miniflare Durable Objects.
 - Idempotent retries, stale revisions, CAS races, eviction/hibernation reconstruction, reconnect sync, and actor takeover.
 - Recipient-specific snapshots prove no concealed-hand leakage.
-- DDS late-result rejection and nonfatal failure.
+- DDS success racing a player command preserves both mutations with monotonically increasing revisions.
+- DDS eviction recovery, old-action replacement, late-result rejection, retry exhaustion, and idempotent completion.
 - SQL accounting remains one state-row read/write per ordinary command.
 
 ### Build and regression gates
