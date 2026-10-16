@@ -213,9 +213,6 @@ function validateClaim(claim) {
 }
 
 function validateScoreTrickHistory(score) {
-  const initialBySeat = Object.fromEntries(SEATS.map(seat => [seat,
-    new Set(score.initialHands[seat].map(cardKey))]));
-  const seen = new Set();
   let expectedLeader = nextSeat(score.declarer);
   for (const trick of score.completedTricks) {
     invariant(trick.cards[0].seat === expectedLeader, 'score trick leader is invalid');
@@ -225,13 +222,10 @@ function validateScoreTrickHistory(score) {
         invariant(play.seat === nextSeat(trick.cards[index - 1].seat),
           'score trick play order is invalid');
       }
-      const key = cardKey(play.card);
-      invariant(initialBySeat[play.seat].has(key), 'score played card has changed ownership');
-      invariant(!seen.has(key), 'score played card is duplicated');
-      seen.add(key);
     }
     expectedLeader = trick.winner;
   }
+  replayPlayHistory(score.initialHands, score.completedTricks, []);
 }
 
 function validateBoardScore(score) {
@@ -259,7 +253,7 @@ function validateBoardScore(score) {
   validateAuction(score.biddingHistory);
   const boardInfo = boardInfoFor(score.dealNumber);
   const auction = deriveAuction(score.biddingHistory, boardInfo.dealer);
-  invariant(auction.passes === 3 && sameJson(auction.contract, score.contract),
+  invariant(auction.passes === 3 && sameValue(auction.contract, score.contract),
     'played score auction is inconsistent');
   invariant(SEATS.includes(score.declarer) && SEATS.includes(score.dummy)
     && partnerOf(score.declarer) === score.dummy, 'played score seats are invalid');
@@ -308,14 +302,20 @@ function validateBoardScore(score) {
 function validateBoardScores(state) {
   let prior = 0;
   const seen = new Set();
-  for (const score of state.boardScores) {
+  for (let index = 0; index < state.boardScores.length; index++) {
+    const score = state.boardScores[index];
     validateBoardScore(score);
+    invariant(score.dealNumber === index + 1, 'board scores must form a complete deal prefix');
     invariant(score.dealNumber > prior, 'board scores must be ordered by deal');
     invariant(!seen.has(score.dealNumber), 'board score deal is duplicated');
     invariant(score.dealNumber <= state.dealNumber, 'board score cannot be from a future deal');
     prior = score.dealNumber;
     seen.add(score.dealNumber);
   }
+  const expectedCount = state.phase === 'SCORING'
+    ? state.dealNumber
+    : Math.max(0, state.dealNumber - 1);
+  invariant(state.boardScores.length === expectedCount, 'board score history is incomplete');
   return seen;
 }
 
@@ -357,19 +357,34 @@ function validateNoPlayFields(state) {
     'pre-play flags are invalid');
 }
 
-function sameCards(left, right) {
-  return left.size === right.size && [...left].every(key => right.has(key));
+function sameHandOwnership(hands, initialHands) {
+  return SEATS.every(seat => {
+    const held = new Set(hands[seat].map(cardKey));
+    const initial = new Set(initialHands[seat].map(cardKey));
+    return held.size === initial.size && [...held].every(key => initial.has(key));
+  });
 }
 
-function sameJson(left, right) {
-  return JSON.stringify(left) === JSON.stringify(right);
+function sameValue(left, right) {
+  if (Object.is(left, right)) return true;
+  if (left === null || right === null || typeof left !== 'object' || typeof right !== 'object') {
+    return false;
+  }
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) && left.length === right.length
+      && left.every((value, index) => sameValue(value, right[index]));
+  }
+  const leftKeys = Reflect.ownKeys(left);
+  const rightKeys = Reflect.ownKeys(right);
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every(key => Object.hasOwn(right, key) && sameValue(left[key], right[key]));
 }
 
 function validateFinishedAuction(state, { passedOut = false } = {}) {
   const derived = deriveAuction(state.biddingHistory, state.boardInfo.dealer);
   invariant(state.currentBidder === null, 'finished auction cannot have a current bidder');
   invariant(state.consecutivePasses === derived.passes, 'consecutive pass count is inconsistent');
-  invariant(sameJson(state.currentContract, derived.contract), 'current contract is inconsistent with auction');
+  invariant(sameValue(state.currentContract, derived.contract), 'current contract is inconsistent with auction');
   if (passedOut) {
     invariant(derived.contract === null && derived.passes === 4 && state.biddingHistory.length === 4,
       'passed-out auction is invalid');
@@ -380,7 +395,7 @@ function validateFinishedAuction(state, { passedOut = false } = {}) {
 
 function validateActiveAuction(state) {
   const derived = deriveAuction(state.biddingHistory, state.boardInfo.dealer);
-  invariant(sameJson(state.currentContract, derived.contract), 'current contract is inconsistent with auction');
+  invariant(sameValue(state.currentContract, derived.contract), 'current contract is inconsistent with auction');
   invariant(state.consecutivePasses === derived.passes, 'consecutive pass count is inconsistent');
   invariant(state.currentBidder === SEATS[(SEATS.indexOf(state.boardInfo.dealer)
     + state.biddingHistory.length) % SEATS.length], 'current bidder is inconsistent with auction');
@@ -428,25 +443,39 @@ function validatePlayState(state) {
   invariant(state.currentPlayer === expectedPlayer, 'current player is inconsistent with tricks');
   invariant(state.dummyRevealed === (played.length > 0), 'dummy reveal flag is inconsistent with play');
 
-  const initialBySeat = Object.fromEntries(SEATS.map(seat => [seat,
-    new Set(state.initialHands[seat].map(cardKey))]));
-  const reconstructed = new Set();
-  for (const seat of SEATS) {
-    for (const card of state.hands[seat]) {
-      const key = cardKey(card);
-      invariant(initialBySeat[seat].has(key), 'held card has changed ownership');
-      invariant(!reconstructed.has(key), 'card is duplicated in reconstructed deal');
-      reconstructed.add(key);
-    }
-  }
-  for (const play of played) {
-    const key = cardKey(play.card);
-    invariant(initialBySeat[play.seat].has(key), 'played card has changed ownership');
-    invariant(!reconstructed.has(key), 'card is duplicated in reconstructed deal');
-    reconstructed.add(key);
-  }
-  invariant(reconstructed.size === 52, 'held and played cards do not reconstruct the deal');
+  replayPlayHistory(state.initialHands, state.completedTricks, state.currentTrick, state.hands);
   return { nsCompleted, ewCompleted };
+}
+
+function replayPlayHistory(initialHands, completedTricks, currentTrick, remainingHands = null) {
+  const holdings = Object.fromEntries(SEATS.map(seat => [seat,
+    new Map(initialHands[seat].map(card => [cardKey(card), card]))]));
+
+  const replayTrick = cards => {
+    let ledSuit = null;
+    for (const play of cards) {
+      const hand = holdings[play.seat];
+      const key = cardKey(play.card);
+      invariant(hand.has(key), 'played card was not held by its seat');
+      if (ledSuit === null) {
+        ledSuit = play.card.suit;
+      } else if (play.card.suit !== ledSuit) {
+        invariant(![...hand.values()].some(card => card.suit === ledSuit),
+          'play history violates follow-suit');
+      }
+      hand.delete(key);
+    }
+  };
+
+  completedTricks.forEach(trick => replayTrick(trick.cards));
+  if (currentTrick.length > 0) replayTrick(currentTrick);
+  if (remainingHands === null) return;
+  for (const seat of SEATS) {
+    const actual = new Set(remainingHands[seat].map(cardKey));
+    invariant(actual.size === holdings[seat].size
+      && [...actual].every(key => holdings[seat].has(key)),
+    'remaining hand does not match replayed history');
+  }
 }
 
 function currentScore(state) {
@@ -457,17 +486,17 @@ function validateCurrentScoreMatches(state, score, claim) {
   invariant(score.dealNumber === state.dealNumber && score.boardNumber === state.boardInfo.number,
     'current score board identity is invalid');
   invariant(score.passedOut === false, 'current played score cannot be passed out');
-  invariant(sameJson(score.contract, state.currentContract)
+  invariant(sameValue(score.contract, state.currentContract)
     && score.declarer === state.declarer && score.dummy === state.dummy,
   'current score contract seats are inconsistent');
   const declarerTricks = sideOf(state.declarer) === 'NS' ? state.nsTricks : state.ewTricks;
   invariant(score.declarerTricks === declarerTricks, 'current score declarer tricks are inconsistent');
   invariant(score.vulnerability === state.boardInfo.vul, 'current score vulnerability is inconsistent');
-  invariant(sameJson(score.biddingHistory, state.biddingHistory)
-    && sameJson(score.completedTricks, state.completedTricks)
-    && sameJson(score.initialHands, state.initialHands)
-    && sameJson(score.ddTable, state.ddTable)
-    && sameJson(score.claim, claim), 'current score history is inconsistent');
+  invariant(sameValue(score.biddingHistory, state.biddingHistory)
+    && sameValue(score.completedTricks, state.completedTricks)
+    && sameValue(score.initialHands, state.initialHands)
+    && sameValue(score.ddTable, state.ddTable)
+    && sameValue(score.claim, claim), 'current score history is inconsistent');
 }
 
 function validateClassicStateUnchecked(state) {
@@ -490,10 +519,11 @@ function validateClassicStateUnchecked(state) {
 
   invariant(state.dealNumber > 0, 'active deal number must be positive');
   validateBoardInfo(state.boardInfo, state.dealNumber);
-  const held = validateCardMap(state.hands);
-  const initial = validateCardMap(state.initialHands, { initial: true });
+  validateCardMap(state.hands);
+  validateCardMap(state.initialHands, { initial: true });
   if (state.phase === 'BIDDING') {
-    invariant(sameCards(held, initial), 'bidding hands must equal initial deal');
+    invariant(sameHandOwnership(state.hands, state.initialHands),
+      'bidding hands must preserve initial seat ownership');
     invariant(SEATS.every(seat => state.readyStatus[seat] === false), 'deal readiness must be false');
     validateNoPlayFields(state);
     validateActiveAuction(state);
@@ -508,14 +538,15 @@ function validateClassicStateUnchecked(state) {
     'finished deal must have exactly one latest score');
     validateFinishedAuction(state, { passedOut: true });
     validateNoPlayFields(state);
-    invariant(sameCards(held, initial), 'passed-out hands must equal initial deal');
+    invariant(sameHandOwnership(state.hands, state.initialHands),
+      'passed-out hands must preserve initial seat ownership');
     const score = currentScore(state);
     invariant(score.passedOut === true
       && score.dealNumber === state.dealNumber
       && score.boardNumber === state.boardInfo.number
-      && sameJson(score.biddingHistory, state.biddingHistory)
-      && sameJson(score.initialHands, state.initialHands)
-      && sameJson(score.ddTable, state.ddTable), 'passed-out score is inconsistent');
+      && sameValue(score.biddingHistory, state.biddingHistory)
+      && sameValue(score.initialHands, state.initialHands)
+      && sameValue(score.ddTable, state.ddTable), 'passed-out score is inconsistent');
     return { ok: true };
   }
 

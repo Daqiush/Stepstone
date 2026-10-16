@@ -84,6 +84,54 @@ function makePlayingState(completedCount = 0) {
   return state;
 }
 
+function makeMixedPlayingState() {
+  const hands = orderedDeal();
+  [hands.E[12], hands.S[0]] = [hands.S[0], hands.E[12]];
+  const state = createClassicDealState(createClassicLobbyState(), {
+    hands, boardInfo: boardInfoFor(1),
+  });
+  state.phase = 'PLAYING';
+  state.biddingHistory = [
+    normalizedCall('N', '1NT'), normalizedCall('E', 'Pass'),
+    normalizedCall('S', 'Pass'), normalizedCall('W', 'Pass'),
+  ];
+  state.currentBidder = null;
+  state.currentContract = {
+    level: 1, suit: 'NT', seat: 'N', doubled: false, redoubled: false, doublerSeat: null,
+  };
+  state.consecutivePasses = 3;
+  state.declarer = 'N';
+  state.dummy = 'S';
+  state.leader = 'E';
+  const cards = [
+    { seat: 'E', card: { suit: 'H', rank: '2' } },
+    { seat: 'S', card: { suit: 'H', rank: 'A' } },
+    { seat: 'W', card: { suit: 'C', rank: '2' } },
+    { seat: 'N', card: { suit: 'S', rank: '2' } },
+  ];
+  cards.forEach(play => removeCard(state.hands[play.seat], play.card));
+  state.completedTricks = [{ cards, winner: 'S' }];
+  state.nsTricks = 1;
+  state.ewTricks = 0;
+  state.currentPlayer = 'S';
+  state.dummyRevealed = true;
+  return state;
+}
+
+function makeOneTrickClaimedScoringState() {
+  const state = makeMixedPlayingState();
+  state.phase = 'SCORING';
+  state.nsTricks = 7;
+  state.ewTricks = 6;
+  state.claimSettlement = {
+    claimer: 'N', tricksToWin: 6, reason: 'remaining winners', completedAtClaim: 1,
+  };
+  state.boardScores = [playedScore(state, {
+    claimer: 'N', tricksToWin: 6, reason: 'remaining winners',
+  })];
+  return state;
+}
+
 function passedOutScore(state) {
   return {
     dealNumber: state.dealNumber,
@@ -439,4 +487,122 @@ test('validateClassicState rejects corrupted prior score auction order and repea
     afterPlayed.boardScores[0].completedTricks[0].cards[0].card,
   );
   assertInvariant(() => validateClassicState(afterPlayed));
+});
+
+test('validateClassicState preserves per-seat ownership before play and on passed-out boards', () => {
+  const bidding = createClassicDealState(createClassicLobbyState(), {
+    hands: orderedDeal(), boardInfo: boardInfoFor(1),
+  });
+  [bidding.hands.N[0], bidding.hands.E[0]] = [bidding.hands.E[0], bidding.hands.N[0]];
+  assertInvariant(() => validateClassicState(bidding));
+
+  const passedOut = makePassedOutScoringState();
+  [passedOut.hands.N[0], passedOut.hands.E[0]] = [passedOut.hands.E[0], passedOut.hands.N[0]];
+  assertInvariant(() => validateClassicState(passedOut));
+});
+
+test('validateClassicState replays follow-suit legality in completed and current tricks', () => {
+  const completed = makeMixedPlayingState();
+  completed.completedTricks[0].cards[1].card = { suit: 'D', rank: '3' };
+  completed.completedTricks[0].winner = 'E';
+  completed.currentPlayer = 'E';
+  completed.nsTricks = 0;
+  completed.ewTricks = 1;
+  removeCard(completed.hands.S, { suit: 'D', rank: '3' });
+  completed.hands.S.push({ suit: 'H', rank: 'A' });
+  assertInvariant(() => validateClassicState(completed));
+
+  const current = makeMixedPlayingState();
+  for (const play of current.completedTricks[0].cards) {
+    current.hands[play.seat].push(clone(play.card));
+  }
+  current.completedTricks = [];
+  current.nsTricks = 0;
+  current.currentTrick = [
+    { seat: 'E', card: { suit: 'H', rank: '2' } },
+    { seat: 'S', card: { suit: 'D', rank: '3' } },
+  ];
+  removeCard(current.hands.E, current.currentTrick[0].card);
+  removeCard(current.hands.S, current.currentTrick[1].card);
+  current.currentPlayer = 'W';
+  assertInvariant(() => validateClassicState(current));
+});
+
+test('validateClassicState replays follow-suit legality in persisted claimed board scores', () => {
+  const previous = makeOneTrickClaimedScoringState();
+  const next = createClassicDealState(previous, {
+    hands: orderedDeal(), boardInfo: boardInfoFor(2),
+  });
+  const score = next.boardScores[0];
+  score.completedTricks[0].cards[1].card = { suit: 'D', rank: '3' };
+  score.completedTricks[0].winner = 'E';
+  score.declarerTricks = 6;
+  score.score = -50;
+  score.made = false;
+  score.diff = -1;
+  assertInvariant(() => validateClassicState(next));
+});
+
+test('validateClassicState requires a contiguous complete board score prefix', () => {
+  const dealTwoWithoutHistory = createClassicDealState(createClassicLobbyState(), {
+    hands: orderedDeal(), boardInfo: boardInfoFor(1),
+  });
+  dealTwoWithoutHistory.dealNumber = 2;
+  dealTwoWithoutHistory.boardInfo = boardInfoFor(2);
+  dealTwoWithoutHistory.currentBidder = 'E';
+  assertInvariant(() => validateClassicState(dealTwoWithoutHistory));
+
+  const dealThreeMissingMiddle = createClassicDealState(makePassedOutScoringState(), {
+    hands: orderedDeal(), boardInfo: boardInfoFor(2),
+  });
+  dealThreeMissingMiddle.dealNumber = 3;
+  dealThreeMissingMiddle.boardInfo = boardInfoFor(3);
+  dealThreeMissingMiddle.currentBidder = 'S';
+  assertInvariant(() => validateClassicState(dealThreeMissingMiddle));
+
+  const scoringTwoMissingFirst = makePassedOutScoringState();
+  scoringTwoMissingFirst.dealNumber = 2;
+  scoringTwoMissingFirst.boardInfo = boardInfoFor(2);
+  scoringTwoMissingFirst.biddingHistory = ['E', 'S', 'W', 'N']
+    .map(seat => normalizedCall(seat, 'Pass'));
+  scoringTwoMissingFirst.boardScores[0].dealNumber = 2;
+  scoringTwoMissingFirst.boardScores[0].boardNumber = 2;
+  scoringTwoMissingFirst.boardScores[0].biddingHistory = clone(scoringTwoMissingFirst.biddingHistory);
+  assertInvariant(() => validateClassicState(scoringTwoMissingFirst));
+
+  const scoringOne = makePassedOutScoringState();
+  const scoringTwo = createClassicDealState(scoringOne, {
+    hands: orderedDeal(), boardInfo: boardInfoFor(2),
+  });
+  scoringTwo.phase = 'SCORING';
+  scoringTwo.biddingHistory = ['E', 'S', 'W', 'N'].map(seat => normalizedCall(seat, 'Pass'));
+  scoringTwo.currentBidder = null;
+  scoringTwo.consecutivePasses = 4;
+  scoringTwo.boardScores.push(passedOutScore(scoringTwo));
+  assert.deepEqual(validateClassicState(scoringTwo), { ok: true });
+
+  const dealThree = createClassicDealState(scoringTwo, {
+    hands: orderedDeal(), boardInfo: boardInfoFor(3),
+  });
+  [dealThree.boardScores[0], dealThree.boardScores[1]] = [
+    dealThree.boardScores[1], dealThree.boardScores[0],
+  ];
+  assertInvariant(() => validateClassicState(dealThree));
+});
+
+test('validateClassicState compares canonical objects independent of key insertion order', () => {
+  const state = createClassicDealState(createClassicLobbyState(), {
+    hands: orderedDeal(), boardInfo: boardInfoFor(1),
+  });
+  state.biddingHistory = [normalizedCall('N', '1H')];
+  state.currentBidder = 'E';
+  state.currentContract = {
+    doublerSeat: null,
+    redoubled: false,
+    doubled: false,
+    seat: 'N',
+    suit: 'H',
+    level: 1,
+  };
+  assert.deepEqual(validateClassicState(state), { ok: true });
 });
