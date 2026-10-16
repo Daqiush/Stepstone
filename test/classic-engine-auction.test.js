@@ -132,6 +132,28 @@ test('command entry points reject malformed client commands and malformed truste
   assertInvariant(() => preflightClassicCommand(corrupt, startCommand(), preflightContext()));
 });
 
+test('trusted occupiedSeats rejects sparse, inherited-index, and extra-key arrays', () => {
+  const sparseWithCompensatingKey = ['N', 'E', , 'W'];
+  sparseWithCompensatingKey.compensatesForHole = true;
+
+  const inheritedIndex = ['N', 'E', , 'W'];
+  const inheritedIndexPrototype = Object.create(Array.prototype);
+  Object.defineProperty(inheritedIndexPrototype, '2', {
+    value: 'S', enumerable: true, configurable: true,
+  });
+  Object.setPrototypeOf(inheritedIndex, inheritedIndexPrototype);
+  inheritedIndex.compensatesForHole = true;
+
+  const extraSymbol = [...FOUR_SEATS];
+  extraSymbol[Symbol('extra')] = true;
+
+  for (const occupiedSeats of [sparseWithCompensatingKey, inheritedIndex, extraSymbol]) {
+    assertInvariant(() => preflightClassicCommand(
+      createClassicLobbyState(), startCommand(), { actor: owner(), occupiedSeats },
+    ));
+  }
+});
+
 test('preflight is immutable, reports exact deal need, and spectators receive a domain failure', () => {
   const lobby = createClassicLobbyState();
   const command = startCommand();
@@ -382,6 +404,37 @@ test('classic.bid immutably advances Pass, contract, X, and XX with exact events
   }
 });
 
+test('classic.bid copies only changed branches and keeps event payloads detached', () => {
+  const opening = deepFreeze(biddingState());
+  const contractResult = applyBid(opening, 'N', '1H');
+  assert.notStrictEqual(contractResult.state, opening);
+  assert.notStrictEqual(contractResult.state.biddingHistory, opening.biddingHistory);
+  assert.notStrictEqual(contractResult.state.currentContract, opening.currentContract);
+  for (const key of [
+    'boardInfo', 'hands', 'initialHands', 'readyStatus', 'currentTrick', 'completedTricks',
+    'boardScores',
+  ]) assert.strictEqual(contractResult.state[key], opening[key], key);
+
+  const afterContract = deepFreeze(contractResult.state);
+  const passResult = applyBid(afterContract, 'E', 'Pass');
+  assert.notStrictEqual(passResult.state, afterContract);
+  assert.notStrictEqual(passResult.state.biddingHistory, afterContract.biddingHistory);
+  assert.strictEqual(passResult.state.currentContract, afterContract.currentContract);
+  for (const key of [
+    'boardInfo', 'hands', 'initialHands', 'readyStatus', 'currentTrick', 'completedTricks',
+    'boardScores',
+  ]) assert.strictEqual(passResult.state[key], afterContract[key], key);
+  passResult.events[0].payload.biddingHistory[0].bid = '7NT';
+  passResult.events[0].payload.currentContract.level = 7;
+  assert.equal(passResult.state.biddingHistory[0].bid, '1H');
+  assert.equal(passResult.state.currentContract.level, 1);
+
+  const doubled = applyBid(afterContract, 'E', 'X');
+  assert.notStrictEqual(doubled.state.currentContract, afterContract.currentContract);
+  assert.strictEqual(doubled.state.hands, afterContract.hands);
+  assert.strictEqual(doubled.state.boardScores, afterContract.boardScores);
+});
+
 test('three passes after a contract enter PLAYING with exact seats and ordered events', () => {
   let state = biddingState();
   state = applyBid(state, 'N', '1H').state;
@@ -480,6 +533,21 @@ test('four opening passes enter SCORING with one passed-out score and no bidding
   const replay = applyBid(result.state, 'W', 'Pass');
   assert.deepEqual(replay, { ok: false, code: 'CLASSIC_WRONG_PHASE' });
   assert.equal(result.state.boardScores.length, 1);
+});
+
+test('passed-out completion allocates only auction and score branches', () => {
+  let state = biddingState();
+  state = applyBid(state, 'N', 'Pass').state;
+  state = applyBid(state, 'E', 'Pass').state;
+  state = applyBid(state, 'S', 'Pass').state;
+  const frozen = deepFreeze(state);
+  const result = applyBid(frozen, 'W', 'Pass');
+  assert.notStrictEqual(result.state, frozen);
+  assert.notStrictEqual(result.state.biddingHistory, frozen.biddingHistory);
+  assert.notStrictEqual(result.state.boardScores, frozen.boardScores);
+  for (const key of [
+    'boardInfo', 'hands', 'initialHands', 'readyStatus', 'currentTrick', 'completedTricks',
+  ]) assert.strictEqual(result.state[key], frozen[key], key);
 });
 
 test('apply rejects trusted deal material on a command that does not need a deal', () => {

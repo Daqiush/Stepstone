@@ -45,8 +45,17 @@ function validateActor(actor) {
 
 function validateOccupiedSeats(occupiedSeats) {
   invariant(Array.isArray(occupiedSeats), 'occupiedSeats must be an array');
-  invariant(Reflect.ownKeys(occupiedSeats).length === occupiedSeats.length + 1,
-    'occupiedSeats must be a dense array');
+  invariant(Object.getPrototypeOf(occupiedSeats) === Array.prototype,
+    'occupiedSeats must use the canonical array prototype');
+  const expectedKeys = [
+    ...Array.from({ length: occupiedSeats.length }, (_, index) => String(index)),
+    'length',
+  ];
+  const ownKeys = Reflect.ownKeys(occupiedSeats);
+  invariant(ownKeys.length === expectedKeys.length
+    && expectedKeys.every(key => Object.hasOwn(occupiedSeats, key))
+    && ownKeys.every(key => typeof key === 'string' && expectedKeys.includes(key)),
+  'occupiedSeats must be a dense exact array');
   invariant(occupiedSeats.every(seat => SEATS.includes(seat)), 'occupiedSeats contains an invalid seat');
   invariant(new Set(occupiedSeats).size === occupiedSeats.length,
     'occupiedSeats contains a duplicate seat');
@@ -176,14 +185,16 @@ function applyStart(state, context) {
 function applyBid(state, payload, context) {
   invariant(context.deal === null, 'bid command cannot carry a trusted deal');
   const { nextSeat, parseBid } = require('./rules.cjs');
-  const next = cloneValue(state);
-  next.biddingHistory.push({
-    seat: context.actor.seat,
-    bid: payload.bid,
-    alert: payload.alert ? true : null,
-    explain: payload.explain,
-    qa: [],
-  });
+  const next = {
+    ...state,
+    biddingHistory: [...state.biddingHistory, {
+      seat: context.actor.seat,
+      bid: payload.bid,
+      alert: payload.alert ? true : null,
+      explain: payload.explain,
+      qa: [],
+    }],
+  };
 
   const parsed = parseBid(payload.bid);
   if (parsed.kind === 'pass') {
@@ -221,7 +232,7 @@ function applyBid(state, payload, context) {
     next.currentBidder = null;
     const score = buildBoardScore(next, { type: 'passed-out' });
     next.phase = 'SCORING';
-    next.boardScores.push(cloneValue(score));
+    next.boardScores = [...state.boardScores, score];
     validateClassicState(next);
     return {
       ok: true,
