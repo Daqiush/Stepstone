@@ -291,6 +291,29 @@ test('buildBoardScore rejects unknown finish keys/types and corrupted trusted st
   for (const invoke of cases) assertInvariant(invoke);
 });
 
+test('buildBoardScore rejects ready seats in every pre-scoring finish state', () => {
+  const passedOut = terminalPassedOutState();
+  passedOut.readyStatus.N = true;
+
+  const played = terminalPlayedState();
+  played.readyStatus.E = true;
+
+  const claimed = terminalPlayedState(5);
+  claimed.nsTricks = 6;
+  claimed.ewTricks = 7;
+  claimed.readyStatus.S = true;
+
+  const cases = [
+    () => buildBoardScore(passedOut, { type: 'passed-out' }),
+    () => buildBoardScore(played, { type: 'played' }),
+    () => buildBoardScore(claimed, {
+      type: 'claimed',
+      claim: { claimer: 'N', tricksToWin: 6, reason: 'remaining winners' },
+    }),
+  ];
+  for (const invoke of cases) assertInvariant(invoke);
+});
+
 test('calculateDuplicateScore rejects every malformed trusted input as ClassicInvariantError', () => {
   const valid = contract(1, 'C');
   const cases = [

@@ -169,6 +169,8 @@ function buildBoardScore(state, finish) {
       'finish does not match the state phase');
     invariant(state.currentBidder === null, 'finished auction must not have a current bidder');
     invariant(state.claimSettlement === null, 'finish state must not already contain a claim settlement');
+    invariant(SEATS.every(seat => state.readyStatus?.[seat] === false),
+      'pre-scoring readiness must be false');
 
     const score = finish.type === 'passed-out'
       ? passedOutScore(state)
