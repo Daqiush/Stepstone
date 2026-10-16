@@ -173,6 +173,8 @@ function isCanonicalCard(value) {
     && typeof value === 'object'
     && !Array.isArray(value)
     && Object.keys(value).length === 2
+    && Object.hasOwn(value, 'suit')
+    && Object.hasOwn(value, 'rank')
     && SUITS.includes(value.suit)
     && RANKS.includes(value.rank);
 }

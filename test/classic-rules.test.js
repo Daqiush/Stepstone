@@ -57,8 +57,12 @@ test('orderedDeal returns the canonical 52-card deal', () => {
 
   const keys = SEATS.flatMap(seat => deal[seat].map(({ suit, rank }) => `${suit}${rank}`));
   assert.equal(new Set(keys).size, 52);
-  assert.ok(deal.N.concat(deal.E, deal.S, deal.W).every(({ suit, rank }) =>
-    SUITS.includes(suit) && RANKS.includes(rank)));
+  for (const dealtCard of deal.N.concat(deal.E, deal.S, deal.W)) {
+    assert.deepEqual(Object.keys(dealtCard).sort(), ['rank', 'suit']);
+    assert.equal(Object.hasOwn(dealtCard, 'suit'), true);
+    assert.equal(Object.hasOwn(dealtCard, 'rank'), true);
+    assert.ok(SUITS.includes(dealtCard.suit) && RANKS.includes(dealtCard.rank));
+  }
 });
 
 test('seat helpers follow clockwise order, partnerships, and sides', () => {
@@ -264,6 +268,18 @@ test('validatePlay checks dummy hand when declarer acts on dummy turn', () => {
   assert.equal(validatePlay(state, 'N', card('S', 'A')).code, 'CLASSIC_CARD_NOT_HELD');
 });
 
+test('validatePlay rejects cards that inherit suit and rank instead of owning them', () => {
+  const inheritedCard = Object.assign(
+    Object.create({ suit: 'H', rank: '2' }),
+    { unrelated: true, extra: true },
+  );
+  const state = playState({
+    hands: { N: [{ suit: 'H', rank: '2' }], E: [], S: [], W: [] },
+  });
+
+  assert.equal(validatePlay(state, 'N', inheritedCard).code, 'CLASSIC_CARD_NOT_HELD');
+});
+
 test('trickWinner chooses the highest card in the led suit without trump', () => {
   const trick = [
     { seat: 'N', card: card('H', 'J') },
@@ -295,4 +311,19 @@ test('trickWinner rejects impossible tied duplicate cards', () => {
   ];
 
   assert.throws(() => trickWinner(trick, 'NT'), /duplicate|tie/);
+});
+
+test('trickWinner rejects cards that inherit suit and rank instead of owning them', () => {
+  const inheritedCard = Object.assign(
+    Object.create({ suit: 'H', rank: '2' }),
+    { unrelated: true, extra: true },
+  );
+  const trick = [
+    { seat: 'N', card: inheritedCard },
+    { seat: 'E', card: { suit: 'H', rank: '3' } },
+    { seat: 'S', card: { suit: 'C', rank: 'A' } },
+    { seat: 'W', card: { suit: 'H', rank: '4' } },
+  ];
+
+  assert.throws(() => trickWinner(trick, 'NT'), /invalid play/);
 });
