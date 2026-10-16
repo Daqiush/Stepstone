@@ -1,6 +1,6 @@
 'use strict';
 
-const { SEATS } = require('./constants.cjs');
+const { SEATS, SUITS, RANKS } = require('./constants.cjs');
 const {
   ClassicInvariantError, createClassicDealState, validateClassicState,
 } = require('./state.cjs');
@@ -159,10 +159,23 @@ function preflightReady(state, payload, context) {
   return dealNeed(needsDeal, needsDeal ? state.dealNumber + 1 : null);
 }
 
+function validatePlayPayload(payload) {
+  input(hasExactOwnKeys(payload, ['expectedRevision', 'card']),
+    'play payload has an invalid shape');
+  input(Number.isSafeInteger(payload.expectedRevision) && payload.expectedRevision >= 0,
+    'expectedRevision must be a nonnegative safe integer');
+  input(hasExactOwnKeys(payload.card, ['suit', 'rank']), 'play card has an invalid shape');
+  input(SUITS.includes(payload.card.suit) && RANKS.includes(payload.card.rank),
+    'play card must be canonical');
+}
+
 function preflightPlay(state, payload, context) {
+  validatePlayPayload(payload);
   if (!actorCanMutate(context.actor, context.occupiedSeats)) return domain('CLASSIC_FORBIDDEN');
   if (state.phase !== 'PLAYING') return domain('CLASSIC_WRONG_PHASE');
-  throw new ClassicInvariantError('classic.play is not implemented yet');
+  const { validatePlay } = require('./rules.cjs');
+  const result = validatePlay(state, context.actor.seat, payload.card);
+  return result.ok ? dealNeed(false) : domain(result.code);
 }
 
 function applyStart(state, context) {
@@ -288,6 +301,138 @@ function applyBid(state, payload, context) {
   };
 }
 
+function applyPlay(state, payload, context) {
+  invariant(context.deal === null, 'play command cannot carry a trusted deal');
+  const {
+    nextSeat, sideOf, trickWinner, validatePlay,
+  } = require('./rules.cjs');
+  const validation = validatePlay(state, context.actor.seat, payload.card);
+  invariant(validation.ok, 'preflight-approved play became invalid');
+  const { effectiveSeat } = validation;
+  const hand = state.hands[effectiveSeat];
+  const cardIndex = hand.findIndex(card => (
+    card.suit === payload.card.suit && card.rank === payload.card.rank
+  ));
+  invariant(cardIndex !== -1, 'preflight-approved card is no longer held');
+
+  const playedCard = cloneValue(payload.card);
+  const currentTrick = [
+    ...state.currentTrick,
+    { seat: effectiveSeat, card: cloneValue(playedCard) },
+  ];
+  const next = {
+    ...state,
+    hands: {
+      ...state.hands,
+      [effectiveSeat]: [...hand.slice(0, cardIndex), ...hand.slice(cardIndex + 1)],
+    },
+    currentTrick,
+    currentPlayer: nextSeat(effectiveSeat),
+  };
+  const revealDummy = !state.dummyRevealed
+    && state.completedTricks.length === 0
+    && currentTrick.length === 1;
+  if (revealDummy) next.dummyRevealed = true;
+
+  const events = [];
+  if (revealDummy) {
+    events.push({ name: 'classic.dummy-revealed', payload: { dummy: next.dummy } });
+  }
+  events.push({
+    name: 'classic.card-played',
+    payload: {
+      seat: effectiveSeat,
+      card: cloneValue(playedCard),
+      currentTrick: cloneValue(currentTrick),
+    },
+  });
+  if (currentTrick.length === 4) {
+    const winner = trickWinner(currentTrick, state.currentContract.suit);
+    const trick = { cards: cloneValue(currentTrick), winner };
+    next.currentTrick = [];
+    next.completedTricks = [...state.completedTricks, trick];
+    next.currentPlayer = winner;
+    if (sideOf(winner) === 'NS') next.nsTricks = state.nsTricks + 1;
+    else next.ewTricks = state.ewTricks + 1;
+    events.push({
+      name: 'classic.trick-ended',
+      payload: {
+        trick: cloneValue(trick),
+        winner,
+        nsTricks: next.nsTricks,
+        ewTricks: next.ewTricks,
+      },
+    });
+    if (next.completedTricks.length === 13) {
+      const { buildBoardScore } = require('./scoring.cjs');
+      const score = buildBoardScore(next, { type: 'played' });
+      next.phase = 'SCORING';
+      next.boardScores = [...state.boardScores, score];
+      events.push({
+        name: 'classic.finished',
+        payload: {
+          reason: 'played',
+          dealNumber: next.dealNumber,
+          contract: cloneValue(next.currentContract),
+          declarer: next.declarer,
+          nsTricks: next.nsTricks,
+          ewTricks: next.ewTricks,
+          score: score.score,
+        },
+      });
+    }
+  }
+  validateClassicState(next);
+  return {
+    ok: true,
+    state: next,
+    events,
+    effects: [],
+    reply: { name: 'classic.play', phase: next.phase },
+  };
+}
+
+function applyReady(state, context) {
+  const readyStatus = {
+    ...state.readyStatus,
+    [context.actor.seat]: !state.readyStatus[context.actor.seat],
+  };
+  const allReady = SEATS.every(seat => readyStatus[seat]);
+  const readyEvent = {
+    name: 'classic.ready-updated',
+    payload: { readyStatus: cloneValue(readyStatus) },
+  };
+  if (!allReady) {
+    invariant(context.deal === null, 'ready command cannot carry an unused trusted deal');
+    const next = { ...state, readyStatus };
+    validateClassicState(next);
+    return {
+      ok: true,
+      state: next,
+      events: [readyEvent],
+      effects: [],
+      reply: { name: 'classic.ready-next', phase: 'SCORING' },
+    };
+  }
+
+  const readyState = { ...state, readyStatus };
+  const next = createClassicDealState(readyState, context.deal);
+  return {
+    ok: true,
+    state: next,
+    events: [
+      readyEvent,
+      {
+        name: 'classic.started',
+        payload: { dealNumber: next.dealNumber, boardInfo: cloneValue(next.boardInfo) },
+      },
+      biddingUpdatedEvent(next),
+    ],
+    effects: [{ type: 'classic.compute-dd-table', dealNumber: next.dealNumber }],
+    reply: { name: 'classic.ready-next', phase: 'BIDDING' },
+  };
+}
+
 function dispatch(state, command, context, { apply }) {
   validateClassicState(state);
   validateCommand(command);
@@ -301,6 +446,8 @@ function dispatch(state, command, context, { apply }) {
   if (!apply || !result.ok) return result;
   if (command.name === 'classic.start') return applyStart(state, context);
   if (command.name === 'classic.bid') return applyBid(state, command.payload, context);
+  if (command.name === 'classic.play') return applyPlay(state, command.payload, context);
+  if (command.name === 'classic.ready-next') return applyReady(state, context);
   throw new ClassicInvariantError(`${command.name} apply transition is not implemented yet`);
 }
 
