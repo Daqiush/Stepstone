@@ -495,7 +495,6 @@ function validateCurrentScoreMatches(state, score, claim) {
   invariant(sameValue(score.biddingHistory, state.biddingHistory)
     && sameValue(score.completedTricks, state.completedTricks)
     && sameValue(score.initialHands, state.initialHands)
-    && sameValue(score.ddTable, state.ddTable)
     && sameValue(score.claim, claim), 'current score history is inconsistent');
 }
 
@@ -545,8 +544,7 @@ function validateClassicStateUnchecked(state) {
       && score.dealNumber === state.dealNumber
       && score.boardNumber === state.boardInfo.number
       && sameValue(score.biddingHistory, state.biddingHistory)
-      && sameValue(score.initialHands, state.initialHands)
-      && sameValue(score.ddTable, state.ddTable), 'passed-out score is inconsistent');
+      && sameValue(score.initialHands, state.initialHands), 'passed-out score is inconsistent');
     return { ok: true };
   }
 
