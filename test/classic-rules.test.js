@@ -3,7 +3,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { SEATS, SUITS, RANKS } = require('../classic/constants.cjs');
+const classicConstants = require('../classic/constants.cjs');
+const { SEATS, SUITS, RANKS, RANK_VALUE, PHASES } = classicConstants;
 const { card, orderedDeal, cloneDeal, auction } = require('./helpers/classic-fixtures.js');
 const {
   nextSeat,
@@ -41,6 +42,19 @@ function playState(overrides = {}) {
     ...overrides,
   };
 }
+
+function deepFreeze(value) {
+  if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return value;
+  for (const key of Reflect.ownKeys(value)) deepFreeze(value[key]);
+  return Object.freeze(value);
+}
+
+test('classic constants and their exported collections are frozen', () => {
+  assert.equal(Object.isFrozen(classicConstants), true);
+  for (const value of Object.values(classicConstants)) assert.equal(Object.isFrozen(value), true);
+  assert.equal(Object.isFrozen(RANK_VALUE), true);
+  assert.equal(Object.isFrozen(PHASES), true);
+});
 
 test('orderedDeal returns the canonical 52-card deal', () => {
   const deal = orderedDeal();
@@ -80,6 +94,14 @@ test('seat helpers follow clockwise order, partnerships, and sides', () => {
   }
 });
 
+test('seat helpers reject every non-canonical seat', () => {
+  for (const invalidSeat of [undefined, null, '', 'n', 'X', 1]) {
+    assert.throws(() => nextSeat(invalidSeat), TypeError);
+    assert.throws(() => partnerOf(invalidSeat), TypeError);
+    assert.throws(() => sideOf(invalidSeat), TypeError);
+  }
+});
+
 test('boardInfoFor reproduces the standard 16-board dealer and vulnerability cycle', () => {
   const expected = [
     { number: 1, dealNumber: 1, vul: 'NONE', dealer: 'N' },
@@ -108,6 +130,20 @@ test('boardInfoFor rejects values outside the positive safe-integer domain', () 
   for (const value of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '1', null]) {
     assert.throws(() => boardInfoFor(value), /positive safe integer/);
   }
+});
+
+test('boardInfoFor and parseBid return independent values', () => {
+  const firstBoard = boardInfoFor(1);
+  const firstParsedBid = parseBid('1H');
+  firstBoard.vul = 'BOTH';
+  firstParsedBid.level = 7;
+
+  const secondBoard = boardInfoFor(1);
+  const secondParsedBid = parseBid('1H');
+  assert.notStrictEqual(firstBoard, secondBoard);
+  assert.notStrictEqual(firstParsedBid, secondParsedBid);
+  assert.deepEqual(secondBoard, { number: 1, dealNumber: 1, vul: 'NONE', dealer: 'N' });
+  assert.deepEqual(secondParsedBid, { kind: 'contract', level: 1, suit: 'H' });
 });
 
 test('parseBid accepts only canonical calls and bidValue follows bridge denomination order', () => {
@@ -154,10 +190,31 @@ test('validateBid permits X only by opponents and XX only by the declaring side'
   assert.equal(validateBid(doubled, 'W', 'X').code, 'CLASSIC_INVALID_BID');
 
   const redoubled = {
-    currentContract: contract({ doubled: true, redoubled: true, doublerSeat: 'E' }),
+    currentContract: contract({ doubled: true, redoubled: true, doublerSeat: 'S' }),
   };
   assert.equal(validateBid(redoubled, 'S', 'X').code, 'CLASSIC_INVALID_BID');
   assert.equal(validateBid(redoubled, 'S', 'XX').code, 'CLASSIC_INVALID_BID');
+});
+
+test('server-shaped redoubled contracts remain valid and closed to further X or XX', () => {
+  const serverRedoubledContract = {
+    level: 1,
+    suit: 'H',
+    seat: 'N',
+    doubled: true,
+    redoubled: true,
+    doublerSeat: 'S',
+  };
+  const state = { currentContract: serverRedoubledContract };
+
+  for (const seat of SEATS) {
+    assert.equal(validateBid(state, seat, 'X').code, 'CLASSIC_INVALID_BID');
+    assert.equal(validateBid(state, seat, 'XX').code, 'CLASSIC_INVALID_BID');
+  }
+  assert.equal(
+    declarerFor(auction(['1H', 'X', 'XX', 'Pass', 'Pass', 'Pass']), serverRedoubledContract),
+    'N',
+  );
 });
 
 test('intervening passes do not cancel X or XX rights', () => {
@@ -183,6 +240,12 @@ test('validateBid throws for malformed trusted contract state', () => {
   assert.throws(() => validateBid({ currentContract: { level: 1, suit: 'H' } }, 'N', 'Pass'), /currentContract/);
   assert.throws(() => validateBid({
     currentContract: contract({ doubled: false, redoubled: true }),
+  }, 'N', 'Pass'), /currentContract/);
+  assert.throws(() => validateBid({
+    currentContract: contract({ doubled: true, doublerSeat: 'S' }),
+  }, 'N', 'Pass'), /currentContract/);
+  assert.throws(() => validateBid({
+    currentContract: contract({ doubled: true, redoubled: true, doublerSeat: 'E' }),
   }, 'N', 'Pass'), /currentContract/);
 });
 
@@ -268,6 +331,16 @@ test('validatePlay checks dummy hand when declarer acts on dummy turn', () => {
   assert.equal(validatePlay(state, 'N', card('S', 'A')).code, 'CLASSIC_CARD_NOT_HELD');
 });
 
+test('validatePlay rejects dummy acting for itself on dummy turn', () => {
+  const state = playState({
+    currentPlayer: 'S',
+    hands: { N: [], E: [], S: [card('C', '2')], W: [] },
+  });
+
+  assert.equal(validatePlay(state, 'S', card('C', '2')).code, 'CLASSIC_NOT_YOUR_TURN');
+  assert.deepEqual(validatePlay(state, 'N', card('C', '2')), { ok: true, effectiveSeat: 'S' });
+});
+
 test('validatePlay rejects cards that inherit suit and rank instead of owning them', () => {
   const inheritedCard = Object.assign(
     Object.create({ suit: 'H', rank: '2' }),
@@ -278,6 +351,43 @@ test('validatePlay rejects cards that inherit suit and rank instead of owning th
   });
 
   assert.equal(validatePlay(state, 'N', inheritedCard).code, 'CLASSIC_CARD_NOT_HELD');
+});
+
+test('validatePlay throws when the effective hand contains a non-canonical trusted card', () => {
+  const malformedCards = [
+    { suit: 'H', rank: '3', extra: true },
+    Object.assign(Object.create({ suit: 'H', rank: '3' }), { unrelated: true, extra: true }),
+    { suit: 'X', rank: '3' },
+    { suit: 'H', rank: 3 },
+  ];
+
+  for (const malformedCard of malformedCards) {
+    const state = playState({
+      hands: { N: [{ suit: 'H', rank: '2' }, malformedCard], E: [], S: [], W: [] },
+    });
+    assert.throws(() => validatePlay(state, 'N', { suit: 'H', rank: '2' }), /hand/);
+  }
+});
+
+test('validatePlay throws when any trusted current-trick play is not exact and canonical', () => {
+  const validLead = { seat: 'W', card: { suit: 'H', rank: 'A' } };
+  const malformedPlays = [
+    { seat: 'E', card: { suit: 'H', rank: 'K' }, extra: true },
+    { seat: 'X', card: { suit: 'H', rank: 'K' } },
+    { seat: 'E', card: { suit: 'H', rank: 'K', extra: true } },
+    Object.assign(
+      Object.create({ seat: 'E', card: { suit: 'H', rank: 'K' } }),
+      { unrelated: true, extra: true },
+    ),
+  ];
+
+  for (const malformedPlay of malformedPlays) {
+    const state = playState({
+      hands: { N: [{ suit: 'H', rank: '2' }], E: [], S: [], W: [] },
+      currentTrick: [validLead, malformedPlay],
+    });
+    assert.throws(() => validatePlay(state, 'N', { suit: 'H', rank: '2' }), /currentTrick/);
+  }
 });
 
 test('trickWinner chooses the highest card in the led suit without trump', () => {
@@ -326,4 +436,39 @@ test('trickWinner rejects cards that inherit suit and rank instead of owning the
   ];
 
   assert.throws(() => trickWinner(trick, 'NT'), /invalid play/);
+});
+
+test('rule helpers preserve representative deeply frozen state and history inputs', () => {
+  const bidState = deepFreeze({
+    currentContract: contract({ level: 2, suit: 'S', seat: 'N' }),
+  });
+  const history = deepFreeze(auction(['1H', 'Pass', '2H', 'Pass', 'Pass', 'Pass']));
+  const finalContract = deepFreeze(contract({ level: 2, suit: 'H', seat: 'S' }));
+  const state = deepFreeze(playState({
+    hands: {
+      N: [{ suit: 'H', rank: '2' }],
+      E: [],
+      S: [],
+      W: [],
+    },
+    currentTrick: [{ seat: 'W', card: { suit: 'H', rank: 'A' } }],
+  }));
+  const trick = deepFreeze([
+    { seat: 'N', card: { suit: 'D', rank: 'A' } },
+    { seat: 'E', card: { suit: 'D', rank: 'K' } },
+    { seat: 'S', card: { suit: 'C', rank: 'A' } },
+    { seat: 'W', card: { suit: 'D', rank: 'Q' } },
+  ]);
+  const inputs = [bidState, history, finalContract, state, trick];
+  const before = inputs.map(value => JSON.stringify(value));
+
+  assert.deepEqual(validateBid(bidState, 'E', '3C'), { ok: true });
+  assert.equal(declarerFor(history, finalContract), 'N');
+  assert.deepEqual(validatePlay(state, 'N', { suit: 'H', rank: '2' }), {
+    ok: true,
+    effectiveSeat: 'N',
+  });
+  assert.equal(trickWinner(trick, 'NT'), 'N');
+
+  assert.deepEqual(inputs.map(value => JSON.stringify(value)), before);
 });

@@ -25,14 +25,17 @@ const BOARD_INFO = Object.freeze([
 ]);
 
 function nextSeat(seat) {
+  assertSeat(seat, 'seat');
   return SEATS[(SEATS.indexOf(seat) + 1) % SEATS.length];
 }
 
 function partnerOf(seat) {
+  assertSeat(seat, 'seat');
   return SEATS[(SEATS.indexOf(seat) + 2) % SEATS.length];
 }
 
 function sideOf(seat) {
+  assertSeat(seat, 'seat');
   return seat === 'N' || seat === 'S' ? 'NS' : 'EW';
 }
 
@@ -85,8 +88,10 @@ function assertCurrentContract(currentContract) {
     }
     return;
   }
+  const doublerOnDeclaringSide = SEATS.includes(currentContract.doublerSeat)
+    && sideOf(currentContract.doublerSeat) === sideOf(currentContract.seat);
   if (!SEATS.includes(currentContract.doublerSeat)
-      || sideOf(currentContract.doublerSeat) === sideOf(currentContract.seat)) {
+      || (currentContract.redoubled ? !doublerOnDeclaringSide : doublerOnDeclaringSide)) {
     throw new TypeError('currentContract has inconsistent doubling state');
   }
 }
@@ -168,15 +173,23 @@ function effectivePlaySeat(state, actorSeat) {
   return actorSeat;
 }
 
+function hasExactOwnKeys(value, expectedKeys) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const ownKeys = Reflect.ownKeys(value);
+  return ownKeys.length === expectedKeys.length
+    && expectedKeys.every(key => Object.hasOwn(value, key));
+}
+
 function isCanonicalCard(value) {
-  return value !== null
-    && typeof value === 'object'
-    && !Array.isArray(value)
-    && Object.keys(value).length === 2
-    && Object.hasOwn(value, 'suit')
-    && Object.hasOwn(value, 'rank')
+  return hasExactOwnKeys(value, ['suit', 'rank'])
     && SUITS.includes(value.suit)
     && RANKS.includes(value.rank);
+}
+
+function isCanonicalPlay(play) {
+  return hasExactOwnKeys(play, ['seat', 'card'])
+    && SEATS.includes(play.seat)
+    && isCanonicalCard(play.card);
 }
 
 function playFailure(code) {
@@ -185,14 +198,20 @@ function playFailure(code) {
 
 function validatePlay(state, actorSeat, playedCard) {
   const effectiveSeat = effectivePlaySeat(state, actorSeat);
-  if (effectiveSeat !== state.currentPlayer) return playFailure('CLASSIC_NOT_YOUR_TURN');
+  if ((state.currentPlayer === state.dummy && actorSeat !== state.declarer)
+      || effectiveSeat !== state.currentPlayer) return playFailure('CLASSIC_NOT_YOUR_TURN');
   if (!state.hands || typeof state.hands !== 'object' || !Array.isArray(state.hands[effectiveSeat])) {
     throw new TypeError('state hands must contain the effective player hand');
   }
   if (!Array.isArray(state.currentTrick)) throw new TypeError('state.currentTrick must be an array');
-  if (!isCanonicalCard(playedCard)) return playFailure('CLASSIC_CARD_NOT_HELD');
 
   const hand = state.hands[effectiveSeat];
+  if (!hand.every(isCanonicalCard)) throw new TypeError('state hand contains a non-canonical card');
+  if (!state.currentTrick.every(isCanonicalPlay)) {
+    throw new TypeError('state.currentTrick contains a non-canonical play');
+  }
+  if (!isCanonicalCard(playedCard)) return playFailure('CLASSIC_CARD_NOT_HELD');
+
   const held = hand.some(card => card.suit === playedCard.suit && card.rank === playedCard.rank);
   if (!held) return playFailure('CLASSIC_CARD_NOT_HELD');
 
