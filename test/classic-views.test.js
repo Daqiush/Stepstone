@@ -137,9 +137,6 @@ test('auction projection gives full entries to self opponents and spectators but
       contract: clone(state.currentContract), declarer: state.declarer, dummy: state.dummy,
       leader: state.leader, biddingHistory: clone(state.biddingHistory),
     };
-    payload.biddingHistory[0].qa[0].askerName = 'private adapter metadata';
-    if (payload.currentContract) payload.currentContract.credentials = 'private';
-    if (payload.contract) payload.contract.credentials = 'private';
     const event = deepFreeze({ name, payload });
     const forN = classicEventFor(event, viewer('N'));
     const forS = classicEventFor(event, viewer('S'));
@@ -217,23 +214,143 @@ test('view boundaries classify malformed viewers as input and malformed trusted 
   ));
 });
 
-test('finished-event projection positively allowlists nested contract and claim fields', () => {
-  const event = deepFreeze({
-    name: 'classic.finished',
-    payload: {
-      reason: 'claimed', dealNumber: 1,
-      contract: {
-        level: 1, suit: 'NT', seat: 'N', doubled: false, redoubled: false,
-        doublerSeat: null, initialHands: { private: true },
+test('classicEventFor validates and detaches every supported event shape', () => {
+  const state = playingState();
+  const contract = clone(state.currentContract);
+  const card = { suit: 'H', rank: '2' };
+  const trick = {
+    cards: [
+      { seat: 'E', card },
+      { seat: 'S', card: { suit: 'H', rank: '3' } },
+      { seat: 'W', card: { suit: 'H', rank: '4' } },
+      { seat: 'N', card: { suit: 'H', rank: 'A' } },
+    ],
+    winner: 'N',
+  };
+  const events = [
+    { name: 'classic.started', payload: { dealNumber: 1, boardInfo: boardInfoFor(1) } },
+    {
+      name: 'classic.bidding-updated',
+      payload: {
+        biddingHistory: clone(state.biddingHistory), currentBidder: null,
+        currentContract: contract, consecutivePasses: 3,
       },
-      declarer: 'N', nsTricks: 7, ewTricks: 6, score: 90,
-      claim: { claimer: 'N', tricksToWin: 7, reason: 'rest', credentials: 'private' },
     },
-  });
-  const projected = classicEventFor(event, viewer('E'));
-  assert.deepEqual(Object.keys(projected.payload.contract), [
-    'level', 'suit', 'seat', 'doubled', 'redoubled', 'doublerSeat',
-  ]);
-  assert.deepEqual(Object.keys(projected.payload.claim), ['claimer', 'tricksToWin', 'reason']);
-  assertNoPrivateKeys(projected);
+    {
+      name: 'classic.bidding-ended',
+      payload: {
+        contract, declarer: 'N', dummy: 'S', leader: 'E',
+        biddingHistory: clone(state.biddingHistory),
+      },
+    },
+    { name: 'classic.dummy-revealed', payload: { dummy: 'S' } },
+    { name: 'classic.card-played', payload: { seat: 'E', card, currentTrick: [{ seat: 'E', card }] } },
+    { name: 'classic.trick-ended', payload: { trick, winner: 'N', nsTricks: 1, ewTricks: 0 } },
+    { name: 'classic.ready-updated', payload: { readyStatus: { N: true, E: false, S: true, W: false } } },
+    {
+      name: 'classic.dd-table-ready',
+      payload: { dealNumber: 1, ddTable: Array.from({ length: 5 }, () => [0, 1, 2, 3]) },
+    },
+    { name: 'classic.finished', payload: { reason: 'passed-out', dealNumber: 1, score: 0 } },
+    {
+      name: 'classic.finished',
+      payload: {
+        reason: 'played', dealNumber: 1, contract, declarer: 'N',
+        nsTricks: 7, ewTricks: 6, score: 90,
+      },
+    },
+    {
+      name: 'classic.finished',
+      payload: {
+        reason: 'claimed', dealNumber: 1, contract, declarer: 'N',
+        nsTricks: 7, ewTricks: 6, score: 90,
+        claim: { claimer: 'N', tricksToWin: 7, reason: 'rest' },
+      },
+    },
+  ];
+
+  for (const source of events) {
+    const event = deepFreeze(clone(source));
+    const before = JSON.stringify(event);
+    const projected = classicEventFor(event, viewer(null));
+    assert.equal(JSON.stringify(event), before);
+    assert.deepEqual(projected, source);
+    assert.notStrictEqual(projected, event);
+    assert.notStrictEqual(projected.payload, event.payload);
+    if (projected.payload.boardInfo) projected.payload.boardInfo.number = 16;
+    if (projected.payload.card) projected.payload.card.rank = 'A';
+    if (projected.payload.trick) projected.payload.trick.cards[0].card.rank = 'A';
+    if (projected.payload.readyStatus) projected.payload.readyStatus.N = false;
+    if (projected.payload.ddTable) projected.payload.ddTable[0][0] = 13;
+    assert.equal(JSON.stringify(event), before);
+  }
+});
+
+test('classicEventFor rejects wrong nested types, extra nested keys, and private data', () => {
+  const state = playingState();
+  const contract = clone(state.currentContract);
+  const auction = clone(state.biddingHistory);
+  const card = { suit: 'H', rank: '2' };
+  const trick = {
+    cards: [
+      { seat: 'E', card },
+      { seat: 'S', card: { suit: 'H', rank: '3' } },
+      { seat: 'W', card: { suit: 'H', rank: '4' } },
+      { seat: 'N', card: { suit: 'H', rank: 'A' } },
+    ],
+    winner: 'N',
+  };
+  const corruptEvents = [
+    { name: 'classic.started', payload: { dealNumber: 1, boardInfo: { ...boardInfoFor(1), initialHands: {} } } },
+    { name: 'classic.started', payload: { dealNumber: 1, boardInfo: { ...boardInfoFor(1), number: '1' } } },
+    {
+      name: 'classic.bidding-updated',
+      payload: {
+        biddingHistory: [{ ...auction[0], credentials: 'private' }], currentBidder: 'E',
+        currentContract: contract, consecutivePasses: 0,
+      },
+    },
+    {
+      name: 'classic.bidding-updated',
+      payload: {
+        biddingHistory: auction, currentBidder: null,
+        currentContract: { ...contract, cache: {} }, consecutivePasses: 3,
+      },
+    },
+    {
+      name: 'classic.bidding-ended',
+      payload: {
+        contract, declarer: 'N', dummy: 'S', leader: 'E',
+        biddingHistory: [{ ...auction[0], qa: [{ ...auction[0].qa[0], askerName: 'private' }] }],
+      },
+    },
+    { name: 'classic.dummy-revealed', payload: { dummy: 'Q' } },
+    { name: 'classic.card-played', payload: { seat: 'E', card: { ...card, credentials: 'private' }, currentTrick: [] } },
+    { name: 'classic.card-played', payload: { seat: 'E', card, currentTrick: [{ seat: 'E', card, extra: true }] } },
+    { name: 'classic.trick-ended', payload: { trick: { ...trick, initialHands: {} }, winner: 'N', nsTricks: 1, ewTricks: 0 } },
+    { name: 'classic.trick-ended', payload: { trick: { ...trick, cards: [{ seat: 'E', card: { suit: 'H', rank: 2 } }] }, winner: 'N', nsTricks: 1, ewTricks: 0 } },
+    { name: 'classic.ready-updated', payload: { readyStatus: { N: true, E: false, S: true, W: false, cache: false } } },
+    { name: 'classic.dd-table-ready', payload: { dealNumber: 1, ddTable: Array.from({ length: 5 }, () => [0, 1, 2, 14]) } },
+    { name: 'classic.finished', payload: { reason: 'passed-out', dealNumber: 1, score: { initialHands: {} } } },
+    {
+      name: 'classic.finished',
+      payload: {
+        reason: 'played', dealNumber: 1, contract: { ...contract, initialHands: {} },
+        declarer: 'N', nsTricks: 7, ewTricks: 6, score: 90,
+      },
+    },
+    {
+      name: 'classic.finished',
+      payload: {
+        reason: 'claimed', dealNumber: 1, contract, declarer: 'N',
+        nsTricks: 7, ewTricks: 6, score: 90,
+        claim: { claimer: 'N', tricksToWin: 7, reason: 'rest', pendingActions: [] },
+      },
+    },
+  ];
+  for (const event of corruptEvents) {
+    assert.throws(() => classicEventFor(event, viewer('E')), error => (
+      error instanceof ClassicInvariantError && error.kind === 'TRUSTED_STATE'
+    ), event.name);
+  }
 });

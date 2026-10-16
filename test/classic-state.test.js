@@ -33,6 +33,12 @@ function clone(value) {
   return structuredClone(value);
 }
 
+function ddsTable(seed = 0) {
+  return Array.from({ length: 5 }, (_, strain) => (
+    Array.from({ length: 4 }, (_, seat) => (seed + strain + seat) % 14)
+  ));
+}
+
 function assertInvariant(fn) {
   assert.throws(fn, error => {
     assert.ok(error instanceof ClassicInvariantError);
@@ -383,6 +389,36 @@ test('validateClassicState accepts canonical PLAYING and all three SCORING varia
     const before = JSON.stringify(frozen);
     assert.deepEqual(validateClassicState(frozen), { ok: true });
     assert.equal(JSON.stringify(frozen), before);
+  }
+});
+
+test('validateClassicState couples the current archived DDS snapshot to live DDS state', () => {
+  for (const makeScoringState of [
+    makePassedOutScoringState,
+    makeNormalScoringState,
+    makeClaimedScoringState,
+  ]) {
+    const readyWithLateResult = makeScoringState();
+    readyWithLateResult.ddsStatus = 'READY';
+    readyWithLateResult.ddTable = ddsTable(1);
+    assert.equal(readyWithLateResult.boardScores.at(-1).ddTable, null);
+    assert.deepEqual(validateClassicState(readyWithLateResult), { ok: true });
+
+    const readyWithMatchingSnapshot = clone(readyWithLateResult);
+    readyWithMatchingSnapshot.boardScores.at(-1).ddTable = clone(readyWithMatchingSnapshot.ddTable);
+    assert.deepEqual(validateClassicState(readyWithMatchingSnapshot), { ok: true });
+
+    const readyWithDifferentSnapshot = clone(readyWithMatchingSnapshot);
+    readyWithDifferentSnapshot.boardScores.at(-1).ddTable = ddsTable(2);
+    assertInvariant(() => validateClassicState(readyWithDifferentSnapshot));
+
+    for (const ddsStatus of ['PENDING', 'FAILED']) {
+      const nonReadyWithSnapshot = makeScoringState();
+      nonReadyWithSnapshot.ddsStatus = ddsStatus;
+      nonReadyWithSnapshot.ddTable = null;
+      nonReadyWithSnapshot.boardScores.at(-1).ddTable = ddsTable(3);
+      assertInvariant(() => validateClassicState(nonReadyWithSnapshot));
+    }
   }
 });
 

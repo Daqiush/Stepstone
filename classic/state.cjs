@@ -482,6 +482,18 @@ function currentScore(state) {
   return state.boardScores[state.boardScores.length - 1];
 }
 
+function validateCurrentScoreDdsSnapshot(state, score) {
+  if (state.ddsStatus !== 'READY') {
+    invariant(score.ddTable === null,
+      'current score cannot archive a DDS table while live DDS is not ready');
+    return;
+  }
+  if (score.ddTable !== null) {
+    invariant(sameValue(score.ddTable, state.ddTable),
+      'current score DDS snapshot differs from live DDS table');
+  }
+}
+
 function validateCurrentScoreMatches(state, score, claim) {
   invariant(score.dealNumber === state.dealNumber && score.boardNumber === state.boardInfo.number,
     'current score board identity is invalid');
@@ -496,6 +508,7 @@ function validateCurrentScoreMatches(state, score, claim) {
     && sameValue(score.completedTricks, state.completedTricks)
     && sameValue(score.initialHands, state.initialHands)
     && sameValue(score.claim, claim), 'current score history is inconsistent');
+  validateCurrentScoreDdsSnapshot(state, score);
 }
 
 function validateClassicStateUnchecked(state) {
@@ -545,6 +558,7 @@ function validateClassicStateUnchecked(state) {
       && score.boardNumber === state.boardInfo.number
       && sameValue(score.biddingHistory, state.biddingHistory)
       && sameValue(score.initialHands, state.initialHands), 'passed-out score is inconsistent');
+    validateCurrentScoreDdsSnapshot(state, score);
     return { ok: true };
   }
 
