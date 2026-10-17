@@ -41,6 +41,14 @@ function playerViewer(seat) {
   return { role: 'PLAYER', seat };
 }
 
+function legacyReplayBoardScores(state, viewer) {
+  const publicScores = classicViewFor(state, viewer).boardScores;
+  return publicScores.map((score, index) => ({
+    ...cloneValue(score),
+    initialHands: cloneValue(state.boardScores[index]?.initialHands),
+  }));
+}
+
 function safeEmit(io, target, name, payload, logger = null) {
   try {
     io.to(target).emit(name, payload);
@@ -73,7 +81,7 @@ function emitStarted(io, room, event, logger) {
       boardInfo: cloneValue(projected.payload.boardInfo),
       seat,
       playerNames: cloneValue(room.playerNames),
-      boardScores: cloneValue(view.boardScores),
+      boardScores: legacyReplayBoardScores(state, viewer),
     };
     safeEmit(io, socketId, 'gameStart', payload, logger);
   });
@@ -132,7 +140,7 @@ function emitPassedOut(io, room, event, logger) {
     safeEmit(io, socketId, 'gameEnd', {
       passedOut: true,
       score: projected.payload.score,
-      boardScores: cloneValue(view.boardScores),
+      boardScores: legacyReplayBoardScores(state, viewer),
       ddTable: cloneValue(view.ddTable),
       hands: cloneValue(latestScore.initialHands),
     }, logger);
@@ -199,8 +207,8 @@ function emitPlayedGameEnd(io, room, event, logger) {
   const state = projectClassicState(room);
   const latestScore = state.boardScores.at(-1);
   emitPerPlayer(io, room, 'gameEnd', seat => {
-    const projected = classicEventFor(event, playerViewer(seat));
-    const view = classicViewFor(state, playerViewer(seat));
+    const viewer = playerViewer(seat);
+    const projected = classicEventFor(event, viewer);
     return {
       passedOut: false,
       contract: cloneValue(projected.payload.contract),
@@ -212,7 +220,7 @@ function emitPlayedGameEnd(io, room, event, logger) {
       made: latestScore.made,
       diff: latestScore.diff,
       vulnerability: latestScore.vulnerability,
-      boardScores: cloneValue(view.boardScores),
+      boardScores: legacyReplayBoardScores(state, viewer),
       ddTable: cloneValue(latestScore.ddTable),
       hands: cloneValue(latestScore.initialHands),
     };

@@ -14,6 +14,7 @@ const {
   ClassicInputError, applyClassicCommand,
 } = require('../classic/engine.cjs');
 const { boardInfoFor } = require('../classic/rules.cjs');
+const { classicViewFor } = require('../classic/views.cjs');
 const { orderedDeal } = require('./helpers/classic-fixtures.js');
 const { createClassicSocketFixture } = require('./helpers/classic-socket-fixture.js');
 const {
@@ -807,8 +808,17 @@ test('four opening passes emit only private-safe legacy gameEnd frames with no f
     assert.equal(emission.payload.ddTable, null);
     assert.deepEqual(emission.payload.hands, h.room.boardScores.at(-1).initialHands);
     assert.notEqual(emission.payload.hands, h.room.boardScores.at(-1).initialHands);
-    assert.equal(JSON.stringify(emission.payload).includes('initialHands'), false);
+    assert.deepEqual(emission.payload.boardScores[0].initialHands,
+      h.room.boardScores[0].initialHands);
+    assert.notEqual(emission.payload.boardScores[0].initialHands,
+      h.room.boardScores[0].initialHands);
+    assert.equal(JSON.stringify(emission.payload).includes('initialHands'), true);
   }
+  const northScore = h.fixture.forTarget(h.fixture.socketIds.N).at(-1).payload.boardScores[0];
+  const eastScore = h.fixture.forTarget(h.fixture.socketIds.E).at(-1).payload.boardScores[0];
+  northScore.initialHands.N[0].rank = 'A';
+  assert.equal(eastScore.initialHands.N[0].rank, '2');
+  assert.equal(h.room.boardScores[0].initialHands.N[0].rank, '2');
 });
 
 function makePlayingCoreState() {
@@ -934,12 +944,24 @@ test('adapter final play emits cardPlayed, trickEnd, gameEnd without playUpdate 
     assert.deepEqual(emission.payload.hands, archive.initialHands);
     assert.notEqual(emission.payload.hands, archive.initialHands);
     assert.notEqual(emission.payload.boardScores, h.room.boardScores);
-    assert.equal(JSON.stringify(emission.payload).includes('initialHands'), false);
+    assert.deepEqual(emission.payload.boardScores[0].initialHands,
+      archive.initialHands);
+    assert.notEqual(emission.payload.boardScores[0].initialHands,
+      archive.initialHands);
+    assert.equal(JSON.stringify(emission.payload).includes('initialHands'), true);
   }
   const north = h.fixture.forTarget(h.fixture.socketIds.N).at(-1).payload;
   const east = h.fixture.forTarget(h.fixture.socketIds.E).at(-1).payload;
   assert.notEqual(north, east);
   assert.notEqual(north.hands, east.hands);
+  north.boardScores[0].initialHands.N[0].rank = 'K';
+  assert.equal(east.boardScores[0].initialHands.N[0].rank, '2');
+  assert.equal(archive.initialHands.N[0].rank, '2');
+
+  const spectator = classicViewFor(projectClassicState(h.room), {
+    role: 'SPECTATOR', seat: null,
+  });
+  assert.equal(JSON.stringify(spectator).includes('initialHands'), false);
 });
 
 test('adapter play uses the authoritative socket seat and only declarer may act for dummy', () => {
@@ -1104,6 +1126,19 @@ test('adapter fourth ready consumes exactly deal N+1 and emits readiness before 
   for (const emission of h.fixture.named('nextDealUpdate')) {
     assert.deepEqual(emission.payload.readyStatus, { N: true, E: true, S: true, W: true });
   }
+  for (const emission of h.fixture.named('gameStart')) {
+    assert.deepEqual(emission.payload.boardScores[0].initialHands,
+      h.room.boardScores[0].initialHands);
+    assert.notEqual(emission.payload.boardScores[0].initialHands,
+      h.room.boardScores[0].initialHands);
+  }
+  const northStart = h.fixture.forTarget(h.fixture.socketIds.N)
+    .find(emission => emission.name === 'gameStart').payload;
+  const eastStart = h.fixture.forTarget(h.fixture.socketIds.E)
+    .find(emission => emission.name === 'gameStart').payload;
+  northStart.boardScores[0].initialHands.N[0].rank = 'A';
+  assert.equal(eastStart.boardScores[0].initialHands.N[0].rank, '2');
+  assert.equal(h.room.boardScores[0].initialHands.N[0].rank, '2');
   assert.equal(h.ddsCalls.length, 0);
   await flushAsyncEffects();
   assert.equal(h.ddsCalls.length, 1);
@@ -1288,6 +1323,111 @@ test('server lifecycle seams preserve canonical readiness ownership and legacy r
     );
     assert.deepEqual(staleCalls, []);
     assert.equal(currentComplex.readyStatus.N, true);
+  } finally {
+    delete require.cache[serverPath];
+  }
+});
+
+test('server playCard boundary routes null, undefined, and nonobject payloads without throwing', () => {
+  const serverPath = require.resolve('../server.js');
+  delete require.cache[serverPath];
+  const serverApi = require(serverPath);
+  try {
+    for (const payload of [undefined, null, 7, 'card', true, []]) {
+      const h = activePlayHarness();
+      const before = JSON.stringify(h.room);
+      assert.doesNotThrow(() => {
+        const request = serverApi.buildClassicPlayRequest(
+          h.fixture.socketIds.E,
+          'E',
+          payload,
+        );
+        const result = serverApi.routeClassicPlay(h.room, request, {
+          standard: (room, routed) => h.adapter.play(room, routed),
+          legacy: () => assert.fail('standard classic must not use legacy play'),
+        });
+        assert.deepEqual(result, { ok: false, code: 'CLASSIC_INPUT_INVALID' });
+      });
+      assert.equal(JSON.stringify(h.room), before);
+      assert.deepEqual(h.fixture.named('appError').map(event => event.payload.msg), ['请求格式无效']);
+    }
+  } finally {
+    delete require.cache[serverPath];
+  }
+});
+
+test('standard scoring seat release clears canonical readiness before releasing the socket', () => {
+  const serverPath = require.resolve('../server.js');
+  delete require.cache[serverPath];
+  const serverApi = require(serverPath);
+  try {
+    const h = scoringHarness();
+    h.room.sockets.E = null;
+    h.room.playerNames.E = null;
+    h.room.readyStatus = { N: true, E: false, S: true, W: true };
+    const northSocket = h.fixture.socketIds.N;
+
+    assert.equal(serverApi.releaseSeatForLifecycle(
+      h.room,
+      { socketId: northSocket, seat: 'N' },
+      {
+        standard: (room, request) => (
+          h.adapter.clearReadyForDisconnect(room, request)
+        ),
+      },
+    ), true);
+    assert.equal(h.room.readyStatus.N, false);
+    assert.equal(h.room.classicRevision, 1);
+    assert.equal(h.room.sockets.N, null);
+    assert.equal(h.room.playerNames.N, null);
+    assert.deepEqual(h.dealCalls, []);
+    assert.equal(h.fixture.named('nextDealUpdate').length, 3);
+
+    h.room.sockets.E = northSocket;
+    h.room.playerNames.E = 'North';
+    h.fixture.clear();
+    assert.deepEqual(h.adapter.readyNext(h.room, {
+      socketId: northSocket, seat: 'E',
+    }), { ok: true, phase: 'SCORING', revision: 2 });
+    assert.deepEqual(h.room.readyStatus, { N: false, E: true, S: true, W: true });
+    assert.deepEqual(h.dealCalls, []);
+    assert.equal(h.room.phase, 'SCORING');
+  } finally {
+    delete require.cache[serverPath];
+  }
+});
+
+test('seat release is atomic on canonical clear failure and preserves legacy readiness reset', () => {
+  const serverPath = require.resolve('../server.js');
+  delete require.cache[serverPath];
+  const serverApi = require(serverPath);
+  try {
+    const failed = scoringHarness();
+    failed.room.readyStatus.N = true;
+    const before = JSON.stringify(failed.room);
+    assert.equal(serverApi.releaseSeatForLifecycle(
+      failed.room,
+      { socketId: failed.fixture.socketIds.N, seat: 'N' },
+      { standard: () => ({ ok: false, code: 'CLASSIC_SERVER_ERROR' }) },
+    ), false);
+    assert.equal(JSON.stringify(failed.room), before);
+
+    const teaching = {
+      mode: 'classic', teachingMode: true, phase: 'SCORING',
+      sockets: { N: 'teaching-socket' },
+      playerNames: { N: 'Teacher' },
+      readyStatus: { N: true },
+    };
+    let standardCalls = 0;
+    assert.equal(serverApi.releaseSeatForLifecycle(
+      teaching,
+      { socketId: 'teaching-socket', seat: 'N' },
+      { standard: () => { standardCalls += 1; } },
+    ), true);
+    assert.equal(standardCalls, 0);
+    assert.equal(teaching.sockets.N, null);
+    assert.equal(teaching.playerNames.N, null);
+    assert.equal(teaching.readyStatus.N, false);
   } finally {
     delete require.cache[serverPath];
   }

@@ -364,6 +364,29 @@ function resetSeatReadyForLifecycle(room, seat) {
   room.readyStatus[seat] = false;
 }
 
+function releaseSeatForLifecycle(room, request, { standard }) {
+  const seat = request?.seat;
+  if (!room || !seat) return false;
+  if (room.mode === 'classic' && !room.teachingMode) {
+    if (room.phase === 'SCORING' && room.readyStatus?.[seat] === true) {
+      const result = standard(room, request);
+      if (result?.ok !== true) return false;
+    }
+  } else {
+    resetSeatReadyForLifecycle(room, seat);
+  }
+  room.sockets[seat] = null;
+  room.playerNames[seat] = null;
+  return true;
+}
+
+function buildClassicPlayRequest(socketId, seat, payload) {
+  const safePayload = payload && typeof payload === 'object' && !Array.isArray(payload)
+    ? payload
+    : {};
+  return { socketId, seat, card: safePayload.card };
+}
+
 function configureNewRoom(room, requestedMode) {
   if (requestedMode === 'ult') {
     room.mode = 'ult';
@@ -1126,9 +1149,12 @@ io.on('connection', socket => {
     // 释放旧座位
     const old = sockSeat[socket.id];
     if (old) {
-      room.sockets[old] = null;
-      room.playerNames[old] = null;
-      resetSeatReadyForLifecycle(room, old);
+      const released = releaseSeatForLifecycle(room, { socketId: socket.id, seat: old }, {
+        standard: (classicRoom, request) => (
+          classicAdapter.clearReadyForDisconnect(classicRoom, request)
+        ),
+      });
+      if (!released) return;
     }
 
     room.sockets[seat]     = socket.id;
@@ -1344,11 +1370,13 @@ io.on('connection', socket => {
   });
 
   // ── 出牌 ─────────────────────────────────────────────
-  socket.on('playCard', ({ card }) => {
+  socket.on('playCard', (payload = {}) => {
     const roomId = sockRoom[socket.id];
     const seat   = sockSeat[socket.id];
     const room   = rooms[roomId];
-    return routeClassicPlay(room, { socketId: socket.id, seat, card }, {
+    const request = buildClassicPlayRequest(socket.id, seat, payload);
+    const card = request.card;
+    return routeClassicPlay(room, request, {
       standard: (classicRoom, request) => classicAdapter.play(classicRoom, request),
       legacy: () => {
         if (!room || room.phase !== 'PLAYING' || room.claimReq) return;
@@ -4298,4 +4326,6 @@ module.exports = {
   routeClassicReady,
   routeClassicDisconnectReady,
   resetSeatReadyForLifecycle,
+  releaseSeatForLifecycle,
+  buildClassicPlayRequest,
 };
