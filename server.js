@@ -1541,9 +1541,7 @@ io.on('connection', socket => {
     // 无需投票时（所有对方座位均为房主控制）立即通过
     if (voters.length === 0) {
       routeClassicDeferred(room, {}, {
-        standard: () => classicAdapter.settleClaim(room, {
-          socketId: room.sockets[seat], claimer: seat, tricksToWin, reason: reason || '',
-        }),
+        standard: () => classicAdapter.settleAcceptedClaim(room, room.claimReq),
         legacy: () => {
           io.to(room.id).emit('claimResult', { accepted: true, tricksToWin, claimer: seat });
           room.lastClaim = { claimer: seat, tricksToWin, reason: reason || '' };
@@ -1593,12 +1591,7 @@ io.on('connection', socket => {
     const accepted = req.voters.every(s => req.votes[s]);
     if (accepted) {
       routeClassicDeferred(room, {}, {
-        standard: () => classicAdapter.settleClaim(room, {
-          socketId: room.sockets[req.claimer],
-          claimer: req.claimer,
-          tricksToWin: req.tricksToWin,
-          reason: req.reason,
-        }),
+        standard: () => classicAdapter.settleAcceptedClaim(room, req),
         legacy: () => {
           io.to(room.id).emit('claimResult', {
             accepted: true, tricksToWin: req.tricksToWin, claimer: req.claimer,

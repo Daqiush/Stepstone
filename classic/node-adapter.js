@@ -22,7 +22,7 @@ const { classicEventFor, classicViewFor } = require('./views.cjs');
 
 const SILENT_FORBIDDEN_METHODS = new Set([
   'readyNext', 'clearReadyForDisconnect', 'editBidAnnotation', 'appendBidQuestion',
-  'answerBidQuestion',
+  'answerBidQuestion', 'settleAcceptedClaim',
 ]);
 
 function cloneValue(value) {
@@ -447,6 +447,7 @@ function createClassicNodeAdapter({ io, dealFactory, calcDDTable, logger } = {})
       const state = projectClassicState(room);
       const result = applyClassicDdsCompletion(state, { dealNumber, ddTable, failed });
       if (!result.ok) return false;
+      if (result.reply.name === 'classic.dd-ignored') return true;
       applyClassicState(room, result.state);
       emitClassicEvents(io, room, result.events, logger);
       return true;
@@ -707,24 +708,20 @@ function createClassicNodeAdapter({ io, dealFactory, calcDDTable, logger } = {})
     };
   }
 
-  function settleClaim(room, request = {}) {
-    const seat = authoritativeSeat(room, request?.socketId, request?.claimer);
+  function commitAcceptedClaim(room, payload, failureRequest, method) {
     try {
-      if (seat === null || seat !== request?.claimer || seat === room.dummy) {
-        return compatFailure(room, request, 'settleClaim', seat, {
-          ok: false, code: 'CLASSIC_FORBIDDEN',
-        });
-      }
       const state = projectClassicState(room);
       const result = settleClassicClaim(state, {
-        claimer: seat,
-        tricksToWin: request?.tricksToWin,
-        reason: request?.reason,
+        claimer: payload.claimer,
+        tricksToWin: payload.tricksToWin,
+        reason: payload.reason,
       });
-      if (!result.ok) return compatFailure(room, request, 'settleClaim', seat, result);
+      if (!result.ok) {
+        return compatFailure(room, failureRequest, method, payload.claimer, result);
+      }
 
       const partial = state.currentTrick.length === 0 ? null : {
-        cards: cloneValue(state.currentTrick), winner: seat, claimed: true,
+        cards: cloneValue(state.currentTrick), winner: payload.claimer, claimed: true,
       };
       const replayPartials = cloneValue(room.classicClaimedPartialTricks || {});
       if (partial && !Object.hasOwn(replayPartials, state.dealNumber)) {
@@ -734,16 +731,58 @@ function createClassicNodeAdapter({ io, dealFactory, calcDDTable, logger } = {})
       room.classicRevision += 1;
       room.claimReq = null;
       room.lastClaim = {
-        claimer: seat, tricksToWin: request.tricksToWin, reason: request.reason,
+        claimer: payload.claimer,
+        tricksToWin: payload.tricksToWin,
+        reason: payload.reason,
       };
       room.classicClaimedPartialTricks = replayPartials;
       safeEmit(io, room.id, 'claimResult', {
-        accepted: true, tricksToWin: request.tricksToWin, claimer: seat,
+        accepted: true,
+        tricksToWin: payload.tricksToWin,
+        claimer: payload.claimer,
       }, logger);
       emitClassicEvents(io, room, result.events, logger);
       return compactSuccess(room, result);
     } catch (failure) {
+      return compatFailure(room, failureRequest, method, payload?.claimer || null, failure);
+    }
+  }
+
+  function settleClaim(room, request = {}) {
+    const seat = authoritativeSeat(room, request?.socketId, request?.claimer);
+    try {
+      if (seat === null || seat !== request?.claimer || seat === room.dummy) {
+        return compatFailure(room, request, 'settleClaim', seat, {
+          ok: false, code: 'CLASSIC_FORBIDDEN',
+        });
+      }
+      return commitAcceptedClaim(room, {
+        claimer: seat,
+        tricksToWin: request?.tricksToWin,
+        reason: request?.reason,
+      }, request, 'settleClaim');
+    } catch (failure) {
       return compatFailure(room, request, 'settleClaim', seat, failure);
+    }
+  }
+
+  function settleAcceptedClaim(room, claimRequest) {
+    try {
+      const isOwnedRequest = room?.claimReq === claimRequest;
+      const voters = claimRequest?.voters;
+      const votes = claimRequest?.votes;
+      const unanimouslyAccepted = Array.isArray(voters)
+        && voters.every(seat => SEATS.includes(seat) && votes?.[seat] === true);
+      if (!isOwnedRequest || !unanimouslyAccepted) {
+        return { ok: false, code: 'CLASSIC_FORBIDDEN' };
+      }
+      return commitAcceptedClaim(room, {
+        claimer: claimRequest.claimer,
+        tricksToWin: claimRequest.tricksToWin,
+        reason: claimRequest.reason,
+      }, {}, 'settleAcceptedClaim');
+    } catch (failure) {
+      return compatFailure(room, {}, 'settleAcceptedClaim', claimRequest?.claimer || null, failure);
     }
   }
 
@@ -833,7 +872,8 @@ function createClassicNodeAdapter({ io, dealFactory, calcDDTable, logger } = {})
 
   return {
     initializeRoom, start, bid, play, readyNext, clearReadyForDisconnect,
-    settleClaim, editBidAnnotation, appendBidQuestion, answerBidQuestion,
+    settleClaim, settleAcceptedClaim,
+    editBidAnnotation, appendBidQuestion, answerBidQuestion,
   };
 }
 

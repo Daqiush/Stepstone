@@ -318,7 +318,8 @@ test('createClassicNodeAdapter rejects missing boundary dependencies', () => {
   const adapter = createClassicNodeAdapter(valid);
   assert.deepEqual(Object.keys(adapter), [
     'initializeRoom', 'start', 'bid', 'play', 'readyNext', 'clearReadyForDisconnect',
-    'settleClaim', 'editBidAnnotation', 'appendBidQuestion', 'answerBidQuestion',
+    'settleClaim', 'settleAcceptedClaim',
+    'editBidAnnotation', 'appendBidQuestion', 'answerBidQuestion',
   ]);
   for (const key of Object.keys(valid)) {
     assert.throws(
@@ -728,6 +729,33 @@ test('DDS completion from an old deal is ignored after the next deal starts', as
   assert.equal(h.room.dealNumber, 2);
   assert.equal(h.room.ddsStatus, 'PENDING');
   assert.equal(h.room.ddTable, null);
+});
+
+test('stale DDS completion preserves every canonical nested reference exactly', async () => {
+  const resolvers = [];
+  const h = adapterHarness({
+    calcDDTable: () => new Promise(resolve => resolvers.push(resolve)),
+  });
+  h.adapter.start(h.room, { socketId: h.fixture.socketIds.N, seat: 'N' });
+  await flushAsyncEffects();
+  for (const seat of ['N', 'E', 'S', 'W']) bidAs(h, seat, 'Pass');
+  h.room.readyStatus = { N: true, E: true, S: true, W: false };
+  readyAs(h, 'W');
+  await flushAsyncEffects();
+  const references = Object.fromEntries(CLASSIC_STATE_KEYS
+    .filter(key => h.room[key] && typeof h.room[key] === 'object')
+    .map(key => [key, h.room[key]]));
+  const revision = h.room.classicRevision;
+  h.fixture.clear();
+
+  resolvers[0](Array.from({ length: 5 }, () => [1, 1, 1, 1]));
+  await flushAsyncEffects();
+
+  for (const [key, reference] of Object.entries(references)) {
+    assert.equal(h.room[key], reference, key);
+  }
+  assert.equal(h.room.classicRevision, revision);
+  assert.deepEqual(h.fixture.emissions, []);
 });
 
 function activeBidHarness(options = {}) {
@@ -1538,6 +1566,50 @@ test('adapter accepted claim without a partial trick keeps replay and canonical 
     h.fixture.named('gameEnd')[0].payload.boardScores[0].completedTricks,
     h.room.boardScores[0].completedTricks,
   );
+});
+
+test('trusted accepted claim settles after claimer disconnect, supports automatic acceptance, and rejects replay', () => {
+  for (const voters of [['E', 'W'], []]) {
+    const h = activePlayHarness();
+    const votes = Object.fromEntries(voters.map(seat => [seat, true]));
+    const req = { claimer: 'N', tricksToWin: 7, reason: '', voters, votes };
+    h.room.claimReq = req;
+    h.room.sockets.N = null;
+    h.fixture.clear();
+
+    assert.deepEqual(h.adapter.settleAcceptedClaim(h.room, req), {
+      ok: true, phase: 'SCORING', revision: 1,
+    });
+    assert.equal(h.room.claimReq, null);
+    assert.equal(h.room.boardScores.length, 1);
+    assert.deepEqual(h.fixture.emissions.map(event => event.name), [
+      'claimResult', 'gameEnd', 'gameEnd', 'gameEnd',
+    ]);
+
+    h.fixture.clear();
+    assert.deepEqual(h.adapter.settleAcceptedClaim(h.room, req), {
+      ok: false, code: 'CLASSIC_FORBIDDEN',
+    });
+    assert.equal(h.room.boardScores.length, 1);
+    assert.deepEqual(h.fixture.emissions, []);
+  }
+});
+
+test('trusted claim settlement rejects fabricated or not-unanimous metadata without mutation', () => {
+  const h = activePlayHarness();
+  const req = {
+    claimer: 'N', tricksToWin: 7, reason: '', voters: ['E', 'W'], votes: { E: true },
+  };
+  h.room.claimReq = req;
+  const before = JSON.stringify(h.room);
+  assert.deepEqual(h.adapter.settleAcceptedClaim(h.room, { ...req }), {
+    ok: false, code: 'CLASSIC_FORBIDDEN',
+  });
+  assert.deepEqual(h.adapter.settleAcceptedClaim(h.room, req), {
+    ok: false, code: 'CLASSIC_FORBIDDEN',
+  });
+  assert.equal(JSON.stringify(h.room), before);
+  assert.deepEqual(h.fixture.emissions, []);
 });
 
 test('adapter annotation and Q&A helpers authorize seats, mutate canonically, and emit legacy targeted names', () => {
