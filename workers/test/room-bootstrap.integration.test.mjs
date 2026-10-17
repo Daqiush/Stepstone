@@ -262,7 +262,7 @@ test('persists display names in session authority and reconstructs all four seat
   assert.deepEqual(after.roomState.playerNames, before.roomState.playerNames);
 });
 
-test('idempotently migrates a pre-display-name session schema and rebuilds legacy authority', async () => {
+test('idempotently migrates genuine pre-classic room and session state across two restarts', async () => {
   const server = createTestHarness({
     root: WORKER_ROOT,
     workers: [{
@@ -270,24 +270,48 @@ test('idempotently migrates a pre-display-name session schema and rebuilds legac
       vars: { ROOM_FOUNDATION_TEST: 'true' },
     }],
   });
-  await server.listen();
+  const listening = await server.listen();
   try {
     const ownerBody = createBody('legacy_name_owner', { displayName: 'Legacy North' });
-    const response = await server.fetch('/api/rooms', {
+    const requestHash = createHash('sha256').update(canonicalJson(ownerBody)).digest('hex');
+    const allocatedAt = Date.now();
+    const allocationResponse = await server.fetch('/api/rooms/__test/registry', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(ownerBody),
+      body: JSON.stringify({
+        action: 'allocateAt',
+        requestId: ownerBody.requestId,
+        requestHash,
+        now: allocatedAt,
+      }),
     });
-    assert.equal(response.status, 200);
-    const created = await response.json();
+    assert.equal(allocationResponse.status, 200);
+    const allocation = (await allocationResponse.json()).value;
+    const sessionId = nextId('legacy_owner_session');
+    const created = successShape(
+      ownerBody.requestId,
+      allocation.code,
+      allocation.incarnation,
+      sessionId,
+      'OWNER',
+      'N',
+    );
     const worker = server.getWorker();
     let storage = await worker.getDurableObjectStorage('STEPSTONE_ROOM', {
       name: `${created.roomCode}:${created.incarnation}`,
     });
-    for (const event of ['insert', 'update', 'delete']) {
-      await storage.exec(`DROP TRIGGER IF EXISTS sessions_authority_after_${event}`);
+    for (const table of ['authority_cache', 'pending_actions', 'sessions', 'room_state']) {
+      await storage.exec(`DROP TABLE IF EXISTS ${table}`);
     }
-    await storage.exec(`CREATE TABLE sessions_legacy (
+    await storage.exec(`CREATE TABLE room_state (
+      incarnation INTEGER PRIMARY KEY,
+      schema_version INTEGER NOT NULL,
+      revision INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      expires_at INTEGER,
+      state_json TEXT NOT NULL
+    )`);
+    await storage.exec(`CREATE TABLE sessions (
       session_id TEXT PRIMARY KEY,
       token_hash TEXT UNIQUE NOT NULL,
       previous_token_hash TEXT,
@@ -303,15 +327,83 @@ test('idempotently migrates a pre-display-name session schema and rebuilds legac
       connection_epoch INTEGER NOT NULL,
       expires_at INTEGER
     )`);
-    await storage.exec(`INSERT INTO sessions_legacy
-      SELECT session_id, token_hash, previous_token_hash, last_rotation_id,
-        last_rotation_next_hash, current_connection_id, bootstrap_request_id,
-        bootstrap_request_hash, bootstrap_response_json, incarnation, role,
-        seat, connection_epoch, expires_at
-      FROM sessions`);
-    await storage.exec('DROP TABLE sessions');
-    await storage.exec('ALTER TABLE sessions_legacy RENAME TO sessions');
-    await storage.exec('DELETE FROM authority_cache');
+    await storage.exec(`CREATE TABLE pending_actions (
+      action_id TEXT PRIMARY KEY,
+      incarnation INTEGER NOT NULL,
+      due_at INTEGER NOT NULL,
+      kind TEXT NOT NULL,
+      payload_json TEXT NOT NULL
+    )`);
+    const legacyState = {
+      schemaVersion: 1,
+      roomCode: created.roomCode,
+      incarnation: created.incarnation,
+      revision: 0,
+      status: 'ACTIVE',
+      foundationCounter: 0,
+      createdAt: allocatedAt,
+      expiresAt: null,
+      recentCommands: {},
+      initialization: {
+        leaseId: allocation.leaseId,
+        leaseExpiresAt: allocation.leaseExpiresAt,
+        requestId: ownerBody.requestId,
+        requestHash,
+      },
+    };
+    const legacyStateJson = JSON.stringify(legacyState);
+    await storage.exec(
+      `INSERT INTO room_state
+        (incarnation, schema_version, revision, status, expires_at, state_json)
+       VALUES (?, 1, 0, 'ACTIVE', NULL, ?)`,
+      created.incarnation,
+      legacyStateJson,
+    );
+    await storage.exec(
+      `INSERT INTO sessions
+        (session_id, token_hash, previous_token_hash, last_rotation_id,
+         last_rotation_next_hash, current_connection_id, bootstrap_request_id,
+         bootstrap_request_hash, bootstrap_response_json, incarnation, role,
+         seat, connection_epoch, expires_at)
+       VALUES (?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, 'OWNER', 'N', 0, NULL)`,
+      sessionId,
+      await hashReconnectToken(ownerBody.reconnectToken),
+      ownerBody.requestId,
+      requestHash,
+      JSON.stringify(created),
+      created.incarnation,
+    );
+    const ownerAuthDueAt = allocatedAt + LIMITS.ownerAuthExpiryMs;
+    await storage.exec(
+      `INSERT INTO pending_actions
+        (action_id, incarnation, due_at, kind, payload_json)
+       VALUES ('owner-auth-expiry', ?, ?, 'owner-auth-expiry', ?)`,
+      created.incarnation,
+      ownerAuthDueAt,
+      JSON.stringify({ sessionId }),
+    );
+    const seededState = (await storage.exec(
+      'SELECT revision, status, expires_at, state_json FROM room_state LIMIT 1',
+    ))[0];
+    assert.equal(Object.hasOwn(JSON.parse(seededState.state_json), 'classic'), false);
+    assert.equal((await storage.exec(
+      "SELECT COUNT(*) AS count FROM pragma_table_info('sessions') WHERE name = 'display_name'",
+    ))[0].count, 0);
+
+    const activationResponse = await server.fetch('/api/rooms/__test/registry', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        action: 'activateAt',
+        requestId: ownerBody.requestId,
+        code: created.roomCode,
+        incarnation: created.incarnation,
+        leaseId: allocation.leaseId,
+        response: created,
+        now: allocatedAt + 1,
+      }),
+    });
+    assert.equal(activationResponse.status, 200);
     await worker.evictDurableObject('STEPSTONE_ROOM', {
       name: `${created.roomCode}:${created.incarnation}`,
       webSockets: 'hibernate',
@@ -329,6 +421,22 @@ test('idempotently migrates a pre-display-name session schema and rebuilds legac
     assert.equal(inspected.sessions.length, 1);
     assert.equal(inspected.sessions[0].displayName, null);
     assert.deepEqual(inspected.roomState.playerNames, { N: null, E: null, S: null, W: null });
+    assert.equal(inspected.roomState.revision, legacyState.revision);
+    assert.equal(inspected.roomState.foundationCounter, legacyState.foundationCounter);
+    assert.equal(inspected.roomState.classic.phase, 'LOBBY');
+    const migrationAccountingResponse = await server.fetch('/api/rooms/__test/registry', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        action: 'inspectRoomCommandAccounting',
+        code: created.roomCode,
+        incarnation: created.incarnation,
+      }),
+    });
+    assert.equal(migrationAccountingResponse.status, 200);
+    const migrationAccounting = (await migrationAccountingResponse.json()).value;
+    assert.equal(migrationAccounting.lastWake.roomStateRowsWritten, 1);
+    assert.equal(migrationAccounting.lastWake.totalRowsWritten, 1);
 
     storage = await worker.getDurableObjectStorage('STEPSTONE_ROOM', {
       name: `${created.roomCode}:${created.incarnation}`,
@@ -343,6 +451,161 @@ test('idempotently migrates a pre-display-name session schema and rebuilds legac
       'SELECT authorities_json FROM authority_cache WHERE singleton = 1',
     );
     assert.equal(JSON.parse(cached[0].authorities_json)[0].displayName, '');
+    const migratedRow = (await storage.exec(
+      'SELECT revision, status, expires_at, state_json FROM room_state LIMIT 1',
+    ))[0];
+    const migratedState = JSON.parse(migratedRow.state_json);
+    const { classic, ...foundationAfterMigration } = migratedState;
+    assert.deepEqual(foundationAfterMigration, legacyState);
+    assert.equal(classic.phase, 'LOBBY');
+    assert.deepEqual(
+      { revision: migratedRow.revision, status: migratedRow.status, expiresAt: migratedRow.expires_at },
+      { revision: seededState.revision, status: seededState.status, expiresAt: seededState.expires_at },
+    );
+
+    const wsUrl = new URL(
+      `/api/rooms/${created.roomCode}/${created.incarnation}/ws`,
+      listening.url,
+    );
+    wsUrl.protocol = wsUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+    const socket = new WebSocket(wsUrl);
+    await new Promise((resolve, reject) => {
+      socket.addEventListener('open', resolve, { once: true });
+      socket.addEventListener('error', reject, { once: true });
+    });
+    const nextMessage = () => new Promise((resolve) => {
+      socket.addEventListener('message', (event) => resolve(JSON.parse(event.data)), { once: true });
+    });
+    const nextReconnectToken = token();
+    const helloMessage = nextMessage();
+    socket.send(JSON.stringify({
+      v: 1,
+      type: 'hello',
+      id: nextId('legacy_migration_hello'),
+      reconnectToken: ownerBody.reconnectToken,
+      nextReconnectToken,
+    }));
+    const hello = await helloMessage;
+    assert.equal(hello.type, 'hello-ok');
+    assert.equal(hello.payload.snapshot.classic.phase, 'LOBBY');
+    const syncMessage = nextMessage();
+    socket.send(JSON.stringify({
+      v: 1, type: 'command', id: nextId('legacy_migration_sync'),
+      name: 'room.sync', payload: {},
+    }));
+    const synchronized = await syncMessage;
+    assert.equal(synchronized.type, 'reply');
+    assert.equal(synchronized.payload.snapshot.classic.phase, 'LOBBY');
+    socket.close();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    const eastBody = joinBody('legacy_migrated_east', 'player', { displayName: 'Migrated East' });
+    const eastResponse = await server.fetch(`/api/rooms/${created.roomCode}/join`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(eastBody),
+    });
+    assert.equal(eastResponse.status, 200);
+    const stableStateJson = (await storage.exec(
+      'SELECT state_json FROM room_state LIMIT 1',
+    ))[0].state_json;
+
+    for (let restart = 0; restart < 2; restart += 1) {
+      await worker.evictDurableObject('STEPSTONE_ROOM', {
+        name: `${created.roomCode}:${created.incarnation}`,
+        webSockets: 'hibernate',
+      });
+      const restartedResponse = await server.fetch('/api/rooms/__test/registry', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          action: 'inspectRoom', code: created.roomCode, incarnation: created.incarnation,
+        }),
+      });
+      assert.equal(restartedResponse.status, 200);
+      const restarted = (await restartedResponse.json()).value;
+      assert.deepEqual(restarted.roomState.playerNames, {
+        N: null, E: 'Migrated East', S: null, W: null,
+      });
+      storage = await worker.getDurableObjectStorage('STEPSTONE_ROOM', {
+        name: `${created.roomCode}:${created.incarnation}`,
+      });
+      const stableState = (await storage.exec(
+        'SELECT state_json FROM room_state LIMIT 1',
+      ))[0].state_json;
+      assert.equal(stableState, stableStateJson);
+      const restartAccountingResponse = await server.fetch('/api/rooms/__test/registry', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          action: 'inspectRoomCommandAccounting',
+          code: created.roomCode,
+          incarnation: created.incarnation,
+        }),
+      });
+      assert.equal(restartAccountingResponse.status, 200);
+      const restartAccounting = (await restartAccountingResponse.json()).value;
+      assert.equal(restartAccounting.lastWake.totalRowsWritten, 0);
+    }
+  } finally {
+    await server.close();
+  }
+});
+
+test('an existing malformed classic field fails closed and is never reset as legacy state', async () => {
+  const server = createTestHarness({
+    root: WORKER_ROOT,
+    workers: [{
+      configPath: './workers/wrangler.jsonc',
+      vars: { ROOM_FOUNDATION_TEST: 'true' },
+    }],
+  });
+  await server.listen();
+  try {
+    const body = createBody('malformed_classic_owner');
+    const createdResponse = await server.fetch('/api/rooms', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const created = await createdResponse.json();
+    const worker = server.getWorker();
+    let storage = await worker.getDurableObjectStorage('STEPSTONE_ROOM', {
+      name: `${created.roomCode}:${created.incarnation}`,
+    });
+    const persisted = JSON.parse((await storage.exec(
+      'SELECT state_json FROM room_state LIMIT 1',
+    ))[0].state_json);
+    persisted.classic = { malformed: true };
+    const malformedJson = JSON.stringify(persisted);
+    await storage.exec(
+      'UPDATE room_state SET state_json = ? WHERE incarnation = ?',
+      malformedJson,
+      created.incarnation,
+    );
+    await worker.evictDurableObject('STEPSTONE_ROOM', {
+      name: `${created.roomCode}:${created.incarnation}`,
+      webSockets: 'hibernate',
+    });
+
+    const accountingResponse = await server.fetch('/api/rooms/__test/registry', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        action: 'inspectRoomCommandAccounting',
+        code: created.roomCode,
+        incarnation: created.incarnation,
+      }),
+    });
+    assert.equal(accountingResponse.status, 200);
+    const accounting = (await accountingResponse.json()).value;
+    assert.equal(accounting.cache.ready, false);
+    storage = await worker.getDurableObjectStorage('STEPSTONE_ROOM', {
+      name: `${created.roomCode}:${created.incarnation}`,
+    });
+    assert.equal((await storage.exec(
+      'SELECT state_json FROM room_state LIMIT 1',
+    ))[0].state_json, malformedJson);
   } finally {
     await server.close();
   }

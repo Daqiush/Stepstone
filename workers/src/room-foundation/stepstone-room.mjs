@@ -262,7 +262,8 @@ export class StepstoneRoom {
         this.lastWakeAccounting = accounting;
         return true;
       }
-      const state = JSON.parse(stored.state_json);
+      let stateJson = stored.state_json;
+      let state = JSON.parse(stateJson);
       const validState = Number.isSafeInteger(state?.schemaVersion)
         && state.schemaVersion === stored.schema_version
         && validCodeIncarnation(state.roomCode, state.incarnation)
@@ -277,6 +278,27 @@ export class StepstoneRoom {
         && (state.expiresAt === null || validTime(state.expiresAt))
         && isValidCommandCache(state.recentCommands);
       if (!validState) throw new TypeError('invalid persisted command state');
+
+      if (!Object.hasOwn(state, 'classic')) {
+        const migratedState = { ...state, classic: createClassicLobbyState() };
+        const migratedStateJson = JSON.stringify(migratedState);
+        const migrated = executeAccountedSql(
+          this.sql,
+          accounting,
+          `UPDATE room_state SET state_json = ?
+           WHERE incarnation = ? AND revision = ? AND status = ? AND state_json = ?`,
+          migratedStateJson,
+          stored.incarnation,
+          stored.revision,
+          stored.status,
+          stateJson,
+        );
+        if (migrated.rowsWritten !== 1) {
+          throw new TypeError('legacy classic state migration lost ownership');
+        }
+        state = migratedState;
+        stateJson = migratedStateJson;
+      }
 
       let persistedSessions;
       if (typeof stored.authorities_json === 'string') {
@@ -333,7 +355,7 @@ export class StepstoneRoom {
       }
       composeRoomSnapshot(state, authorities, { role: 'SPECTATOR', seat: null });
       this.commandState = state;
-      this.commandStateJson = stored.state_json;
+      this.commandStateJson = stateJson;
       this.sessionAuthorities = authorities;
       this.commandCacheReady = true;
       this.lastWakeAccounting = accounting;
