@@ -10,12 +10,16 @@ const {
   createClassicLobbyState,
   createClassicDealState,
 } = require('../classic/state.cjs');
-const { ClassicInputError } = require('../classic/engine.cjs');
+const {
+  ClassicInputError, applyClassicCommand,
+} = require('../classic/engine.cjs');
 const { boardInfoFor } = require('../classic/rules.cjs');
 const { orderedDeal } = require('./helpers/classic-fixtures.js');
+const { createClassicSocketFixture } = require('./helpers/classic-socket-fixture.js');
 const {
   applyClassicState,
   createClassicNodeAdapter,
+  emitClassicEvents,
   mapClassicNodeFailure,
   projectClassicState,
 } = require('../classic/node-adapter.js');
@@ -311,7 +315,7 @@ test('createClassicNodeAdapter rejects missing boundary dependencies', () => {
     logger: { error() {} },
   };
   const adapter = createClassicNodeAdapter(valid);
-  assert.deepEqual(Object.keys(adapter), ['initializeRoom']);
+  assert.deepEqual(Object.keys(adapter), ['initializeRoom', 'start', 'bid']);
   for (const key of Object.keys(valid)) {
     assert.throws(
       () => createClassicNodeAdapter({ ...valid, [key]: null }),
@@ -432,6 +436,370 @@ test('server creation seam initializes only standard classic and is safe to requ
       assert.equal(room.hands, legacyHands);
       assert.equal(room.dealNumber, legacyDealNumber);
       assert.equal(Object.hasOwn(room, 'schemaVersion'), false);
+    }
+  } finally {
+    delete require.cache[serverPath];
+  }
+});
+
+function canonicalAdapterRoom(overrides = {}) {
+  const fixture = createClassicSocketFixture();
+  return {
+    fixture,
+    room: adapterRoom({
+      id: 'classic-room',
+      sockets: fixture.roomSockets,
+      playerNames: { N: 'North', E: 'East', S: 'South', W: 'West' },
+      ownerSocketId: fixture.socketIds.N,
+      classicRevision: 0,
+      ...overrides,
+    }),
+  };
+}
+
+function legacyHistory(history) {
+  return history.map(entry => ({
+    ...entry,
+    bid: entry.bid === 'X' ? 'Double' : entry.bid === 'XX' ? 'Redouble' : entry.bid,
+  }));
+}
+
+function fullEntry(seat, bid, alert = null, explain = null) {
+  return { seat, bid, alert, explain, qa: [] };
+}
+
+test('classic event mapping sends private gameStart frames before independently filtered bidding frames', () => {
+  const { fixture, room } = canonicalAdapterRoom();
+  const dealt = createClassicDealState(createClassicLobbyState(), {
+    hands: orderedDeal(), boardInfo: boardInfoFor(1),
+  });
+  const first = applyClassicCommand(dealt, {
+    name: 'classic.bid',
+    payload: { expectedRevision: 0, bid: '1H', alert: true, explain: 'five hearts' },
+  }, {
+    actor: { role: 'OWNER', seat: 'N' }, occupiedSeats: ['N', 'E', 'S', 'W'], deal: null,
+  });
+  const second = applyClassicCommand(first.state, {
+    name: 'classic.bid',
+    payload: { expectedRevision: 0, bid: 'X', alert: true, explain: 'takeout' },
+  }, {
+    actor: { role: 'PLAYER', seat: 'E' }, occupiedSeats: ['N', 'E', 'S', 'W'], deal: null,
+  });
+  applyClassicState(room, second.state);
+
+  emitClassicEvents(fixture.io, room, [
+    { name: 'classic.started', payload: { dealNumber: 1, boardInfo: boardInfoFor(1) } },
+    second.events[0],
+  ]);
+
+  assert.deepEqual(fixture.emissions.map(({ target, name }) => ({ target, name })), [
+    ...['N', 'E', 'S', 'W'].map(seat => ({ target: fixture.socketIds[seat], name: 'gameStart' })),
+    ...['N', 'E', 'S', 'W'].map(seat => ({ target: fixture.socketIds[seat], name: 'biddingUpdate' })),
+  ]);
+  for (const seat of ['N', 'E', 'S', 'W']) {
+    const start = fixture.forTarget(fixture.socketIds[seat])[0].payload;
+    assert.deepEqual(Object.keys(start), ['hand', 'boardInfo', 'seat', 'playerNames', 'boardScores']);
+    assert.deepEqual(start.hand, room.hands[seat]);
+    assert.notEqual(start.hand, room.hands[seat]);
+    assert.equal(start.seat, seat);
+    assert.deepEqual(start.boardInfo, boardInfoFor(1));
+    assert.deepEqual(start.playerNames, room.playerNames);
+    assert.deepEqual(start.boardScores, []);
+    assert.equal(JSON.stringify(start).includes('initialHands'), false);
+  }
+
+  const north = fixture.forTarget(fixture.socketIds.N)[1].payload;
+  const south = fixture.forTarget(fixture.socketIds.S)[1].payload;
+  const west = fixture.forTarget(fixture.socketIds.W)[1].payload;
+  for (const payload of [north, south, west]) {
+    assert.deepEqual(Object.keys(payload), [
+      'history', 'currentBidder', 'currentContract', 'consecutivePasses',
+    ]);
+    assert.equal(payload.currentBidder, 'S');
+    assert.equal(payload.currentContract.doubled, true);
+    assert.equal(payload.consecutivePasses, 0);
+  }
+  assert.deepEqual(north.history, legacyHistory(second.state.biddingHistory));
+  assert.deepEqual(south.history, [
+    { seat: 'N', bid: '1H' },
+    legacyHistory(second.state.biddingHistory)[1],
+  ]);
+  assert.deepEqual(west.history, [
+    legacyHistory(second.state.biddingHistory)[0],
+    { seat: 'E', bid: 'Double' },
+  ]);
+  assert.notEqual(north, south);
+  assert.notEqual(north.history, south.history);
+  north.history[0].explain = 'mutated';
+  assert.equal(south.history[0].explain, undefined);
+  assert.equal(room.biddingHistory[0].explain, 'five hearts');
+});
+
+function adapterHarness({ dealFactory, calcDDTable } = {}) {
+  const base = canonicalAdapterRoom();
+  const dealCalls = [];
+  const ddsCalls = [];
+  const logs = [];
+  const adapter = createClassicNodeAdapter({
+    io: base.fixture.io,
+    dealFactory: dealFactory || (({ dealNumber }) => {
+      dealCalls.push({ dealNumber });
+      return { hands: orderedDeal(), boardInfo: boardInfoFor(dealNumber) };
+    }),
+    calcDDTable: calcDDTable || (async hands => {
+      ddsCalls.push(hands);
+      return Array.from({ length: 5 }, () => [7, 7, 7, 7]);
+    }),
+    logger: { error: (message, metadata) => logs.push({ message, metadata }) },
+  });
+  return { ...base, adapter, dealCalls, ddsCalls, logs };
+}
+
+async function flushAsyncEffects() {
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+}
+
+test('adapter start preflights authorization and occupancy before one deal and launches DDS after apply', async () => {
+  let observedPhase = null;
+  let observedDeal = null;
+  const h = adapterHarness({
+    calcDDTable: async hands => {
+      observedPhase = h.room.phase;
+      observedDeal = h.room.dealNumber;
+      assert.notEqual(hands, h.room.initialHands);
+      return Array.from({ length: 5 }, () => [6, 7, 8, 9]);
+    },
+  });
+
+  const result = h.adapter.start(h.room, {
+    socketId: h.fixture.socketIds.N, seat: 'N',
+  });
+
+  assert.deepEqual(result, { ok: true, phase: 'BIDDING', revision: 1 });
+  assert.deepEqual(h.dealCalls, [{ dealNumber: 1 }]);
+  assert.equal(h.room.phase, 'BIDDING');
+  assert.equal(h.room.dealNumber, 1);
+  assert.equal(h.room.classicRevision, 1);
+  assert.deepEqual(h.fixture.emissions.map(({ name }) => name), [
+    'gameStart', 'gameStart', 'gameStart', 'gameStart',
+    'biddingUpdate', 'biddingUpdate', 'biddingUpdate', 'biddingUpdate',
+  ]);
+  assert.equal(observedPhase, null);
+  await flushAsyncEffects();
+  assert.equal(observedPhase, 'BIDDING');
+  assert.equal(observedDeal, 1);
+  assert.equal(h.room.ddsStatus, 'READY');
+  assert.deepEqual(h.room.ddTable, Array.from({ length: 5 }, () => [6, 7, 8, 9]));
+  assert.equal(h.room.classicRevision, 1);
+});
+
+test('adapter start rejects owner, phase, and seat preconditions without consuming randomness', () => {
+  const cases = [
+    {
+      mutate(h) { h.room.ownerSocketId = h.fixture.socketIds.E; },
+      request(h) { return { socketId: h.fixture.socketIds.N, seat: 'N' }; },
+      expected: { ok: false, code: 'CLASSIC_FORBIDDEN' },
+      message: '只有房主可以开始游戏',
+    },
+    {
+      mutate(h) { h.room.sockets.W = null; },
+      request(h) { return { socketId: h.fixture.socketIds.N, seat: 'N' }; },
+      expected: { ok: false, code: 'CLASSIC_SEATS_INCOMPLETE' },
+      message: '需要4名玩家全部就座后才能开始',
+    },
+    {
+      mutate(h) {
+        applyClassicState(h.room, createClassicDealState(createClassicLobbyState(), {
+          hands: orderedDeal(), boardInfo: boardInfoFor(1),
+        }));
+      },
+      request(h) { return { socketId: h.fixture.socketIds.N, seat: 'N' }; },
+      expected: { ok: false, code: 'CLASSIC_WRONG_PHASE' },
+      message: null,
+    },
+  ];
+  for (const entry of cases) {
+    const h = adapterHarness();
+    entry.mutate(h);
+    const result = h.adapter.start(h.room, entry.request(h));
+    assert.deepEqual(result, entry.expected);
+    assert.deepEqual(h.dealCalls, []);
+    assert.equal(h.room.classicRevision, 0);
+    assert.deepEqual(h.fixture.named('appError').map(event => event.payload.msg),
+      entry.message === null ? [] : [entry.message]);
+  }
+});
+
+test('DDS rejection and late settlement are contained, re-project current room state, and never bump revision', async () => {
+  let rejectDds;
+  const pending = new Promise((resolve, reject) => { rejectDds = reject; });
+  const h = adapterHarness({ calcDDTable: () => pending });
+  assert.deepEqual(h.adapter.start(h.room, {
+    socketId: h.fixture.socketIds.N, seat: 'N',
+  }), { ok: true, phase: 'BIDDING', revision: 1 });
+  h.room.biddingHistory = [fullEntry('N', 'Pass')];
+  h.room.currentBidder = 'E';
+  h.room.consecutivePasses = 1;
+  rejectDds(new Error('native DDS failed'));
+  await flushAsyncEffects();
+  assert.equal(h.room.ddsStatus, 'FAILED');
+  assert.equal(h.room.biddingHistory.length, 1);
+  assert.equal(h.room.classicRevision, 1);
+  assert.equal(h.logs.some(log => JSON.stringify(log).includes('native DDS failed')), true);
+
+  let resolveLate;
+  const late = new Promise(resolve => { resolveLate = resolve; });
+  const lateHarness = adapterHarness({ calcDDTable: () => late });
+  lateHarness.adapter.start(lateHarness.room, {
+    socketId: lateHarness.fixture.socketIds.N, seat: 'N',
+  });
+  lateHarness.room.ddsStatus = 'FAILED';
+  resolveLate(Array.from({ length: 5 }, () => [1, 2, 3, 4]));
+  await flushAsyncEffects();
+  assert.equal(lateHarness.room.ddsStatus, 'FAILED');
+  assert.equal(lateHarness.room.ddTable, null);
+  assert.equal(lateHarness.room.classicRevision, 1);
+});
+
+test('invalid trusted DDS output follows the failure path without a gameplay error', async () => {
+  const h = adapterHarness({ calcDDTable: async () => [[7, 7, 7, 7]] });
+  assert.deepEqual(h.adapter.start(h.room, {
+    socketId: h.fixture.socketIds.N, seat: 'N',
+  }), { ok: true, phase: 'BIDDING', revision: 1 });
+
+  await flushAsyncEffects();
+
+  assert.equal(h.room.ddsStatus, 'FAILED');
+  assert.equal(h.room.ddTable, null);
+  assert.equal(h.room.classicRevision, 1);
+  assert.equal(h.fixture.named('appError').length, 0);
+  assert.equal(h.logs.some(log => log.metadata.method === 'settleDds'), true);
+});
+
+function activeBidHarness(options = {}) {
+  const h = adapterHarness(options);
+  applyClassicState(h.room, createClassicDealState(createClassicLobbyState(), {
+    hands: orderedDeal(), boardInfo: boardInfoFor(1),
+  }));
+  return h;
+}
+
+function bidAs(h, seat, bid, alert = false, explain = null) {
+  h.fixture.clear();
+  return h.adapter.bid(h.room, {
+    socketId: h.fixture.socketIds[seat], seat, bid, alert, explain,
+  });
+}
+
+test('adapter bid normalizes legacy X/XX and alert text while retaining core tokens internally', () => {
+  const h = activeBidHarness();
+  assert.deepEqual(bidAs(h, 'N', '1H', true, '  five hearts  '), {
+    ok: true, phase: 'BIDDING', revision: 1,
+  });
+  assert.deepEqual(h.room.biddingHistory[0], fullEntry('N', '1H', true, 'five hearts'));
+  assert.equal(h.fixture.named('biddingUpdate').length, 4);
+
+  assert.deepEqual(bidAs(h, 'E', 'Double', true, `  ${'😀'.repeat(510)}  `), {
+    ok: true, phase: 'BIDDING', revision: 2,
+  });
+  assert.equal(h.room.biddingHistory[1].bid, 'X');
+  assert.equal([...h.room.biddingHistory[1].explain].length, 500);
+  assert.equal(h.fixture.named('biddingUpdate')[0].payload.history[1].bid, 'Double');
+
+  assert.deepEqual(bidAs(h, 'S', 'Redouble', false, 'ignored'), {
+    ok: true, phase: 'BIDDING', revision: 3,
+  });
+  assert.equal(h.room.biddingHistory[2].bid, 'XX');
+  assert.equal(h.room.biddingHistory[2].explain, null);
+  assert.equal(h.fixture.named('biddingUpdate')[0].payload.history[2].bid, 'Redouble');
+});
+
+test('adapter bid maps turn, invalid-bid, and malformed-boundary failures without mutation or throws', () => {
+  const h = activeBidHarness();
+  assert.deepEqual(bidAs(h, 'E', 'Pass'), { ok: false, code: 'CLASSIC_NOT_YOUR_TURN' });
+  assert.deepEqual(h.fixture.named('appError').map(event => event.payload.msg), ['还没到你叫牌']);
+  assert.equal(h.room.classicRevision, 0);
+
+  assert.deepEqual(bidAs(h, 'N', 'Double'), { ok: false, code: 'CLASSIC_INVALID_BID' });
+  assert.deepEqual(h.fixture.named('appError').map(event => event.payload.msg), ['没有可加倍的定约']);
+  assert.equal(h.room.classicRevision, 0);
+
+  assert.doesNotThrow(() => {
+    assert.deepEqual(h.adapter.bid(h.room, {
+      socketId: h.fixture.socketIds.N, seat: 'N', bid: 7, alert: false, explain: null,
+    }), { ok: false, code: 'CLASSIC_INPUT_INVALID' });
+  });
+  assert.equal(h.room.classicRevision, 0);
+});
+
+test('final contract bid emits only independently filtered legacy biddingEnd frames', () => {
+  const h = activeBidHarness();
+  bidAs(h, 'N', '1NT', true, 'balanced');
+  bidAs(h, 'E', 'Pass');
+  bidAs(h, 'S', 'Pass');
+  const result = bidAs(h, 'W', 'Pass');
+
+  assert.deepEqual(result, { ok: true, phase: 'PLAYING', revision: 4 });
+  assert.deepEqual(h.fixture.emissions.map(({ target, name }) => ({ target, name })),
+    ['N', 'E', 'S', 'W'].map(seat => ({
+      target: h.fixture.socketIds[seat], name: 'biddingEnd',
+    })));
+  for (const emission of h.fixture.emissions) {
+    assert.deepEqual(Object.keys(emission.payload), [
+      'contract', 'declarer', 'dummy', 'leader', 'biddingHistory', 'declarerControlledBy',
+    ]);
+    assert.equal(emission.payload.biddingHistory.at(-1).bid, 'Pass');
+    assert.equal(emission.payload.declarerControlledBy, null);
+  }
+  const south = h.fixture.forTarget(h.fixture.socketIds.S)[0].payload;
+  assert.deepEqual(south.biddingHistory[0], { seat: 'N', bid: '1NT' });
+  assert.equal(h.fixture.named('biddingUpdate').length, 0);
+});
+
+test('four opening passes emit only private-safe legacy gameEnd frames with no final biddingUpdate', () => {
+  const h = activeBidHarness();
+  bidAs(h, 'N', 'Pass');
+  bidAs(h, 'E', 'Pass');
+  bidAs(h, 'S', 'Pass');
+  const result = bidAs(h, 'W', 'Pass');
+
+  assert.deepEqual(result, { ok: true, phase: 'SCORING', revision: 4 });
+  assert.equal(h.fixture.named('biddingUpdate').length, 0);
+  assert.equal(h.fixture.named('gameEnd').length, 4);
+  for (const emission of h.fixture.named('gameEnd')) {
+    assert.deepEqual(Object.keys(emission.payload), [
+      'passedOut', 'score', 'boardScores', 'ddTable',
+    ]);
+    assert.equal(emission.payload.passedOut, true);
+    assert.equal(emission.payload.score, 0);
+    assert.equal(emission.payload.ddTable, null);
+    assert.equal(JSON.stringify(emission.payload).includes('initialHands'), false);
+  }
+});
+
+test('server routing seam delegates only standard classic start and bid paths', () => {
+  const serverPath = require.resolve('../server.js');
+  delete require.cache[serverPath];
+  const serverApi = require(serverPath);
+  try {
+    for (const route of [serverApi.routeClassicStart, serverApi.routeClassicBid]) {
+      const variants = [
+        [{ mode: 'classic', teachingMode: false }, 'standard'],
+        [{ mode: 'classic', teachingMode: true }, 'legacy'],
+        [{ mode: 'ult', teachingMode: false }, 'legacy'],
+        [{ mode: 'problem', teachingMode: false }, 'legacy'],
+        [{ mode: 'complex', teachingMode: false }, 'legacy'],
+      ];
+      for (const [room, expected] of variants) {
+        const calls = [];
+        const result = route(room, { socketId: 's', seat: 'N' }, {
+          standard: () => { calls.push('standard'); return 'standard-result'; },
+          legacy: () => { calls.push('legacy'); return 'legacy-result'; },
+        });
+        assert.deepEqual(calls, [expected]);
+        assert.equal(result, `${expected}-result`);
+      }
     }
   } finally {
     delete require.cache[serverPath];

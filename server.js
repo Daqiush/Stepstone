@@ -318,6 +318,20 @@ const classicAdapter = createClassicNodeAdapter({
   logger: console,
 });
 
+function routeClassicStart(room, request, { standard, legacy }) {
+  if (room && room.mode === 'classic' && !room.teachingMode) {
+    return standard(room, request);
+  }
+  return legacy(room, request);
+}
+
+function routeClassicBid(room, request, { standard, legacy }) {
+  if (room && room.mode === 'classic' && !room.teachingMode) {
+    return standard(room, request);
+  }
+  return legacy(room, request);
+}
+
 function configureNewRoom(room, requestedMode) {
   if (requestedMode === 'ult') {
     room.mode = 'ult';
@@ -1127,61 +1141,69 @@ io.on('connection', socket => {
   socket.on('ownerStartGame', () => {
     const roomId = sockRoom[socket.id];
     const room   = rooms[roomId];
-    // 大招模式结算后可重新开局
-    if (room && room.mode === 'ult' && room.phase === 'SCORING') {
-      if (room.ownerSocketId !== socket.id) { socket.emit('appError', { msg: '只有房主可以重新开始' }); return; }
-      room.dealNumber++;
-      SEATS.forEach(s => { room.readyStatus[s] = false; });
-      startUltGame(room);
-      return;
-    }
-    if (!room || room.phase !== 'LOBBY') return;
-    if (room.ownerSocketId !== socket.id) {
-      socket.emit('appError', { msg: '只有房主可以开始游戏' }); return;
-    }
-
-    // 做题模式：房主直接开始，无需入座
-    if (room.mode === 'problem') {
-      room.phase = 'PROB_SELECT';
-      socket.emit('probSelectStart', { problems: PROBLEM_LIST });
-      return;
-    }
-
-    if (room.teachingMode) {
-      const realSeated = SEATS.filter(s => room.sockets[s]);
-      if (realSeated.length === 0) {
-        socket.emit('appError', { msg: '教学模式下需要至少1名玩家就座' }); return;
-      }
-      const ownerSeats = [];
-      for (const s of SEATS) {
-        if (!room.sockets[s]) {
-          room.sockets[s]     = socket.id;
-          room.playerNames[s] = room.ownerName || '教学';
-          ownerSeats.push(s);
+    return routeClassicStart(room, {
+      socketId: socket.id,
+      seat: sockSeat[socket.id] || null,
+    }, {
+      standard: (classicRoom, request) => classicAdapter.start(classicRoom, request),
+      legacy: () => {
+        // 大招模式结算后可重新开局
+        if (room && room.mode === 'ult' && room.phase === 'SCORING') {
+          if (room.ownerSocketId !== socket.id) { socket.emit('appError', { msg: '只有房主可以重新开始' }); return; }
+          room.dealNumber++;
+          SEATS.forEach(s => { room.readyStatus[s] = false; });
+          startUltGame(room);
+          return;
         }
-      }
-      room.ownerControlledSeats = ownerSeats;
-      if (ownerSeats.length > 0) sockSeat[socket.id] = ownerSeats[0];
-      io.to(roomId).emit('roomUpdate', roomState(room));
-    } else {
-      const allSeated = SEATS.every(s => room.sockets[s]);
-      if (!allSeated) {
-        socket.emit('appError', { msg: '需要4名玩家全部就座后才能开始' }); return;
-      }
-    }
+        if (!room || room.phase !== 'LOBBY') return;
+        if (room.ownerSocketId !== socket.id) {
+          socket.emit('appError', { msg: '只有房主可以开始游戏' }); return;
+        }
 
-    if (room.mode === 'complex') {
-      if (!room.complexSides?.NS?.socketId || !room.complexSides?.EW?.socketId) {
-        socket.emit('appError', { msg: '需要南北、东西两方均就位后才能开始' }); return;
-      }
-      startComplexGame(room);
-    }
-    else if (room.mode === 'ult') startUltGame(room);
-    else if (room.mode === 'problem') {
-      room.phase = 'PROB_SELECT';
-      socket.emit('probSelectStart', { problems: PROBLEM_LIST });
-    }
-    else startGame(room);
+        // 做题模式：房主直接开始，无需入座
+        if (room.mode === 'problem') {
+          room.phase = 'PROB_SELECT';
+          socket.emit('probSelectStart', { problems: PROBLEM_LIST });
+          return;
+        }
+
+        if (room.teachingMode) {
+          const realSeated = SEATS.filter(s => room.sockets[s]);
+          if (realSeated.length === 0) {
+            socket.emit('appError', { msg: '教学模式下需要至少1名玩家就座' }); return;
+          }
+          const ownerSeats = [];
+          for (const s of SEATS) {
+            if (!room.sockets[s]) {
+              room.sockets[s]     = socket.id;
+              room.playerNames[s] = room.ownerName || '教学';
+              ownerSeats.push(s);
+            }
+          }
+          room.ownerControlledSeats = ownerSeats;
+          if (ownerSeats.length > 0) sockSeat[socket.id] = ownerSeats[0];
+          io.to(roomId).emit('roomUpdate', roomState(room));
+        } else {
+          const allSeated = SEATS.every(s => room.sockets[s]);
+          if (!allSeated) {
+            socket.emit('appError', { msg: '需要4名玩家全部就座后才能开始' }); return;
+          }
+        }
+
+        if (room.mode === 'complex') {
+          if (!room.complexSides?.NS?.socketId || !room.complexSides?.EW?.socketId) {
+            socket.emit('appError', { msg: '需要南北、东西两方均就位后才能开始' }); return;
+          }
+          startComplexGame(room);
+        }
+        else if (room.mode === 'ult') startUltGame(room);
+        else if (room.mode === 'problem') {
+          room.phase = 'PROB_SELECT';
+          socket.emit('probSelectStart', { problems: PROBLEM_LIST });
+        }
+        else startGame(room);
+      },
+    });
   });
 
   // ── 叫牌 ─────────────────────────────────────────────
@@ -1235,46 +1257,58 @@ io.on('connection', socket => {
     startComplexGame(room);
   });
 
-  socket.on('bid', ({ bid, alert, explain }) => {
+  socket.on('bid', (bidPayload = {}) => {
+    const { bid, alert, explain } = bidPayload || {};
     const roomId = sockRoom[socket.id];
     const room   = rooms[roomId];
-    if (!room || room.phase !== 'BIDDING') return;
-    let seat = sockSeat[socket.id];
+    return routeClassicBid(room, {
+      socketId: socket.id,
+      seat: sockSeat[socket.id] || null,
+      bid,
+      alert,
+      explain,
+    }, {
+      standard: (classicRoom, request) => classicAdapter.bid(classicRoom, request),
+      legacy: () => {
+        if (!room || room.phase !== 'BIDDING') return;
+        let seat = sockSeat[socket.id];
 
-    // 教学模式：房主代替当前叫牌座位出牌
-    if (room.teachingMode && socket.id === room.ownerSocketId
-        && room.ownerControlledSeats.includes(room.currentBidder)) {
-      seat = room.currentBidder;
-    }
+        // 教学模式：房主代替当前叫牌座位出牌
+        if (room.teachingMode && socket.id === room.ownerSocketId
+            && room.ownerControlledSeats.includes(room.currentBidder)) {
+          seat = room.currentBidder;
+        }
 
-    const v = validateBid(bid, room, seat);
-    if (!v.ok) { socket.emit('appError', { msg: v.msg }); return; }
+        const v = validateBid(bid, room, seat);
+        if (!v.ok) { socket.emit('appError', { msg: v.msg }); return; }
 
-    const alerted     = !!alert;
-    const explainText = (alerted && explain) ? String(explain).trim().slice(0, 500) : null;
-    room.biddingHistory.push({ seat, bid, alert: alerted || null, explain: explainText });
+        const alerted     = !!alert;
+        const explainText = (alerted && explain) ? String(explain).trim().slice(0, 500) : null;
+        room.biddingHistory.push({ seat, bid, alert: alerted || null, explain: explainText });
 
-    if (bid === 'Pass') {
-      room.consecutivePasses++;
-      const hasContract = !!room.currentContract;
-      // 4次Pass（全不叫）或有定约后3次Pass
-      if ((hasContract && room.consecutivePasses >= 3) ||
-          (!hasContract && room.consecutivePasses >= 4)) {
-        finishBidding(room); return;
-      }
-    } else if (bid === 'Double') {
-      room.currentContract = { ...room.currentContract, doubled: true, redoubled: false, doublerSeat: seat };
-      room.consecutivePasses = 0;
-    } else if (bid === 'Redouble') {
-      room.currentContract = { ...room.currentContract, redoubled: true, doublerSeat: seat };
-      room.consecutivePasses = 0;
-    } else {
-      room.currentContract   = { level: parseInt(bid[0]), suit: parseSuit(bid), seat, doubled: false, redoubled: false };
-      room.consecutivePasses = 0;
-    }
+        if (bid === 'Pass') {
+          room.consecutivePasses++;
+          const hasContract = !!room.currentContract;
+          // 4次Pass（全不叫）或有定约后3次Pass
+          if ((hasContract && room.consecutivePasses >= 3) ||
+              (!hasContract && room.consecutivePasses >= 4)) {
+            finishBidding(room); return;
+          }
+        } else if (bid === 'Double') {
+          room.currentContract = { ...room.currentContract, doubled: true, redoubled: false, doublerSeat: seat };
+          room.consecutivePasses = 0;
+        } else if (bid === 'Redouble') {
+          room.currentContract = { ...room.currentContract, redoubled: true, doublerSeat: seat };
+          room.consecutivePasses = 0;
+        } else {
+          room.currentContract   = { level: parseInt(bid[0]), suit: parseSuit(bid), seat, doubled: false, redoubled: false };
+          room.consecutivePasses = 0;
+        }
 
-    room.currentBidder = nextSeat(seat);
-    bcastBidding(room);
+        room.currentBidder = nextSeat(seat);
+        bcastBidding(room);
+      },
+    });
   });
 
   // ── 出牌 ─────────────────────────────────────────────
@@ -4207,4 +4241,6 @@ if (require.main === module) {
   });
 }
 
-module.exports = { configureNewRoom, makeRoom, roomState };
+module.exports = {
+  configureNewRoom, makeRoom, roomState, routeClassicStart, routeClassicBid,
+};
