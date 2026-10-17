@@ -2,8 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { spawnSync } = require('node:child_process');
-const path = require('node:path');
+const http = require('node:http');
 
 const {
   CLASSIC_STATE_KEYS,
@@ -230,6 +229,51 @@ test('mapClassicNodeFailure hides input, invariant, and unexpected exception det
   }
 });
 
+test('mapClassicNodeFailure remains stable when logger or transport failure handling throws', () => {
+  const cases = [
+    {
+      io: { to() { throw new Error('io.to failed'); } },
+      logger: { error() {} },
+      failure: { ok: false, code: 'CLASSIC_CARD_NOT_HELD' },
+      expected: { ok: false, code: 'CLASSIC_CARD_NOT_HELD' },
+    },
+    {
+      io: { to: () => ({ emit() { throw new Error('emit failed'); } }) },
+      logger: { error() {} },
+      failure: new ClassicInputError('invalid request'),
+      expected: { ok: false, code: 'CLASSIC_INPUT_INVALID' },
+    },
+    {
+      io: { to: () => ({ emit() {} }) },
+      logger: { error() { throw new Error('logger failed'); } },
+      failure: new ClassicInvariantError('trusted state failed'),
+      expected: { ok: false, code: 'CLASSIC_SERVER_ERROR' },
+    },
+    {
+      io: { to: () => ({ emit() { throw new Error('emit failed'); } }) },
+      logger: { error() { throw new Error('logger failed'); } },
+      failure: new ClassicInvariantError('trusted state failed'),
+      expected: { ok: false, code: 'CLASSIC_SERVER_ERROR' },
+    },
+  ];
+  for (const { io, logger, failure, expected } of cases) {
+    const room = adapterRoom({ classicRevision: 23 });
+    assert.doesNotThrow(() => {
+      assert.deepEqual(mapClassicNodeFailure({
+        io,
+        logger,
+        room,
+        socketId: 'requester',
+        method: 'play',
+        seat: 'N',
+        bid: null,
+        failure,
+      }), expected);
+    });
+    assert.equal(room.classicRevision, 23);
+  }
+});
+
 function createAdapter() {
   return createClassicNodeAdapter({
     io: { to: () => ({ emit() {} }) },
@@ -337,13 +381,30 @@ test('initializeRoom never resets an already-canonical standard classic room', (
 });
 
 test('server creation seam initializes only standard classic and is safe to require without listening', () => {
-  const script = String.raw`
-    const assert = require('node:assert/strict');
-    const {
-      CLASSIC_STATE_KEYS, createClassicLobbyState,
-    } = require('./classic/state.cjs');
-    const { configureNewRoom, makeRoom, roomState } = require('./server.js');
+  const serverPath = require.resolve('../server.js');
+  delete require.cache[serverPath];
+  const originalListen = http.Server.prototype.listen;
+  const originalLog = console.log;
+  const originalError = console.error;
+  let listenCalls = 0;
+  let serverApi;
+  http.Server.prototype.listen = function interceptedListen() {
+    listenCalls += 1;
+    return this;
+  };
+  console.log = () => {};
+  console.error = () => {};
+  try {
+    serverApi = require(serverPath);
+  } finally {
+    http.Server.prototype.listen = originalListen;
+    console.log = originalLog;
+    console.error = originalError;
+  }
 
+  try {
+    assert.equal(listenCalls, 0);
+    const { configureNewRoom, makeRoom, roomState } = serverApi;
     const standard = makeRoom('100');
     configureNewRoom(standard, 'classic');
     assert.deepEqual(
@@ -372,13 +433,7 @@ test('server creation seam initializes only standard classic and is safe to requ
       assert.equal(room.dealNumber, legacyDealNumber);
       assert.equal(Object.hasOwn(room, 'schemaVersion'), false);
     }
-  `;
-  const result = spawnSync(process.execPath, ['-e', script], {
-    cwd: path.resolve(__dirname, '..'),
-    encoding: 'utf8',
-    timeout: 3000,
-  });
-
-  assert.equal(result.error, undefined, result.error?.message);
-  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  } finally {
+    delete require.cache[serverPath];
+  }
 });

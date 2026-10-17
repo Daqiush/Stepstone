@@ -53,11 +53,23 @@ function invalidBidMessage(room, seat, bid) {
 }
 
 function emitAppError(io, socketId, msg) {
-  io.to(socketId).emit('appError', { msg });
+  try {
+    io.to(socketId).emit('appError', { msg });
+  } catch {
+    // Error delivery is best-effort; a broken transport must not escape a socket handler.
+  }
+}
+
+function logServerFailure(logger, metadata) {
+  try {
+    logger.error('Classic Node adapter command failed', metadata);
+  } catch {
+    // Logging is best-effort and must never recurse into another failure path.
+  }
 }
 
 function serverFailure({ io, logger, room, socketId, method, failure }) {
-  logger.error('Classic Node adapter command failed', {
+  logServerFailure(logger, {
     method,
     roomId: room.id,
     failureName: failure instanceof Error ? failure.name : null,
