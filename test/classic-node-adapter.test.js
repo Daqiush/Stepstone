@@ -733,7 +733,7 @@ test('adapter bid maps turn, invalid-bid, and malformed-boundary failures withou
   assert.equal(h.room.classicRevision, 0);
 });
 
-test('final contract bid emits only independently filtered legacy biddingEnd frames', () => {
+test('final contract bid emits filtered biddingEnd then exact initial playUpdate per seat', () => {
   const h = activeBidHarness();
   bidAs(h, 'N', '1NT', true, 'balanced');
   bidAs(h, 'E', 'Pass');
@@ -741,11 +741,15 @@ test('final contract bid emits only independently filtered legacy biddingEnd fra
   const result = bidAs(h, 'W', 'Pass');
 
   assert.deepEqual(result, { ok: true, phase: 'PLAYING', revision: 4 });
-  assert.deepEqual(h.fixture.emissions.map(({ target, name }) => ({ target, name })),
-    ['N', 'E', 'S', 'W'].map(seat => ({
+  assert.deepEqual(h.fixture.emissions.map(({ target, name }) => ({ target, name })), [
+    ...['N', 'E', 'S', 'W'].map(seat => ({
       target: h.fixture.socketIds[seat], name: 'biddingEnd',
-    })));
-  for (const emission of h.fixture.emissions) {
+    })),
+    ...['N', 'E', 'S', 'W'].map(seat => ({
+      target: h.fixture.socketIds[seat], name: 'playUpdate',
+    })),
+  ]);
+  for (const emission of h.fixture.named('biddingEnd')) {
     assert.deepEqual(Object.keys(emission.payload), [
       'contract', 'declarer', 'dummy', 'leader', 'biddingHistory', 'declarerControlledBy',
     ]);
@@ -754,6 +758,31 @@ test('final contract bid emits only independently filtered legacy biddingEnd fra
   }
   const south = h.fixture.forTarget(h.fixture.socketIds.S)[0].payload;
   assert.deepEqual(south.biddingHistory[0], { seat: 'N', bid: '1NT' });
+  for (const emission of h.fixture.named('playUpdate')) {
+    assert.deepEqual(Object.keys(emission.payload), [
+      'currentPlayer', 'currentTrick', 'completedCount', 'nsTricks', 'ewTricks',
+      'dummyRevealed', 'dummy', 'declarer', 'declarerControlledBy',
+      'teachingCurrentSeat', 'teachingCurrentHand',
+    ]);
+    assert.deepEqual(emission.payload, {
+      currentPlayer: 'E',
+      currentTrick: [],
+      completedCount: 0,
+      nsTricks: 0,
+      ewTricks: 0,
+      dummyRevealed: false,
+      dummy: 'S',
+      declarer: 'N',
+      declarerControlledBy: null,
+      teachingCurrentSeat: null,
+      teachingCurrentHand: null,
+    });
+    assert.equal(JSON.stringify(emission.payload).includes('hands'), false);
+  }
+  const northPlay = h.fixture.forTarget(h.fixture.socketIds.N)[1].payload;
+  const southPlay = h.fixture.forTarget(h.fixture.socketIds.S)[1].payload;
+  assert.notEqual(northPlay, southPlay);
+  assert.notEqual(northPlay.currentTrick, southPlay.currentTrick);
   assert.equal(h.fixture.named('biddingUpdate').length, 0);
 });
 

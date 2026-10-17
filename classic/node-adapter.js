@@ -103,6 +103,23 @@ function emitBiddingEnded(io, room, event, logger) {
       declarerControlledBy: null,
     }, logger);
   });
+  const state = projectClassicState(room);
+  forEachPlayer(room, (seat, socketId) => {
+    const view = classicViewFor(state, playerViewer(seat));
+    safeEmit(io, socketId, 'playUpdate', {
+      currentPlayer: view.currentPlayer,
+      currentTrick: cloneValue(view.currentTrick),
+      completedCount: view.completedCount,
+      nsTricks: view.nsTricks,
+      ewTricks: view.ewTricks,
+      dummyRevealed: view.dummyRevealed,
+      dummy: view.dummy,
+      declarer: view.declarer,
+      declarerControlledBy: null,
+      teachingCurrentSeat: null,
+      teachingCurrentHand: null,
+    }, logger);
+  });
 }
 
 function emitPassedOut(io, room, event, logger) {
