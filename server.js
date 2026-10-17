@@ -5,6 +5,7 @@ const { Server } = require('socket.io');
 const path    = require('path');
 const fs      = require('fs');
 const complexRules = require('./complex-bridge');
+const { createClassicNodeAdapter } = require('./classic/node-adapter.js');
 
 let calcDDTable = null;
 let solveBoard  = null;
@@ -254,6 +255,7 @@ function trickWinner(trick, trumpSuit) {
 function makeRoom(id) {
   return {
     id,
+    classicRevision: 0,
     sockets:       { N:null, E:null, S:null, W:null },
     playerNames:   { N:null, E:null, S:null, W:null },
     readyStatus:   { N:false, E:false, S:false, W:false }, // 仅用于下一副准备
@@ -295,6 +297,42 @@ function makeRoom(id) {
     complexSides: null,
     complexBids:  null,
   };
+}
+
+function classicDealFactory({ dealNumber }) {
+  const hands = dealCards();
+  const number = ((dealNumber - 1) % 16) + 1;
+  return {
+    hands,
+    boardInfo: { ...BOARD_INFO[number], number, dealNumber },
+  };
+}
+
+const classicAdapter = createClassicNodeAdapter({
+  io,
+  dealFactory: classicDealFactory,
+  calcDDTable: async hands => {
+    if (typeof calcDDTable !== 'function') throw new Error('DDS is unavailable');
+    return calcDDTable(hands);
+  },
+  logger: console,
+});
+
+function configureNewRoom(room, requestedMode) {
+  if (requestedMode === 'ult') {
+    room.mode = 'ult';
+  } else if (requestedMode === 'teaching') {
+    room.mode = 'classic';
+    room.teachingMode = true;
+  } else if (requestedMode === 'problem') {
+    room.mode = 'problem';
+    room.phase = 'PROB_SELECT';
+  } else if (requestedMode === 'complex') {
+    room.mode = 'complex';
+    room.complexSides = { NS: null, EW: null };
+  }
+  if (room.mode === 'classic' && !room.teachingMode) classicAdapter.initializeRoom(room);
+  return room;
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -941,10 +979,7 @@ io.on('connection', socket => {
     const room = makeRoom(id);
     room.ownerSocketId = socket.id;
     room.ownerName     = playerName || '';
-    if (mode === 'ult')           { room.mode = 'ult'; }
-    else if (mode === 'teaching') { room.mode = 'classic'; room.teachingMode = true; }
-    else if (mode === 'problem')  { room.mode = 'problem'; room.phase = 'PROB_SELECT'; }
-    else if (mode === 'complex')  { room.mode = 'complex'; room.complexSides = { NS: null, EW: null }; }
+    configureNewRoom(room, mode);
     rooms[id] = room;
     sockRoom[socket.id] = id;
     socket.join(id);
@@ -4164,8 +4199,12 @@ io.on('connection', (socket) => {
 // NOTE: 实际 ownerStartGame 的 problem 路由在主 io.on('connection') 里通过修改 makeRoom 完成，
 // 见下方 PATCH 注释。
 
-server.listen(PORT, () => {
-  console.log(`\n🃏  Stepstone 桥牌服务器已启动`);
-  console.log(`    本地访问: http://localhost:${PORT}`);
-  console.log(`    使用路由侠等工具映射端口 ${PORT} 即可联机\n`);
-});
+if (require.main === module) {
+  server.listen(PORT, () => {
+    console.log(`\n🃏  Stepstone 桥牌服务器已启动`);
+    console.log(`    本地访问: http://localhost:${PORT}`);
+    console.log(`    使用路由侠等工具映射端口 ${PORT} 即可联机\n`);
+  });
+}
+
+module.exports = { configureNewRoom, makeRoom, roomState };
