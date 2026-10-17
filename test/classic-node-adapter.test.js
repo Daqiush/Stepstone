@@ -318,6 +318,7 @@ test('createClassicNodeAdapter rejects missing boundary dependencies', () => {
   const adapter = createClassicNodeAdapter(valid);
   assert.deepEqual(Object.keys(adapter), [
     'initializeRoom', 'start', 'bid', 'play', 'readyNext', 'clearReadyForDisconnect',
+    'settleClaim', 'editBidAnnotation', 'appendBidQuestion', 'answerBidQuestion',
   ]);
   for (const key of Object.keys(valid)) {
     assert.throws(
@@ -678,6 +679,55 @@ test('invalid trusted DDS output follows the failure path without a gameplay err
   assert.equal(h.room.classicRevision, 1);
   assert.equal(h.fixture.named('appError').length, 0);
   assert.equal(h.logs.some(log => log.metadata.method === 'settleDds'), true);
+});
+
+test('deferred DDS completion projects the latest auction state and emits readiness only when scoring', async () => {
+  let resolveDds;
+  const pending = new Promise(resolve => { resolveDds = resolve; });
+  const h = adapterHarness({ calcDDTable: () => pending });
+  h.adapter.start(h.room, { socketId: h.fixture.socketIds.N, seat: 'N' });
+  bidAs(h, 'N', '1H');
+  const revision = h.room.classicRevision;
+  resolveDds(Array.from({ length: 5 }, () => [7, 7, 7, 7]));
+  await flushAsyncEffects();
+  assert.equal(h.room.ddsStatus, 'READY');
+  assert.equal(h.room.biddingHistory[0].bid, '1H');
+  assert.equal(h.room.currentBidder, 'E');
+  assert.equal(h.room.classicRevision, revision);
+  assert.equal(h.fixture.named('ddTableReady').length, 0);
+
+  let resolveScoring;
+  const scoringPending = new Promise(resolve => { resolveScoring = resolve; });
+  const scoring = adapterHarness({ calcDDTable: () => scoringPending });
+  scoring.adapter.start(scoring.room, {
+    socketId: scoring.fixture.socketIds.N, seat: 'N',
+  });
+  for (const seat of ['N', 'E', 'S', 'W']) bidAs(scoring, seat, 'Pass');
+  scoring.fixture.clear();
+  resolveScoring(Array.from({ length: 5 }, () => [6, 6, 6, 6]));
+  await flushAsyncEffects();
+  assert.equal(scoring.room.ddsStatus, 'READY');
+  assert.equal(scoring.fixture.named('ddTableReady').length, 1);
+});
+
+test('DDS completion from an old deal is ignored after the next deal starts', async () => {
+  const resolvers = [];
+  const h = adapterHarness({
+    calcDDTable: () => new Promise(resolve => resolvers.push(resolve)),
+  });
+  h.adapter.start(h.room, { socketId: h.fixture.socketIds.N, seat: 'N' });
+  await flushAsyncEffects();
+  for (const seat of ['N', 'E', 'S', 'W']) bidAs(h, seat, 'Pass');
+  h.room.readyStatus = { N: true, E: true, S: true, W: false };
+  readyAs(h, 'W');
+  await flushAsyncEffects();
+  assert.equal(h.room.dealNumber, 2);
+  assert.equal(resolvers.length, 2);
+  resolvers[0](Array.from({ length: 5 }, () => [1, 1, 1, 1]));
+  await flushAsyncEffects();
+  assert.equal(h.room.dealNumber, 2);
+  assert.equal(h.room.ddsStatus, 'PENDING');
+  assert.equal(h.room.ddTable, null);
 });
 
 function activeBidHarness(options = {}) {
@@ -1428,6 +1478,230 @@ test('seat release is atomic on canonical clear failure and preserves legacy rea
     assert.equal(teaching.sockets.N, null);
     assert.equal(teaching.playerNames.N, null);
     assert.equal(teaching.readyStatus.N, false);
+  } finally {
+    delete require.cache[serverPath];
+  }
+});
+
+test('adapter accepted claim settles once, emits result before gameEnd, and preserves partial trick only in Node replay', () => {
+  const h = activePlayHarness();
+  playAs(h, 'E', { suit: 'H', rank: '2' });
+  playAs(h, 'N', { suit: 'D', rank: '2' });
+  h.fixture.clear();
+  h.room.claimReq = {
+    claimer: 'N', tricksToWin: 8, reason: 'the rest', voters: ['E', 'W'],
+    votes: { E: true, W: true },
+  };
+
+  assert.deepEqual(h.adapter.settleClaim(h.room, {
+    socketId: h.fixture.socketIds.N, claimer: 'N', tricksToWin: 8, reason: 'the rest',
+  }), { ok: true, phase: 'SCORING', revision: 3 });
+  assert.equal(h.room.claimReq, null);
+  assert.deepEqual(h.room.lastClaim, { claimer: 'N', tricksToWin: 8, reason: 'the rest' });
+  assert.equal(h.room.boardScores.length, 1);
+  assert.equal(h.room.boardScores[0].completedTricks.length, 0);
+  assert.equal(h.room.boardScores[0].claim.tricksToWin, 8);
+  assert.deepEqual(h.fixture.emissions.map(event => event.name), [
+    'claimResult', 'gameEnd', 'gameEnd', 'gameEnd', 'gameEnd',
+  ]);
+  const replayTrick = h.fixture.named('gameEnd')[0].payload.boardScores[0].completedTricks.at(-1);
+  assert.deepEqual(replayTrick, {
+    cards: [
+      { seat: 'E', card: { suit: 'H', rank: '2' } },
+      { seat: 'S', card: { suit: 'D', rank: '2' } },
+    ],
+    winner: 'N',
+    claimed: true,
+  });
+  replayTrick.cards[0].card.rank = 'A';
+  assert.equal(h.room.classicClaimedPartialTricks[1].cards[0].card.rank, '2');
+  assert.equal(h.room.currentTrick[0].card.rank, '2');
+
+  h.fixture.clear();
+  assert.deepEqual(h.adapter.settleClaim(h.room, {
+    socketId: h.fixture.socketIds.N, claimer: 'N', tricksToWin: 8, reason: 'the rest',
+  }), { ok: false, code: 'CLASSIC_WRONG_PHASE' });
+  assert.equal(h.room.boardScores.length, 1);
+  assert.deepEqual(h.fixture.emissions, []);
+});
+
+test('adapter accepted claim without a partial trick keeps replay and canonical histories identical', () => {
+  const h = activePlayHarness();
+  h.room.claimReq = {
+    claimer: 'N', tricksToWin: 7, reason: '', voters: ['E', 'W'], votes: { E: true, W: true },
+  };
+  assert.equal(h.adapter.settleClaim(h.room, {
+    socketId: h.fixture.socketIds.N, claimer: 'N', tricksToWin: 7, reason: '',
+  }).ok, true);
+  assert.deepEqual(h.room.classicClaimedPartialTricks, {});
+  assert.deepEqual(
+    h.fixture.named('gameEnd')[0].payload.boardScores[0].completedTricks,
+    h.room.boardScores[0].completedTricks,
+  );
+});
+
+test('adapter annotation and Q&A helpers authorize seats, mutate canonically, and emit legacy targeted names', () => {
+  const h = activeBidHarness();
+  bidAs(h, 'N', '1H');
+  h.fixture.clear();
+
+  assert.deepEqual(h.adapter.editBidAnnotation(h.room, {
+    socketId: h.fixture.socketIds.N, seat: 'N', bidIndex: 0,
+    alert: true, explain: 'five hearts',
+  }), { ok: true, phase: 'BIDDING', revision: 2 });
+  assert.equal(h.room.biddingHistory[0].explain, 'five hearts');
+  assert.equal(h.fixture.named('biddingUpdate').length, 4);
+
+  h.fixture.clear();
+  const beforePartnerQuestion = JSON.stringify(projectClassicState(h.room));
+  assert.deepEqual(h.adapter.appendBidQuestion(h.room, {
+    socketId: h.fixture.socketIds.S, seat: 'S', bidIndex: 0, question: 'partner?',
+  }), { ok: false, code: 'CLASSIC_FORBIDDEN' });
+  assert.equal(JSON.stringify(projectClassicState(h.room)), beforePartnerQuestion);
+  assert.deepEqual(h.fixture.emissions, []);
+
+  assert.deepEqual(h.adapter.appendBidQuestion(h.room, {
+    socketId: h.fixture.socketIds.E, seat: 'E', bidIndex: 0, question: '  forcing?  ',
+  }), { ok: true, phase: 'BIDDING', revision: 3 });
+  assert.deepEqual(h.fixture.emissions, [{
+    target: h.fixture.socketIds.N,
+    name: 'bidQuestionRecv',
+    payload: {
+      bidIndex: 0, qaIdx: 0, question: '  forcing?  ', asker: 'E', askerName: 'East',
+    },
+  }]);
+  assert.deepEqual(h.room.biddingHistory[0].qa[0], {
+    asker: 'E', question: '  forcing?  ', answer: null, answerer: null,
+  });
+
+  h.fixture.clear();
+  assert.deepEqual(h.adapter.answerBidQuestion(h.room, {
+    socketId: h.fixture.socketIds.N, seat: 'N', bidIndex: 0, qaIdx: 0, answer: '  yes  ',
+  }), { ok: true, phase: 'BIDDING', revision: 4 });
+  assert.deepEqual(h.fixture.emissions, [{
+    target: h.fixture.socketIds.E,
+    name: 'bidAnswerRecv',
+    payload: { bidIndex: 0, qaIdx: 0, answer: '  yes  ', answererName: 'North', bid: '1H' },
+  }]);
+  assert.equal(h.room.biddingHistory[0].qa[0].answerer, 'N');
+});
+
+test('annotation helpers reject unauthenticated sockets silently as CLASSIC_FORBIDDEN', () => {
+  const methods = [
+    ['editBidAnnotation', { seat: 'N', bidIndex: 0, alert: true, explain: 'x' }],
+    ['appendBidQuestion', { seat: 'E', bidIndex: 0, question: 'x' }],
+    ['answerBidQuestion', { seat: 'N', bidIndex: 0, qaIdx: 0, answer: 'x' }],
+  ];
+  for (const [method, payload] of methods) {
+    const h = activeBidHarness();
+    bidAs(h, 'N', '1H');
+    h.fixture.clear();
+    const revision = h.room.classicRevision;
+    assert.deepEqual(h.adapter[method](h.room, {
+      ...payload, socketId: 'spectator-socket',
+    }), { ok: false, code: 'CLASSIC_FORBIDDEN' });
+    assert.equal(h.room.classicRevision, revision);
+    assert.deepEqual(h.fixture.emissions, []);
+  }
+});
+
+test('deferred compatibility methods contain malformed input and never partially mutate or throw', () => {
+  const calls = [
+    ['settleClaim', null],
+    ['editBidAnnotation', null],
+    ['appendBidQuestion', null],
+    ['answerBidQuestion', null],
+  ];
+  for (const [method, request] of calls) {
+    const h = activeBidHarness();
+    const before = JSON.stringify(h.room);
+    assert.doesNotThrow(() => h.adapter[method](h.room, request));
+    assert.equal(JSON.stringify(h.room), before);
+    assert.equal(h.room.classicRevision, 0);
+  }
+});
+
+test('every mutating adapter boundary contains a missing room instead of throwing', () => {
+  const h = adapterHarness();
+  for (const method of [
+    'start', 'bid', 'play', 'readyNext', 'clearReadyForDisconnect',
+    'settleClaim', 'editBidAnnotation', 'appendBidQuestion', 'answerBidQuestion',
+  ]) {
+    assert.doesNotThrow(() => {
+      const result = h.adapter[method](null, null);
+      assert.equal(result.ok, false);
+      assert.equal(typeof result.code, 'string');
+    }, method);
+  }
+});
+
+test('standard claim request sends full hands only to opponent adjudicators', () => {
+  const h = activePlayHarness();
+  const serverPath = require.resolve('../server.js');
+  delete require.cache[serverPath];
+  const serverApi = require(serverPath);
+  try {
+    const req = {
+      claimer: 'N', tricksToWin: 7, reason: '', voters: ['E', 'W'], votes: {},
+    };
+    serverApi.emitClassicClaimRequest(h.fixture.io, h.room, req);
+    for (const seat of ['N', 'E', 'S', 'W']) {
+      const payload = h.fixture.forTarget(h.fixture.socketIds[seat])[0].payload;
+      assert.deepEqual(payload.allHands, ['E', 'W'].includes(seat) ? h.room.hands : {});
+      if (['E', 'W'].includes(seat)) assert.notEqual(payload.allHands, h.room.hands);
+    }
+  } finally {
+    delete require.cache[serverPath];
+  }
+});
+
+test('standard claim input normalization rejects malformed boundary payloads', () => {
+  const serverPath = require.resolve('../server.js');
+  delete require.cache[serverPath];
+  const serverApi = require(serverPath);
+  try {
+    assert.deepEqual(serverApi.normalizeClassicClaimInput({
+      tricksToWin: 7, reason: '  line  ',
+    }), { tricksToWin: 7, reason: '  line  ' });
+    for (const payload of [
+      null, [], {}, { tricksToWin: '7', reason: '' },
+      { tricksToWin: 7, reason: {} },
+      { tricksToWin: 7, reason: 'x'.repeat(501) },
+    ]) assert.equal(serverApi.normalizeClassicClaimInput(payload), null);
+  } finally {
+    delete require.cache[serverPath];
+  }
+});
+
+test('last-trick request and vote metadata leave canonical classic JSON byte-identical', () => {
+  const h = activePlayHarness();
+  const before = JSON.stringify(projectClassicState(h.room));
+  h.room.viewReq = { requester: 'N', opponents: ['E', 'W'], votes: {} };
+  h.room.viewReq.votes.E = true;
+  h.room.viewReq.votes.W = false;
+  h.room.viewReq = null;
+  assert.equal(JSON.stringify(projectClassicState(h.room)), before);
+  assert.equal(h.room.classicRevision, 0);
+});
+
+test('deferred server routing uses compatibility only for standard classic rooms', () => {
+  const serverPath = require.resolve('../server.js');
+  delete require.cache[serverPath];
+  const serverApi = require(serverPath);
+  try {
+    for (const room of [
+      { mode: 'classic', teachingMode: false },
+      { mode: 'classic', teachingMode: true },
+      { mode: 'ult', teachingMode: false },
+      { mode: 'problem', teachingMode: false },
+      { mode: 'complex', teachingMode: false },
+    ]) {
+      const calls = [];
+      serverApi.routeClassicDeferred(room, {}, {
+        standard: () => calls.push('standard'), legacy: () => calls.push('legacy'),
+      });
+      assert.deepEqual(calls, [room.mode === 'classic' && !room.teachingMode ? 'standard' : 'legacy']);
+    }
   } finally {
     delete require.cache[serverPath];
   }

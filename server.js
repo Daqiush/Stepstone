@@ -285,6 +285,8 @@ function makeRoom(id) {
     viewReq: null,
     // 声称记录（用于历史）
     lastClaim: null,
+    // Node-only replay metadata; canonical score history never contains a claimed partial trick.
+    classicClaimedPartialTricks: {},
     // 分数历史
     boardScores: [],
     // 教学模式
@@ -344,6 +346,45 @@ function routeClassicReady(room, request, { standard, legacy }) {
     return standard(room, request);
   }
   return legacy(room, request);
+}
+
+function routeClassicDeferred(room, request, { standard, legacy }) {
+  if (room && room.mode === 'classic' && !room.teachingMode) {
+    return standard(room, request);
+  }
+  return legacy(room, request);
+}
+
+function emitClassicClaimRequest(targetIo, room, req) {
+  const remaining = 13 - room.completedTricks.length;
+  const claimerSide = sideOf(req.claimer);
+  for (const seat of SEATS) {
+    const socketId = room.sockets?.[seat];
+    if (!socketId) continue;
+    const adjudicatesForOpponent = req.voters.includes(seat)
+      && sideOf(seat) !== claimerSide;
+    targetIo.to(socketId).emit('claimRequest', {
+      claimer: req.claimer,
+      claimerName: room.playerNames[req.claimer],
+      tricksToWin: req.tricksToWin,
+      reason: req.reason,
+      allHands: adjudicatesForOpponent
+        ? Object.fromEntries(SEATS.map(s => [s, room.hands[s].map(card => ({ ...card }))]))
+        : {},
+      remaining,
+      claimerSide,
+    });
+  }
+}
+
+function normalizeClassicClaimInput(payload) {
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  if (!Number.isSafeInteger(payload.tricksToWin)) return null;
+  if (payload.reason !== undefined && payload.reason !== null
+      && typeof payload.reason !== 'string') return null;
+  const reason = payload.reason || '';
+  if ([...reason].length > 500) return null;
+  return { tricksToWin: payload.tricksToWin, reason };
 }
 
 function routeClassicDisconnectReady(room, request, { standard, legacy }) {
@@ -1435,10 +1476,19 @@ io.on('connection', socket => {
   });
 
   // ── 声称 ─────────────────────────────────────────────
-  socket.on('claim', ({ tricksToWin, reason }) => {
+  socket.on('claim', (payload = {}) => {
+    let { tricksToWin, reason } = payload && typeof payload === 'object' ? payload : {};
     const roomId = sockRoom[socket.id];
     const room   = rooms[roomId];
     if (!room || room.phase !== 'PLAYING' || room.claimReq) return;
+    if (room.mode === 'classic' && !room.teachingMode) {
+      const normalized = normalizeClassicClaimInput(payload);
+      if (!normalized) {
+        socket.emit('appError', { msg: '请求格式无效' });
+        return;
+      }
+      ({ tricksToWin, reason } = normalized);
+    }
     let seat = sockSeat[socket.id];
     // 教学模式：房主以庄家（或其搭档）座位声称
     if (room.teachingMode && socket.id === room.ownerSocketId) {
@@ -1474,28 +1524,40 @@ io.on('connection', socket => {
 
     room.claimReq = { claimer: seat, tricksToWin, reason: reason || '', voters, votes: {} };
 
-    io.to(room.id).emit('claimRequest', {
-      claimer:     seat,
-      claimerName: room.playerNames[seat],
-      tricksToWin,
-      reason:      room.claimReq.reason,
-      allHands:    room.hands,
-      remaining,
-      claimerSide,
-    });
+    if (room.mode === 'classic' && !room.teachingMode) {
+      emitClassicClaimRequest(io, room, room.claimReq);
+    } else {
+      io.to(room.id).emit('claimRequest', {
+        claimer:     seat,
+        claimerName: room.playerNames[seat],
+        tricksToWin,
+        reason:      room.claimReq.reason,
+        allHands:    room.hands,
+        remaining,
+        claimerSide,
+      });
+    }
 
     // 无需投票时（所有对方座位均为房主控制）立即通过
     if (voters.length === 0) {
-      io.to(room.id).emit('claimResult', { accepted: true, tricksToWin, claimer: seat });
-      room.lastClaim = { claimer: seat, tricksToWin, reason: reason || '' };
-      room.claimReq = null;
-      const nsAdd = claimerSide === 'NS' ? tricksToWin : (remaining - tricksToWin);
-      const ewAdd = claimerSide === 'EW' ? tricksToWin : (remaining - tricksToWin);
-      endGame(room, room.nsTricks + nsAdd, room.ewTricks + ewAdd);
+      routeClassicDeferred(room, {}, {
+        standard: () => classicAdapter.settleClaim(room, {
+          socketId: room.sockets[seat], claimer: seat, tricksToWin, reason: reason || '',
+        }),
+        legacy: () => {
+          io.to(room.id).emit('claimResult', { accepted: true, tricksToWin, claimer: seat });
+          room.lastClaim = { claimer: seat, tricksToWin, reason: reason || '' };
+          room.claimReq = null;
+          const nsAdd = claimerSide === 'NS' ? tricksToWin : (remaining - tricksToWin);
+          const ewAdd = claimerSide === 'EW' ? tricksToWin : (remaining - tricksToWin);
+          endGame(room, room.nsTricks + nsAdd, room.ewTricks + ewAdd);
+        },
+      });
     }
   });
 
-  socket.on('claimVote', ({ accept }) => {
+  socket.on('claimVote', (payload = {}) => {
+    const { accept } = payload && typeof payload === 'object' ? payload : {};
     const roomId = sockRoom[socket.id];
     const seat   = sockSeat[socket.id];
     const room   = rooms[roomId];
@@ -1529,17 +1591,35 @@ io.on('connection', socket => {
     }
 
     const accepted = req.voters.every(s => req.votes[s]);
-    io.to(room.id).emit('claimResult', { accepted, tricksToWin: req.tricksToWin, claimer: req.claimer });
-    room.claimReq = null;
-
-    if (accepted) room.lastClaim = { claimer: req.claimer, tricksToWin: req.tricksToWin, reason: req.reason };
     if (accepted) {
-      const remaining = 13 - room.completedTricks.length;
-      const tw = req.tricksToWin;
-      const claimerSide = sideOf(req.claimer);
-      const nsAdd = claimerSide === 'NS' ? tw : (remaining - tw);
-      const ewAdd = claimerSide === 'EW' ? tw : (remaining - tw);
-      endGame(room, room.nsTricks + nsAdd, room.ewTricks + ewAdd);
+      routeClassicDeferred(room, {}, {
+        standard: () => classicAdapter.settleClaim(room, {
+          socketId: room.sockets[req.claimer],
+          claimer: req.claimer,
+          tricksToWin: req.tricksToWin,
+          reason: req.reason,
+        }),
+        legacy: () => {
+          io.to(room.id).emit('claimResult', {
+            accepted: true, tricksToWin: req.tricksToWin, claimer: req.claimer,
+          });
+          room.claimReq = null;
+          room.lastClaim = {
+            claimer: req.claimer, tricksToWin: req.tricksToWin, reason: req.reason,
+          };
+          const remaining = 13 - room.completedTricks.length;
+          const tw = req.tricksToWin;
+          const claimerSide = sideOf(req.claimer);
+          const nsAdd = claimerSide === 'NS' ? tw : (remaining - tw);
+          const ewAdd = claimerSide === 'EW' ? tw : (remaining - tw);
+          endGame(room, room.nsTricks + nsAdd, room.ewTricks + ewAdd);
+        },
+      });
+    } else {
+      io.to(room.id).emit('claimResult', {
+        accepted: false, tricksToWin: req.tricksToWin, claimer: req.claimer,
+      });
+      room.claimReq = null;
     }
     // 拒绝则继续打牌
   });
@@ -1586,7 +1666,8 @@ io.on('connection', socket => {
     }
   });
 
-  socket.on('viewLastTrickVote', ({ approve }) => {
+  socket.on('viewLastTrickVote', (payload = {}) => {
+    const { approve } = payload && typeof payload === 'object' ? payload : {};
     const roomId = sockRoom[socket.id];
     const seat   = sockSeat[socket.id];
     const room   = rooms[roomId];
@@ -1617,61 +1698,85 @@ io.on('connection', socket => {
   });
 
   // ── 修改提醒/解释 ──────────────────────────────────────
-  socket.on('editBidAlert', ({ bidIndex, alert, explain }) => {
+  socket.on('editBidAlert', (payload = {}) => {
+    const { bidIndex, alert, explain } = payload && typeof payload === 'object' ? payload : {};
     const roomId = sockRoom[socket.id];
     const seat   = sockSeat[socket.id];
     const room   = rooms[roomId];
     if (!room || room.phase !== 'BIDDING') return;
-    const entry = room.biddingHistory[bidIndex];
-    if (entry && entry.seat === seat) {
-      const alerted = !!alert;
-      const explainText = (alerted && explain) ? String(explain).trim().slice(0, 500) : null;
-      entry.alert = alerted || null;
-      entry.explain = explainText;
-      bcastBidding(room);
-    }
+    return routeClassicDeferred(room, {}, {
+      standard: () => classicAdapter.editBidAnnotation(room, {
+        socketId: socket.id, seat, bidIndex, alert, explain,
+      }),
+      legacy: () => {
+        const entry = room.biddingHistory[bidIndex];
+        if (entry && entry.seat === seat) {
+          const alerted = !!alert;
+          const explainText = (alerted && explain) ? String(explain).trim().slice(0, 500) : null;
+          entry.alert = alerted || null;
+          entry.explain = explainText;
+          bcastBidding(room);
+        }
+      },
+    });
   });
 
   // ── 叫品询问 ──────────────────────────────────────────
-  socket.on('bidQuestion', ({ bidIndex, question }) => {
+  socket.on('bidQuestion', (payload = {}) => {
+    const { bidIndex, question } = payload && typeof payload === 'object' ? payload : {};
     const roomId = sockRoom[socket.id];
     const seat   = sockSeat[socket.id];
     const room   = rooms[roomId];
     if (!room) return;
-    const entry = room.biddingHistory[bidIndex];
-    if (!entry) return;
-    if (!entry.qa) entry.qa = [];
-    const qaIdx = entry.qa.length;
-    entry.qa.push({ asker: seat, askerName: room.playerNames[seat], question: question || '', answer: null });
-    const bidderSock = room.sockets[entry.seat];
-    if (bidderSock) {
-      io.to(bidderSock).emit('bidQuestionRecv', {
-        bidIndex, qaIdx,
-        question: question || '',
-        asker: seat,
-        askerName: room.playerNames[seat],
-      });
-    }
+    return routeClassicDeferred(room, {}, {
+      standard: () => classicAdapter.appendBidQuestion(room, {
+        socketId: socket.id, seat, bidIndex, question: question || '',
+      }),
+      legacy: () => {
+        const entry = room.biddingHistory[bidIndex];
+        if (!entry) return;
+        if (!entry.qa) entry.qa = [];
+        const qaIdx = entry.qa.length;
+        entry.qa.push({ asker: seat, askerName: room.playerNames[seat], question: question || '', answer: null });
+        const bidderSock = room.sockets[entry.seat];
+        if (bidderSock) {
+          io.to(bidderSock).emit('bidQuestionRecv', {
+            bidIndex, qaIdx,
+            question: question || '',
+            asker: seat,
+            askerName: room.playerNames[seat],
+          });
+        }
+      },
+    });
   });
 
-  socket.on('bidAnswer', ({ bidIndex, qaIdx, asker, answer }) => {
+  socket.on('bidAnswer', (payload = {}) => {
+    const { bidIndex, qaIdx, asker, answer } = payload && typeof payload === 'object' ? payload : {};
     const roomId = sockRoom[socket.id];
     const seat   = sockSeat[socket.id];
     const room   = rooms[roomId];
     if (!room) return;
-    const entry = room.biddingHistory[bidIndex];
-    if (entry && entry.qa && entry.qa[qaIdx]) {
-      entry.qa[qaIdx].answer = answer || '';
-    }
-    const askerSock = room.sockets[asker];
-    if (askerSock) {
-      io.to(askerSock).emit('bidAnswerRecv', {
-        bidIndex, qaIdx,
-        answer: answer || '',
-        answererName: room.playerNames[seat],
-        bid: entry ? entry.bid : '?',
-      });
-    }
+    return routeClassicDeferred(room, {}, {
+      standard: () => classicAdapter.answerBidQuestion(room, {
+        socketId: socket.id, seat, bidIndex, qaIdx, answer: answer || '',
+      }),
+      legacy: () => {
+        const entry = room.biddingHistory[bidIndex];
+        if (entry && entry.qa && entry.qa[qaIdx]) {
+          entry.qa[qaIdx].answer = answer || '';
+        }
+        const askerSock = room.sockets[asker];
+        if (askerSock) {
+          io.to(askerSock).emit('bidAnswerRecv', {
+            bidIndex, qaIdx,
+            answer: answer || '',
+            answererName: room.playerNames[seat],
+            bid: entry ? entry.bid : '?',
+          });
+        }
+      },
+    });
   });
 
   // ── 下一副 ───────────────────────────────────────────
@@ -4324,7 +4429,10 @@ module.exports = {
   routeClassicBid,
   routeClassicPlay,
   routeClassicReady,
+  routeClassicDeferred,
   routeClassicDisconnectReady,
+  emitClassicClaimRequest,
+  normalizeClassicClaimInput,
   resetSeatReadyForLifecycle,
   releaseSeatForLifecycle,
   buildClassicPlayRequest,

@@ -9,7 +9,13 @@ const {
 const {
   ClassicInputError, applyClassicCommand, preflightClassicCommand,
 } = require('./engine.cjs');
-const { applyClassicDdsCompletion } = require('./node-compat.cjs');
+const {
+  settleClassicClaim,
+  editClassicBidAnnotation,
+  appendClassicBidQuestion,
+  answerClassicBidQuestion,
+  applyClassicDdsCompletion,
+} = require('./node-compat.cjs');
 const { SEATS } = require('./constants.cjs');
 const { sideOf } = require('./rules.cjs');
 const { classicEventFor, classicViewFor } = require('./views.cjs');
@@ -41,12 +47,20 @@ function playerViewer(seat) {
   return { role: 'PLAYER', seat };
 }
 
-function legacyReplayBoardScores(state, viewer) {
+function legacyReplayBoardScores(room, state, viewer) {
   const publicScores = classicViewFor(state, viewer).boardScores;
-  return publicScores.map((score, index) => ({
-    ...cloneValue(score),
-    initialHands: cloneValue(state.boardScores[index]?.initialHands),
-  }));
+  return publicScores.map((score, index) => {
+    const replay = {
+      ...cloneValue(score),
+      initialHands: cloneValue(state.boardScores[index]?.initialHands),
+    };
+    const partial = room.classicClaimedPartialTricks?.[score.dealNumber];
+    if (partial && Array.isArray(replay.completedTricks)
+        && !replay.completedTricks.some(trick => trick?.claimed === true)) {
+      replay.completedTricks = [...replay.completedTricks, cloneValue(partial)];
+    }
+    return replay;
+  });
 }
 
 function safeEmit(io, target, name, payload, logger = null) {
@@ -81,7 +95,7 @@ function emitStarted(io, room, event, logger) {
       boardInfo: cloneValue(projected.payload.boardInfo),
       seat,
       playerNames: cloneValue(room.playerNames),
-      boardScores: legacyReplayBoardScores(state, viewer),
+      boardScores: legacyReplayBoardScores(room, state, viewer),
     };
     safeEmit(io, socketId, 'gameStart', payload, logger);
   });
@@ -140,7 +154,7 @@ function emitPassedOut(io, room, event, logger) {
     safeEmit(io, socketId, 'gameEnd', {
       passedOut: true,
       score: projected.payload.score,
-      boardScores: legacyReplayBoardScores(state, viewer),
+      boardScores: legacyReplayBoardScores(room, state, viewer),
       ddTable: cloneValue(view.ddTable),
       hands: cloneValue(latestScore.initialHands),
     }, logger);
@@ -220,7 +234,7 @@ function emitPlayedGameEnd(io, room, event, logger) {
       made: latestScore.made,
       diff: latestScore.diff,
       vulnerability: latestScore.vulnerability,
-      boardScores: legacyReplayBoardScores(state, viewer),
+      boardScores: legacyReplayBoardScores(room, state, viewer),
       ddTable: cloneValue(latestScore.ddTable),
       hands: cloneValue(latestScore.initialHands),
     };
@@ -290,7 +304,7 @@ function applyClassicState(room, state) {
 }
 
 function invalidBidMessage(room, seat, bid) {
-  const currentContract = room.currentContract;
+  const currentContract = room?.currentContract;
   if (bid === 'X' || bid === 'Double') {
     if (!currentContract) return '没有可加倍的定约';
     if (sideOf(currentContract.seat) === sideOf(seat)) return '不能加倍己方定约';
@@ -323,7 +337,7 @@ function logServerFailure(logger, metadata) {
 function serverFailure({ io, logger, room, socketId, method, failure }) {
   logServerFailure(logger, {
     method,
-    roomId: room.id,
+    roomId: room?.id || null,
     failureName: failure instanceof Error ? failure.name : null,
     failureKind: failure instanceof Error ? failure.kind || null : null,
     errorMessage: failure instanceof Error ? failure.message : null,
@@ -399,6 +413,7 @@ function createClassicNodeAdapter({ io, dealFactory, calcDDTable, logger } = {})
   }
 
   function initializeRoom(room) {
+    if (!room || typeof room !== 'object' || Array.isArray(room)) return;
     if (room.mode !== 'classic' || room.teachingMode) return;
     if (Object.hasOwn(room, 'schemaVersion')) return;
     applyClassicState(room, createClassicLobbyState());
@@ -406,21 +421,21 @@ function createClassicNodeAdapter({ io, dealFactory, calcDDTable, logger } = {})
   }
 
   function authoritativeSeat(room, socketId, requestedSeat) {
-    if (SEATS.includes(requestedSeat) && room.sockets?.[requestedSeat] === socketId) {
+    if (SEATS.includes(requestedSeat) && room?.sockets?.[requestedSeat] === socketId) {
       return requestedSeat;
     }
-    return SEATS.find(seat => room.sockets?.[seat] === socketId) || null;
+    return SEATS.find(seat => room?.sockets?.[seat] === socketId) || null;
   }
 
   function actorFor(room, socketId, requestedSeat) {
     const seat = authoritativeSeat(room, socketId, requestedSeat);
-    if (room.ownerSocketId === socketId) return { role: 'OWNER', seat };
+    if (room?.ownerSocketId === socketId) return { role: 'OWNER', seat };
     if (seat !== null) return { role: 'PLAYER', seat };
     return { role: 'SPECTATOR', seat: null };
   }
 
   function occupiedSeats(room) {
-    return SEATS.filter(seat => Boolean(room.sockets?.[seat]));
+    return SEATS.filter(seat => Boolean(room?.sockets?.[seat]));
   }
 
   function compactSuccess(room, result) {
@@ -526,6 +541,11 @@ function createClassicNodeAdapter({ io, dealFactory, calcDDTable, logger } = {})
       throw new ClassicInputError('explain must be a scalar');
     }
     return [...String(value).trim()].slice(0, 500).join('');
+  }
+
+  function legacyText(value) {
+    if (typeof value !== 'string') throw new ClassicInputError('text must be a string');
+    return [...value].slice(0, 500).join('');
   }
 
   function bid(room, request = {}) {
@@ -669,7 +689,152 @@ function createClassicNodeAdapter({ io, dealFactory, calcDDTable, logger } = {})
     return runReadyCommand(room, request, 'clearReadyForDisconnect', true);
   }
 
-  return { initializeRoom, start, bid, play, readyNext, clearReadyForDisconnect };
+  function compatFailure(room, request, method, seat, failure) {
+    return mapClassicNodeFailure({
+      io, logger, room, socketId: request?.socketId, method, seat, bid: null, failure,
+    });
+  }
+
+  function annotationEvent(state) {
+    return {
+      name: 'classic.bidding-updated',
+      payload: {
+        biddingHistory: cloneValue(state.biddingHistory),
+        currentBidder: state.currentBidder,
+        currentContract: cloneValue(state.currentContract),
+        consecutivePasses: state.consecutivePasses,
+      },
+    };
+  }
+
+  function settleClaim(room, request = {}) {
+    const seat = authoritativeSeat(room, request?.socketId, request?.claimer);
+    try {
+      if (seat === null || seat !== request?.claimer || seat === room.dummy) {
+        return compatFailure(room, request, 'settleClaim', seat, {
+          ok: false, code: 'CLASSIC_FORBIDDEN',
+        });
+      }
+      const state = projectClassicState(room);
+      const result = settleClassicClaim(state, {
+        claimer: seat,
+        tricksToWin: request?.tricksToWin,
+        reason: request?.reason,
+      });
+      if (!result.ok) return compatFailure(room, request, 'settleClaim', seat, result);
+
+      const partial = state.currentTrick.length === 0 ? null : {
+        cards: cloneValue(state.currentTrick), winner: seat, claimed: true,
+      };
+      const replayPartials = cloneValue(room.classicClaimedPartialTricks || {});
+      if (partial && !Object.hasOwn(replayPartials, state.dealNumber)) {
+        replayPartials[state.dealNumber] = partial;
+      }
+      applyClassicState(room, result.state);
+      room.classicRevision += 1;
+      room.claimReq = null;
+      room.lastClaim = {
+        claimer: seat, tricksToWin: request.tricksToWin, reason: request.reason,
+      };
+      room.classicClaimedPartialTricks = replayPartials;
+      safeEmit(io, room.id, 'claimResult', {
+        accepted: true, tricksToWin: request.tricksToWin, claimer: seat,
+      }, logger);
+      emitClassicEvents(io, room, result.events, logger);
+      return compactSuccess(room, result);
+    } catch (failure) {
+      return compatFailure(room, request, 'settleClaim', seat, failure);
+    }
+  }
+
+  function editBidAnnotation(room, request = {}) {
+    const seat = authoritativeSeat(room, request?.socketId, request?.seat);
+    try {
+      if (seat === null) return compatFailure(room, request, 'editBidAnnotation', seat, {
+        ok: false, code: 'CLASSIC_FORBIDDEN',
+      });
+      const state = projectClassicState(room);
+      const alerted = Boolean(request?.alert);
+      const result = editClassicBidAnnotation(state, {
+        seat,
+        bidIndex: request?.bidIndex,
+        alert: alerted,
+        explain: alerted && request?.explain ? scalarText(request.explain) : null,
+      });
+      if (!result.ok) return compatFailure(room, request, 'editBidAnnotation', seat, result);
+      applyClassicState(room, result.state);
+      room.classicRevision += 1;
+      emitClassicEvents(io, room, [annotationEvent(result.state)], logger);
+      return compactSuccess(room, result);
+    } catch (failure) {
+      return compatFailure(room, request, 'editBidAnnotation', seat, failure);
+    }
+  }
+
+  function appendBidQuestion(room, request = {}) {
+    const seat = authoritativeSeat(room, request?.socketId, request?.seat);
+    try {
+      if (seat === null) return compatFailure(room, request, 'appendBidQuestion', seat, {
+        ok: false, code: 'CLASSIC_FORBIDDEN',
+      });
+      const state = projectClassicState(room);
+      const question = legacyText(request?.question);
+      const result = appendClassicBidQuestion(state, {
+        bidIndex: request?.bidIndex, asker: seat, question,
+      });
+      if (!result.ok) return compatFailure(room, request, 'appendBidQuestion', seat, result);
+      const entry = result.state.biddingHistory[request.bidIndex];
+      const qaIdx = entry.qa.length - 1;
+      applyClassicState(room, result.state);
+      room.classicRevision += 1;
+      const bidderSock = room.sockets?.[entry.seat];
+      if (bidderSock) safeEmit(io, bidderSock, 'bidQuestionRecv', {
+        bidIndex: request.bidIndex,
+        qaIdx,
+        question,
+        asker: seat,
+        askerName: room.playerNames?.[seat],
+      }, logger);
+      return compactSuccess(room, result);
+    } catch (failure) {
+      return compatFailure(room, request, 'appendBidQuestion', seat, failure);
+    }
+  }
+
+  function answerBidQuestion(room, request = {}) {
+    const seat = authoritativeSeat(room, request?.socketId, request?.seat);
+    try {
+      if (seat === null) return compatFailure(room, request, 'answerBidQuestion', seat, {
+        ok: false, code: 'CLASSIC_FORBIDDEN',
+      });
+      const state = projectClassicState(room);
+      const existing = state.biddingHistory?.[request?.bidIndex];
+      const existingQa = existing?.qa?.[request?.qaIdx];
+      const answer = legacyText(request?.answer);
+      const result = answerClassicBidQuestion(state, {
+        bidIndex: request?.bidIndex, qaIdx: request?.qaIdx, answerer: seat, answer,
+      });
+      if (!result.ok) return compatFailure(room, request, 'answerBidQuestion', seat, result);
+      applyClassicState(room, result.state);
+      room.classicRevision += 1;
+      const askerSock = room.sockets?.[existingQa.asker];
+      if (askerSock) safeEmit(io, askerSock, 'bidAnswerRecv', {
+        bidIndex: request.bidIndex,
+        qaIdx: request.qaIdx,
+        answer,
+        answererName: room.playerNames?.[seat],
+        bid: legacyBidToken(existing.bid),
+      }, logger);
+      return compactSuccess(room, result);
+    } catch (failure) {
+      return compatFailure(room, request, 'answerBidQuestion', seat, failure);
+    }
+  }
+
+  return {
+    initializeRoom, start, bid, play, readyNext, clearReadyForDisconnect,
+    settleClaim, editBidAnnotation, appendBidQuestion, answerBidQuestion,
+  };
 }
 
 module.exports = {
