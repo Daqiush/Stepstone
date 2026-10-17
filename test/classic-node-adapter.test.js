@@ -1251,7 +1251,6 @@ test('server lifecycle seams preserve canonical readiness ownership and legacy r
       { mode: 'classic', teachingMode: true, readyStatus: { N: true } },
       { mode: 'ult', teachingMode: false, readyStatus: { N: true } },
       { mode: 'problem', teachingMode: false, readyStatus: { N: true } },
-      { mode: 'complex', teachingMode: false, readyStatus: { N: true } },
     ]) {
       const legacyCalls = [];
       serverApi.routeClassicDisconnectReady(room, { socketId: 'n', seat: 'N' }, {
@@ -1262,6 +1261,33 @@ test('server lifecycle seams preserve canonical readiness ownership and legacy r
       serverApi.resetSeatReadyForLifecycle(room, 'N');
       assert.equal(room.readyStatus.N, false);
     }
+
+    const currentComplex = {
+      mode: 'complex', teachingMode: false,
+      sockets: { N: 'current-socket' }, readyStatus: { N: true },
+    };
+    const currentCalls = [];
+    serverApi.routeClassicDisconnectReady(
+      currentComplex,
+      { socketId: 'current-socket', seat: 'N' },
+      {
+        standard: () => currentCalls.push('standard'),
+        legacy: () => currentCalls.push('legacy'),
+      },
+    );
+    assert.deepEqual(currentCalls, ['legacy']);
+
+    const staleCalls = [];
+    serverApi.routeClassicDisconnectReady(
+      currentComplex,
+      { socketId: 'replaced-stale-socket', seat: 'N' },
+      {
+        standard: () => staleCalls.push('standard'),
+        legacy: () => staleCalls.push('legacy'),
+      },
+    );
+    assert.deepEqual(staleCalls, []);
+    assert.equal(currentComplex.readyStatus.N, true);
   } finally {
     delete require.cache[serverPath];
   }

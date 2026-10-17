@@ -353,6 +353,9 @@ function routeClassicDisconnectReady(room, request, { standard, legacy }) {
     }
     return undefined;
   }
+  if (room?.mode === 'complex' && room.sockets?.[request.seat] !== request.socketId) {
+    return undefined;
+  }
   return legacy(room, request);
 }
 
