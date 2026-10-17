@@ -195,6 +195,7 @@ test('real handlers and compound cross-object workflows stay below 500 ms', asyn
       requestId,
       requestHash,
       tokenHash,
+      displayName: 'Latency North',
       sessionId,
       now: Date.now(),
     });
@@ -351,6 +352,7 @@ test('real handlers and compound cross-object workflows stay below 500 ms', asyn
       requestId: reuseRequestId,
       requestHash: reuseRequestHash,
       tokenHash: reuseTokenHash,
+      displayName: 'Reuse North',
       sessionId: id('latency_reuse_session'),
       now: reuseNow,
     });
@@ -508,6 +510,7 @@ test('non-owner authentication cannot prevent owner timeout, terminal response l
     requestId: reuseRequestId,
     requestHash: 'a'.repeat(64),
     tokenHash: 'b'.repeat(64),
+    displayName: 'Lifecycle North',
     sessionId: id('lifecycle_reuse_session'),
     now: reuseNow,
   });
@@ -538,6 +541,7 @@ test('non-owner authentication cannot prevent owner timeout, terminal response l
     requestId: id('delayed_old_join'),
     requestHash: 'c'.repeat(64),
     tokenHash: 'd'.repeat(64),
+    displayName: 'Delayed East',
     requestedRole: 'player',
   });
   assert.equal(delayedJoin.body.error.code, 'ROOM_NOT_FOUND');

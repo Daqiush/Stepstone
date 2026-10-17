@@ -4,6 +4,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { createTestHarness } from 'wrangler';
 
 import { LIMITS } from '../src/room-foundation/constants.mjs';
 import { canonicalJson, hashReconnectToken } from '../src/room-foundation/protocol.mjs';
@@ -11,6 +13,7 @@ import { fetchRoomFoundation } from '../src/room-foundation/router.mjs';
 import { createRoomWorkerRuntime } from './helpers/room-worker-runtime.mjs';
 
 const TOKEN_BYTES = 32;
+const WORKER_ROOT = fileURLToPath(new URL('../..', import.meta.url));
 
 let runtime;
 let sequence = 0;
@@ -231,6 +234,160 @@ test('creates owner N, allocates E/S/W without downgrade, and persists a spectat
   assert.equal(/token_hash|tokenHash|reconnectToken/u.test(persistedView), false);
 });
 
+test('persists display names in session authority and reconstructs all four seats after eviction', async () => {
+  const ownerBody = createBody('named_owner', { displayName: 'North Name' });
+  const created = await createRoom(ownerBody);
+  for (const [label, displayName] of [
+    ['named_east', 'East Name'],
+    ['named_south', '南家'],
+    ['named_west', '🃏 West'],
+  ]) {
+    const joined = await joinRoom(created, joinBody(label, 'player', { displayName }));
+    assert.equal(joined.status, 200, joined.text);
+  }
+
+  const before = await inspectRoom(created);
+  assert.deepEqual(before.sessions.map(({ seat, displayName }) => [seat, displayName]), [
+    ['N', 'North Name'], ['E', 'East Name'], ['S', '南家'], ['W', '🃏 West'],
+  ]);
+  assert.deepEqual(before.roomState.playerNames, {
+    N: 'North Name', E: 'East Name', S: '南家', W: '🃏 West',
+  });
+
+  await runtime.restartRoom(created.roomCode, created.incarnation);
+  const after = await inspectRoom(created);
+  assert.deepEqual(after.sessions.map(({ seat, displayName }) => [seat, displayName]), [
+    ['N', 'North Name'], ['E', 'East Name'], ['S', '南家'], ['W', '🃏 West'],
+  ]);
+  assert.deepEqual(after.roomState.playerNames, before.roomState.playerNames);
+});
+
+test('idempotently migrates a pre-display-name session schema and rebuilds legacy authority', async () => {
+  const server = createTestHarness({
+    root: WORKER_ROOT,
+    workers: [{
+      configPath: './workers/wrangler.jsonc',
+      vars: { ROOM_FOUNDATION_TEST: 'true' },
+    }],
+  });
+  await server.listen();
+  try {
+    const ownerBody = createBody('legacy_name_owner', { displayName: 'Legacy North' });
+    const response = await server.fetch('/api/rooms', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(ownerBody),
+    });
+    assert.equal(response.status, 200);
+    const created = await response.json();
+    const worker = server.getWorker();
+    let storage = await worker.getDurableObjectStorage('STEPSTONE_ROOM', {
+      name: `${created.roomCode}:${created.incarnation}`,
+    });
+    for (const event of ['insert', 'update', 'delete']) {
+      await storage.exec(`DROP TRIGGER IF EXISTS sessions_authority_after_${event}`);
+    }
+    await storage.exec(`CREATE TABLE sessions_legacy (
+      session_id TEXT PRIMARY KEY,
+      token_hash TEXT UNIQUE NOT NULL,
+      previous_token_hash TEXT,
+      last_rotation_id TEXT,
+      last_rotation_next_hash TEXT,
+      current_connection_id TEXT,
+      bootstrap_request_id TEXT NOT NULL,
+      bootstrap_request_hash TEXT NOT NULL,
+      bootstrap_response_json TEXT NOT NULL,
+      incarnation INTEGER NOT NULL,
+      role TEXT NOT NULL,
+      seat TEXT,
+      connection_epoch INTEGER NOT NULL,
+      expires_at INTEGER
+    )`);
+    await storage.exec(`INSERT INTO sessions_legacy
+      SELECT session_id, token_hash, previous_token_hash, last_rotation_id,
+        last_rotation_next_hash, current_connection_id, bootstrap_request_id,
+        bootstrap_request_hash, bootstrap_response_json, incarnation, role,
+        seat, connection_epoch, expires_at
+      FROM sessions`);
+    await storage.exec('DROP TABLE sessions');
+    await storage.exec('ALTER TABLE sessions_legacy RENAME TO sessions');
+    await storage.exec('DELETE FROM authority_cache');
+    await worker.evictDurableObject('STEPSTONE_ROOM', {
+      name: `${created.roomCode}:${created.incarnation}`,
+      webSockets: 'hibernate',
+    });
+
+    const inspectedResponse = await server.fetch('/api/rooms/__test/registry', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        action: 'inspectRoom', code: created.roomCode, incarnation: created.incarnation,
+      }),
+    });
+    assert.equal(inspectedResponse.status, 200);
+    const inspected = (await inspectedResponse.json()).value;
+    assert.equal(inspected.sessions.length, 1);
+    assert.equal(inspected.sessions[0].displayName, null);
+    assert.deepEqual(inspected.roomState.playerNames, { N: null, E: null, S: null, W: null });
+
+    storage = await worker.getDurableObjectStorage('STEPSTONE_ROOM', {
+      name: `${created.roomCode}:${created.incarnation}`,
+    });
+    const columns = await storage.exec('PRAGMA table_info(sessions)');
+    const displayNameColumn = columns.find((column) => column.name === 'display_name');
+    assert.deepEqual(
+      { notnull: displayNameColumn?.notnull, defaultValue: displayNameColumn?.dflt_value },
+      { notnull: 1, defaultValue: "''" },
+    );
+    const cached = await storage.exec(
+      'SELECT authorities_json FROM authority_cache WHERE singleton = 1',
+    );
+    assert.equal(JSON.parse(cached[0].authorities_json)[0].displayName, '');
+  } finally {
+    await server.close();
+  }
+});
+
+test('trusted initialization and join paths reject missing or invalid display names before inserts', async () => {
+  const requestId = nextId('trusted_init_name');
+  const allocation = (await runtime.registry('allocateAt', {
+    requestId,
+    requestHash: 'a'.repeat(64),
+    now: Date.now(),
+  })).body.value;
+  for (const displayName of [undefined, '', '\ud800']) {
+    const initialized = await runtime.room('initializeRoomAt', {
+      code: allocation.code,
+      incarnation: allocation.incarnation,
+      leaseId: allocation.leaseId,
+      leaseExpiresAt: allocation.leaseExpiresAt,
+      requestId,
+      requestHash: 'a'.repeat(64),
+      tokenHash: 'b'.repeat(64),
+      displayName,
+      sessionId: nextId('trusted_init_session'),
+      now: Date.now(),
+    });
+    assert.deepEqual(initialized.body, { ok: false, error: { code: 'INVALID_REQUEST' } });
+  }
+
+  const created = await createRoom(createBody('trusted_join_owner'));
+  const before = (await inspectRoom(created)).sessions.length;
+  for (const displayName of [undefined, '', '\udfff']) {
+    const joined = await runtime.room('joinRoomAt', {
+      code: created.roomCode,
+      incarnation: created.incarnation,
+      requestId: nextId('trusted_join_name'),
+      requestHash: 'c'.repeat(64),
+      tokenHash: 'd'.repeat(64),
+      requestedRole: 'player',
+      displayName,
+    });
+    assert.deepEqual(joined.body, { ok: false, error: { code: 'INVALID_REQUEST' } });
+  }
+  assert.equal((await inspectRoom(created)).sessions.length, before);
+});
+
 test('caps spectators at twelve and total sessions at sixteen', async () => {
   const created = await createRoom(createBody('capacity_owner'));
   for (const seat of ['E', 'S', 'W']) {
@@ -417,6 +574,7 @@ test('rejects stale empty initialization while allowing exact committed initiali
     requestId: replayBody.requestId,
     requestHash: replayHash,
     tokenHash: await hashReconnectToken(replayBody.reconnectToken),
+    displayName: replayBody.displayName,
     sessionId,
   };
   const initialized = await runtime.room('initializeRoomAt', {

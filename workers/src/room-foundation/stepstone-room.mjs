@@ -20,6 +20,11 @@ import {
   isValidCommandCache,
   storeCommandResult,
 } from './command-cache.mjs';
+import stateModule from '../../../classic/state.cjs';
+import {
+  composeRoomSnapshot,
+  isTrustedDisplayName,
+} from './room-view.mjs';
 import {
   accountedRow,
   accountedRows,
@@ -29,6 +34,8 @@ import {
   executeAccountedSql,
 } from './sql-accounting.mjs';
 import { createTestLatencyController } from './test-latency.mjs';
+
+const { createClassicLobbyState } = stateModule;
 
 const REQUEST_ID = /^[A-Za-z0-9_-]{16,64}$/u;
 const REQUEST_HASH = /^[0-9a-f]{64}$/u;
@@ -86,6 +93,10 @@ class SocketRoomExpiredError extends Error {}
 class SocketSessionReplacedError extends Error {}
 class CommandCasError extends Error {}
 
+function viewerForSession(session) {
+  return { role: session.role, seat: session.seat };
+}
+
 function normalizeBootstrapResponse(response, expected) {
   const keys = ['v', 'requestId', 'roomCode', 'incarnation', 'sessionId', 'role', 'seat'];
   if (!exactKeys(response, keys)
@@ -104,19 +115,6 @@ function normalizeBootstrapResponse(response, expected) {
     sessionId: response.sessionId,
     role: response.role,
     seat: response.seat,
-  };
-}
-
-function publicRoomState(stored, _session = null) {
-  return {
-    schemaVersion: stored.schemaVersion,
-    roomCode: stored.roomCode,
-    incarnation: stored.incarnation,
-    revision: stored.revision,
-    status: stored.status,
-    foundationCounter: stored.foundationCounter,
-    createdAt: stored.createdAt,
-    expiresAt: stored.expiresAt,
   };
 }
 
@@ -161,9 +159,15 @@ export class StepstoneRoom {
           incarnation INTEGER NOT NULL,
           role TEXT NOT NULL,
           seat TEXT,
+          display_name TEXT NOT NULL DEFAULT '',
           connection_epoch INTEGER NOT NULL,
           expires_at INTEGER
         )`);
+        const sessionColumns = rows(this.sql.exec('PRAGMA table_info(sessions)'));
+        const migratedDisplayName = !sessionColumns.some((column) => column.name === 'display_name');
+        if (migratedDisplayName) {
+          this.sql.exec("ALTER TABLE sessions ADD COLUMN display_name TEXT NOT NULL DEFAULT ''");
+        }
         this.sql.exec(`CREATE TABLE IF NOT EXISTS pending_actions (
           action_id TEXT PRIMARY KEY,
           incarnation INTEGER NOT NULL,
@@ -178,7 +182,9 @@ export class StepstoneRoom {
         )`);
         this.sql.exec('CREATE INDEX IF NOT EXISTS pending_actions_due_at ON pending_actions(due_at)');
         for (const event of ['INSERT', 'UPDATE', 'DELETE']) {
-          this.sql.exec(`CREATE TRIGGER IF NOT EXISTS sessions_authority_after_${event.toLowerCase()}
+          const triggerName = `sessions_authority_after_${event.toLowerCase()}`;
+          this.sql.exec(`DROP TRIGGER IF EXISTS ${triggerName}`);
+          this.sql.exec(`CREATE TRIGGER ${triggerName}
             AFTER ${event} ON sessions BEGIN
               INSERT OR REPLACE INTO authority_cache
                 (singleton, incarnation, authorities_json)
@@ -188,14 +194,33 @@ export class StepstoneRoom {
                   'incarnation', incarnation,
                   'role', role,
                   'seat', seat,
+                  'displayName', display_name,
                   'connectionId', current_connection_id,
                   'connectionEpoch', connection_epoch,
                   'expiresAt', expires_at
                 )), '[]')
-              FROM (SELECT session_id, incarnation, role, seat,
+              FROM (SELECT session_id, incarnation, role, seat, display_name,
                     current_connection_id, connection_epoch, expires_at
                     FROM sessions ORDER BY rowid);
             END`);
+        }
+        if (migratedDisplayName) {
+          this.sql.exec(`INSERT OR REPLACE INTO authority_cache
+            (singleton, incarnation, authorities_json)
+            SELECT 1, COALESCE(MAX(incarnation), 0),
+              COALESCE(json_group_array(json_object(
+                'sessionId', session_id,
+                'incarnation', incarnation,
+                'role', role,
+                'seat', seat,
+                'displayName', display_name,
+                'connectionId', current_connection_id,
+                'connectionEpoch', connection_epoch,
+                'expiresAt', expires_at
+              )), '[]')
+            FROM (SELECT session_id, incarnation, role, seat, display_name,
+                  current_connection_id, connection_epoch, expires_at
+                  FROM sessions ORDER BY rowid)`);
         }
       });
       this.rebuildCommandAuthority();
@@ -210,6 +235,7 @@ export class StepstoneRoom {
       incarnation: session.incarnation,
       role: session.role,
       seat: session.seat,
+      displayName: session.display_name,
       connectionId: session.current_connection_id,
       connectionEpoch: session.connection_epoch,
       expiresAt: session.expires_at,
@@ -262,6 +288,7 @@ export class StepstoneRoom {
           this.sql,
           accounting,
           `SELECT session_id AS sessionId, incarnation, role, seat,
+                  display_name AS displayName,
                   current_connection_id AS connectionId,
                   connection_epoch AS connectionEpoch, expires_at AS expiresAt
            FROM sessions ORDER BY rowid`,
@@ -285,6 +312,7 @@ export class StepstoneRoom {
           && session.incarnation === state.incarnation
           && ['OWNER', 'PLAYER', 'SPECTATOR'].includes(session.role)
           && (session.seat === null || ['N', 'E', 'S', 'W'].includes(session.seat))
+          && (session.displayName === '' || isTrustedDisplayName(session.displayName))
           && (session.connectionId === null || validIdentity(session.connectionId))
           && Number.isSafeInteger(session.connectionEpoch)
           && session.connectionEpoch >= 0
@@ -297,11 +325,13 @@ export class StepstoneRoom {
           incarnation: session.incarnation,
           role: session.role,
           seat: session.seat,
+          displayName: session.displayName,
           connectionId: session.connectionId,
           connectionEpoch: session.connectionEpoch,
           expiresAt: session.expiresAt,
         });
       }
+      composeRoomSnapshot(state, authorities, { role: 'SPECTATOR', seat: null });
       this.commandState = state;
       this.commandStateJson = stored.state_json;
       this.sessionAuthorities = authorities;
@@ -893,7 +923,7 @@ export class StepstoneRoom {
 
   async initializeWithSession(input = {}, proposedSessionId, now) {
     const {
-      code, incarnation, leaseId, leaseExpiresAt, requestId, requestHash, tokenHash,
+      code, incarnation, leaseId, leaseExpiresAt, requestId, requestHash, tokenHash, displayName,
     } = input;
     if (!validCodeIncarnation(code, incarnation)
       || !validIdentity(leaseId)
@@ -901,6 +931,7 @@ export class StepstoneRoom {
       || !validIdentity(requestId)
       || !validHash(requestHash)
       || !validHash(tokenHash)
+      || !isTrustedDisplayName(displayName)
       || !validIdentity(proposedSessionId)
       || !validTime(now)) return failure('INVALID_REQUEST');
     this.testLatency?.advance('initialize');
@@ -953,6 +984,7 @@ export class StepstoneRoom {
       createdAt: now,
       expiresAt: null,
       recentCommands: {},
+      classic: createClassicLobbyState(),
       initialization: {
         leaseId, leaseExpiresAt, requestId, requestHash,
       },
@@ -971,9 +1003,10 @@ export class StepstoneRoom {
           (session_id, token_hash, previous_token_hash, last_rotation_id,
            last_rotation_next_hash, current_connection_id, bootstrap_request_id,
            bootstrap_request_hash, bootstrap_response_json, incarnation, role,
-           seat, connection_epoch, expires_at)
-         VALUES (?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, 'OWNER', 'N', 0, NULL)`,
+           seat, display_name, connection_epoch, expires_at)
+         VALUES (?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, 'OWNER', 'N', ?, 0, NULL)`,
         sessionId, tokenHash, requestId, requestHash, JSON.stringify(response), incarnation,
+        displayName,
       );
       this.sql.exec(
         `INSERT INTO pending_actions (action_id, incarnation, due_at, kind, payload_json)
@@ -990,6 +1023,7 @@ export class StepstoneRoom {
       incarnation,
       role: 'OWNER',
       seat: 'N',
+      display_name: displayName,
       current_connection_id: null,
       connection_epoch: 0,
       expires_at: null,
@@ -999,12 +1033,13 @@ export class StepstoneRoom {
 
   join(input = {}) {
     const {
-      code, incarnation, requestId, requestHash, tokenHash, requestedRole,
+      code, incarnation, requestId, requestHash, tokenHash, requestedRole, displayName,
     } = input;
     if (!validCodeIncarnation(code, incarnation)
       || !validIdentity(requestId)
       || !validHash(requestHash)
       || !validHash(tokenHash)
+      || !isTrustedDisplayName(displayName)
       || (requestedRole !== 'player' && requestedRole !== 'spectator')) {
       return failure('INVALID_REQUEST');
     }
@@ -1071,16 +1106,17 @@ export class StepstoneRoom {
           (session_id, token_hash, previous_token_hash, last_rotation_id,
            last_rotation_next_hash, current_connection_id, bootstrap_request_id,
            bootstrap_request_hash, bootstrap_response_json, incarnation, role,
-           seat, connection_epoch, expires_at)
-         VALUES (?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, 0, NULL)`,
+           seat, display_name, connection_epoch, expires_at)
+         VALUES (?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, 0, NULL)`,
         sessionId, tokenHash, requestId, requestHash, JSON.stringify(response),
-        incarnation, role, seat,
+        incarnation, role, seat, displayName,
       );
       createdAuthority = {
         session_id: sessionId,
         incarnation,
         role,
         seat,
+        display_name: displayName,
         current_connection_id: null,
         connection_epoch: 0,
         expires_at: null,
@@ -1166,7 +1202,11 @@ export class StepstoneRoom {
         || this.commandState?.status !== 'ACTIVE'
         || this.commandState.incarnation !== committedState.incarnation
         || this.commandState.revision !== committedState.revision) continue;
-      const snapshot = publicRoomState(committedState, session);
+      const snapshot = composeRoomSnapshot(
+        committedState,
+        this.sessionAuthorities,
+        viewerForSession(session),
+      );
       this.sendSocketFrame(candidate, {
         v: PROTOCOL_VERSION,
         type: 'event',
@@ -1351,7 +1391,11 @@ export class StepstoneRoom {
 
     this.lastCommandAccounting = accounting;
     if (outcome.kind === 'sync') {
-      const snapshot = publicRoomState(outcome.state, outcome.session);
+      const snapshot = composeRoomSnapshot(
+        outcome.state,
+        this.sessionAuthorities,
+        viewerForSession(outcome.session),
+      );
       this.sendSocketFrame(socket, {
         v: PROTOCOL_VERSION,
         type: 'reply',
@@ -1375,7 +1419,11 @@ export class StepstoneRoom {
         command.id,
         'REVISION_CONFLICT',
         outcome.state.revision,
-        publicRoomState(outcome.state, outcome.session),
+        composeRoomSnapshot(
+          outcome.state,
+          this.sessionAuthorities,
+          viewerForSession(outcome.session),
+        ),
       );
       return;
     }
@@ -1394,7 +1442,11 @@ export class StepstoneRoom {
       this.closeSocket(socket, WEBSOCKET_CLOSE.ROOM_EXPIRED, WEBSOCKET_CLOSE_REASON.ROOM_EXPIRED);
       return;
     }
-    const snapshot = publicRoomState(current, outcome.session);
+    const snapshot = composeRoomSnapshot(
+      current,
+      this.sessionAuthorities,
+      viewerForSession(outcome.session),
+    );
     this.sendSocketFrame(socket, {
       v: PROTOCOL_VERSION,
       type: 'reply',
@@ -1574,6 +1626,7 @@ export class StepstoneRoom {
           incarnation: attachment.incarnation,
           role: session.role,
           seat: session.seat,
+          displayName: session.display_name,
           connectionEpoch: proposedEpoch,
           connectionId: attachment.connectionId,
           expiresAt: session.expires_at,
@@ -1610,7 +1663,11 @@ export class StepstoneRoom {
         seat: authenticated.seat,
         connectionEpoch: authenticated.connectionEpoch,
         revision: committed.state.revision,
-        snapshot: publicRoomState(committed.state),
+        snapshot: composeRoomSnapshot(
+          committed.state,
+          this.sessionAuthorities,
+          viewerForSession(authenticated),
+        ),
       },
     }));
   }
@@ -1700,6 +1757,7 @@ export class StepstoneRoom {
             incarnation: session.incarnation,
             role: session.role,
             seat: session.seat,
+            displayName: session.display_name,
             connectionId: null,
             connectionEpoch: nextEpoch,
             expiresAt: session.expires_at,
@@ -2033,7 +2091,11 @@ export class StepstoneRoom {
     const state = JSON.parse(stored.state_json);
     if (state.roomCode !== code) return failure('ROOM_NOT_FOUND');
     return result({
-      roomState: publicRoomState(state),
+      roomState: composeRoomSnapshot(
+        state,
+        this.sessionAuthorities,
+        { role: 'SPECTATOR', seat: null },
+      ),
       sessions: rows(this.sql.exec('SELECT * FROM sessions ORDER BY rowid')).map((session) => ({
         sessionId: session.session_id,
         bootstrapRequestId: session.bootstrap_request_id,
@@ -2041,6 +2103,7 @@ export class StepstoneRoom {
         incarnation: session.incarnation,
         role: session.role,
         seat: session.seat,
+        displayName: session.display_name === '' ? null : session.display_name,
         connectionId: session.current_connection_id,
         connectionEpoch: session.connection_epoch,
         expiresAt: session.expires_at,
@@ -2238,7 +2301,7 @@ export class StepstoneRoom {
       ['sessions', [
         'session_id', 'token_hash', 'previous_token_hash', 'last_rotation_id',
         'last_rotation_next_hash', 'current_connection_id', 'bootstrap_request_id',
-        'bootstrap_request_hash', 'bootstrap_response_json', 'role', 'seat',
+        'bootstrap_request_hash', 'bootstrap_response_json', 'role', 'seat', 'display_name',
       ]],
       ['pending_actions', ['action_id', 'kind', 'payload_json']],
       ['authority_cache', ['authorities_json']],

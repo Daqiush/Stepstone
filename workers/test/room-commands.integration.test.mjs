@@ -104,21 +104,28 @@ function sync(commandId = id('room_sync')) {
 
 function publicSnapshot(snapshot, revision, counter) {
   assert.deepEqual(Object.keys(snapshot).sort(), [
+    'classic',
     'createdAt',
     'expiresAt',
     'foundationCounter',
     'incarnation',
+    'playerNames',
     'revision',
     'roomCode',
     'schemaVersion',
     'status',
+    'viewer',
   ]);
   assert.equal(snapshot.revision, revision);
   assert.equal(snapshot.foundationCounter, counter);
   assert.equal(snapshot.status, 'ACTIVE');
+  assert.deepEqual(Object.keys(snapshot.viewer).sort(), ['role', 'seat']);
+  assert.deepEqual(Object.keys(snapshot.playerNames), ['N', 'E', 'S', 'W']);
+  assert.equal(snapshot.classic.mode, 'classic');
   const serialized = JSON.stringify(snapshot);
   for (const privateName of [
     'recentCommands', 'requestHash', 'commandId', 'sessionId', 'token', 'initialization', 'leaseId',
+    'initialHands', 'pendingActions', 'connectionId',
   ]) assert.equal(serialized.includes(privateName), false);
 }
 

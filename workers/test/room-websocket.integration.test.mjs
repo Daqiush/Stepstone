@@ -220,6 +220,34 @@ test('rotates only token digests, returns the exact role snapshot, and keeps sam
         foundationCounter: 0,
         createdAt: authenticated.response.payload.snapshot.createdAt,
         expiresAt: null,
+        viewer: { role: 'PLAYER', seat: 'E' },
+        playerNames: { N: 'North', E: 'RotateEast', S: null, W: null },
+        classic: {
+          schemaVersion: 1,
+          mode: 'classic',
+          phase: 'LOBBY',
+          dealNumber: 0,
+          boardInfo: null,
+          readyStatus: { N: false, E: false, S: false, W: false },
+          biddingHistory: [],
+          currentBidder: null,
+          currentContract: null,
+          consecutivePasses: 0,
+          declarer: null,
+          dummy: null,
+          leader: null,
+          currentPlayer: null,
+          currentTrick: [],
+          completedCount: 0,
+          nsTricks: 0,
+          ewTricks: 0,
+          dummyRevealed: false,
+          claimSettlement: null,
+          boardScores: [],
+          ddTable: null,
+          ddsStatus: 'IDLE',
+          hands: { N: null, E: [], S: null, W: null },
+        },
       },
     },
   });
@@ -245,6 +273,59 @@ test('rotates only token digests, returns the exact role snapshot, and keeps sam
   assert.equal(storedView.includes(await hashReconnectToken(player.reconnectToken)), false);
   assert.equal(storedView.includes(await hashReconnectToken(authenticated.session.reconnectToken)), false);
   authenticated.socket.close();
+});
+
+test('sync replies and post-commit broadcasts compose a fresh snapshot for each socket authority', async () => {
+  const room = await createRoom('recipient_owner');
+  const east = await joinRoom(room, 'RecipientEast', 'player');
+  const ownerAuth = await authenticate(room, room);
+  const eastAuth = await authenticate(room, east);
+
+  eastAuth.socket.send({
+    v: 1, type: 'command', id: id('recipient_sync'), name: 'room.sync', payload: {},
+  });
+  const synchronized = await parseMessage(eastAuth.socket);
+  assert.equal(synchronized.type, 'reply');
+  assert.deepEqual(synchronized.payload.snapshot.viewer, { role: 'PLAYER', seat: 'E' });
+  assert.deepEqual(synchronized.payload.snapshot.playerNames, {
+    N: 'North', E: 'RecipientEast', S: null, W: null,
+  });
+  assert.deepEqual(
+    Object.entries(synchronized.payload.snapshot.classic.hands)
+      .filter(([, hand]) => hand !== null).map(([seat]) => seat),
+    ['E'],
+  );
+
+  ownerAuth.socket.send({
+    v: 1,
+    type: 'command',
+    id: id('recipient_increment'),
+    name: 'foundation.increment',
+    payload: { expectedRevision: 0 },
+  });
+  const ownerReply = await parseMessage(ownerAuth.socket);
+  const ownerBroadcast = await parseMessage(ownerAuth.socket);
+  const eastBroadcast = await parseMessage(eastAuth.socket);
+  assert.equal(ownerReply.type, 'reply');
+  assert.equal(ownerBroadcast.name, 'room.snapshot');
+  assert.equal(eastBroadcast.name, 'room.snapshot');
+  assert.deepEqual(ownerReply.payload.snapshot.viewer, { role: 'OWNER', seat: 'N' });
+  assert.deepEqual(ownerBroadcast.payload.snapshot.viewer, { role: 'OWNER', seat: 'N' });
+  assert.deepEqual(eastBroadcast.payload.snapshot.viewer, { role: 'PLAYER', seat: 'E' });
+  assert.deepEqual(
+    Object.entries(ownerBroadcast.payload.snapshot.classic.hands)
+      .filter(([, hand]) => hand !== null).map(([seat]) => seat),
+    ['N'],
+  );
+  assert.deepEqual(
+    Object.entries(eastBroadcast.payload.snapshot.classic.hands)
+      .filter(([, hand]) => hand !== null).map(([seat]) => seat),
+    ['E'],
+  );
+  assert.notDeepEqual(ownerBroadcast.payload.snapshot.viewer, eastBroadcast.payload.snapshot.viewer);
+
+  ownerAuth.socket.close();
+  eastAuth.socket.close();
 });
 
 test('join replay stays exact after repeated reconnect-token rotations', async () => {

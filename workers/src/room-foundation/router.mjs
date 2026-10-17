@@ -123,6 +123,7 @@ async function createRoom(request, env) {
       requestId: parsed.requestId,
       requestHash,
       tokenHash,
+      displayName: parsed.displayName,
     });
     if (!initialized?.ok) {
       return safeRpcError(initialized?.error, ['REQUEST_CONFLICT']);
@@ -158,6 +159,7 @@ async function joinRoom(request, env, code) {
       requestHash,
       tokenHash,
       requestedRole: parsed.requestedRole,
+      displayName: parsed.displayName,
     });
     if (!joined?.ok) {
       return safeRpcError(joined?.error, [

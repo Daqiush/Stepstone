@@ -186,6 +186,7 @@ test('registry lifecycle, fallback, and maximum reuse profiles cover 50/100 card
       requestId: 'lifecycle_reuse_00000001',
       requestHash: 'e'.repeat(64),
       tokenHash: 'f'.repeat(64),
+      displayName: 'Reuse North',
       sessionId: 'reuse_session_000000001',
       now: now + LIMITS.registryTombstoneMs + 5,
     });
