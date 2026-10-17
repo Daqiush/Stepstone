@@ -274,6 +274,11 @@ test('createClassicNodeAdapter rejects missing boundary dependencies', () => {
       error => error instanceof TypeError && error.message === `invalid classic Node adapter ${key}`,
     );
   }
+  assert.throws(
+    () => createClassicNodeAdapter({ ...valid, io: { to() { return {}; } } }),
+    error => error instanceof TypeError
+      && error.message === 'invalid classic Node adapter io.to().emit',
+  );
 });
 
 test('initializeRoom applies a fresh exact lobby plus revision zero only to standard classic rooms', () => {

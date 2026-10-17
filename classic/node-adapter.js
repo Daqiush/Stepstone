@@ -115,6 +115,15 @@ function mapClassicNodeFailure({
 
 function createClassicNodeAdapter({ io, dealFactory, calcDDTable, logger } = {}) {
   if (!io || typeof io.to !== 'function') throw new TypeError('invalid classic Node adapter io');
+  let probeOperator;
+  try {
+    probeOperator = io.to('__classic_adapter_dependency_probe__');
+  } catch {
+    throw new TypeError('invalid classic Node adapter io.to().emit');
+  }
+  if (!probeOperator || typeof probeOperator.emit !== 'function') {
+    throw new TypeError('invalid classic Node adapter io.to().emit');
+  }
   if (typeof dealFactory !== 'function') {
     throw new TypeError('invalid classic Node adapter dealFactory');
   }
