@@ -332,6 +332,35 @@ function routeClassicBid(room, request, { standard, legacy }) {
   return legacy(room, request);
 }
 
+function routeClassicPlay(room, request, { standard, legacy }) {
+  if (room && room.mode === 'classic' && !room.teachingMode) {
+    return standard(room, request);
+  }
+  return legacy(room, request);
+}
+
+function routeClassicReady(room, request, { standard, legacy }) {
+  if (room && room.mode === 'classic' && !room.teachingMode) {
+    return standard(room, request);
+  }
+  return legacy(room, request);
+}
+
+function routeClassicDisconnectReady(room, request, { standard, legacy }) {
+  if (room && room.mode === 'classic' && !room.teachingMode) {
+    if (room.phase === 'SCORING' && room.readyStatus?.[request.seat] === true) {
+      return standard(room, request);
+    }
+    return undefined;
+  }
+  return legacy(room, request);
+}
+
+function resetSeatReadyForLifecycle(room, seat) {
+  if (!room || (room.mode === 'classic' && !room.teachingMode)) return;
+  room.readyStatus[seat] = false;
+}
+
 function configureNewRoom(room, requestedMode) {
   if (requestedMode === 'ult') {
     room.mode = 'ult';
@@ -1096,12 +1125,12 @@ io.on('connection', socket => {
     if (old) {
       room.sockets[old] = null;
       room.playerNames[old] = null;
-      room.readyStatus[old] = false;
+      resetSeatReadyForLifecycle(room, old);
     }
 
     room.sockets[seat]     = socket.id;
     room.playerNames[seat] = playerName;
-    room.readyStatus[seat] = false;
+    resetSeatReadyForLifecycle(room, seat);
     sockSeat[socket.id]    = seat;
 
     if (room.phase === 'LOBBY') {
@@ -1316,57 +1345,62 @@ io.on('connection', socket => {
     const roomId = sockRoom[socket.id];
     const seat   = sockSeat[socket.id];
     const room   = rooms[roomId];
-    if (!room || room.phase !== 'PLAYING' || room.claimReq) return;
+    return routeClassicPlay(room, { socketId: socket.id, seat, card }, {
+      standard: (classicRoom, request) => classicAdapter.play(classicRoom, request),
+      legacy: () => {
+        if (!room || room.phase !== 'PLAYING' || room.claimReq) return;
 
-    let effective = seat;
-    if (room.teachingMode) {
-      const dumIsOwner = room.ownerControlledSeats.includes(room.dummy);
-      const decIsReal  = !room.ownerControlledSeats.includes(room.declarer);
+        let effective = seat;
+        if (room.teachingMode) {
+          const dumIsOwner = room.ownerControlledSeats.includes(room.dummy);
+          const decIsReal  = !room.ownerControlledSeats.includes(room.declarer);
       // 教学模式：房主代替当前出牌座位，但以下两种情况除外：
       // 1. 明手是房主且庄家是真实玩家时（庄家代打明手）
       // 2. declarerControlledBy 已设置（真实明手接管了庄家的出牌权）
-      if (socket.id === room.ownerSocketId && room.ownerControlledSeats.includes(room.currentPlayer)) {
-        const dummyPlaysForDeclarer = room.currentPlayer === room.dummy && dumIsOwner && decIsReal;
-        const realDummyControlsDeclarer = room.declarerControlledBy
-          && (room.currentPlayer === room.declarer || room.currentPlayer === room.dummy);
-        if (!dummyPlaysForDeclarer && !realDummyControlsDeclarer) {
-          effective = room.currentPlayer;
+          if (socket.id === room.ownerSocketId && room.ownerControlledSeats.includes(room.currentPlayer)) {
+            const dummyPlaysForDeclarer = room.currentPlayer === room.dummy && dumIsOwner && decIsReal;
+            const realDummyControlsDeclarer = room.declarerControlledBy
+              && (room.currentPlayer === room.declarer || room.currentPlayer === room.dummy);
+            if (!dummyPlaysForDeclarer && !realDummyControlsDeclarer) {
+              effective = room.currentPlayer;
+            }
+          }
+          // 明手是房主控制、庄家是真实玩家时：庄家代打明手（标准桥牌规则）
+          if (dumIsOwner && decIsReal && room.currentPlayer === room.dummy && seat === room.declarer) {
+            effective = room.dummy;
+          }
+          // 明手代控庄家：明手玩家可以为庄家座位或明手座位出牌
+          if (room.declarerControlledBy && seat === room.declarerControlledBy) {
+            if (room.currentPlayer === room.declarer || room.currentPlayer === room.dummy) {
+              effective = room.currentPlayer;
+            }
+          }
+        } else {
+          // 经典模式：庄家代打明手
+          if (room.currentPlayer === room.dummy && seat === room.declarer) {
+            effective = room.dummy;
+          }
         }
-      }
-      // 明手是房主控制、庄家是真实玩家时：庄家代打明手（标准桥牌规则）
-      if (dumIsOwner && decIsReal && room.currentPlayer === room.dummy && seat === room.declarer) {
-        effective = room.dummy;
-      }
-      // 明手代控庄家：明手玩家可以为庄家座位或明手座位出牌
-      if (room.declarerControlledBy && seat === room.declarerControlledBy) {
-        if (room.currentPlayer === room.declarer || room.currentPlayer === room.dummy) {
-          effective = room.currentPlayer;
+        if (effective !== room.currentPlayer) {
+          socket.emit('appError', { msg: '还没到你出牌' }); return;
         }
-      }
-    } else {
-      // 经典模式：庄家代打明手
-      if (room.currentPlayer === room.dummy && seat === room.declarer) {
-        effective = room.dummy;
-      }
-    }
-    if (effective !== room.currentPlayer) {
-      socket.emit('appError', { msg: '还没到你出牌' }); return;
-    }
 
-    const hand = room.hands[effective];
-    if (!hand.some(c => c.suit === card.suit && c.rank === card.rank)) {
-      socket.emit('appError', { msg: '该牌不在你手中' }); return;
-    }
+        const hand = room.hands[effective];
+        if (!hand.some(c => c.suit === card.suit && c.rank === card.rank)) {
+          socket.emit('appError', { msg: '该牌不在你手中' }); return;
+        }
 
-    // 跟花检查
-    if (room.currentTrick.length > 0) {
-      const led = room.currentTrick[0].card.suit;
-      if (card.suit !== led && hand.some(c => c.suit === led)) {
-        socket.emit('appError', { msg: '必须跟出同花色' }); return;
-      }
-    }
+        // 跟花检查
+        if (room.currentTrick.length > 0) {
+          const led = room.currentTrick[0].card.suit;
+          if (card.suit !== led && hand.some(c => c.suit === led)) {
+            socket.emit('appError', { msg: '必须跟出同花色' }); return;
+          }
+        }
 
-    processPlay(room, effective, card);
+        processPlay(room, effective, card);
+      },
+    });
   });
 
   // ── 声称 ─────────────────────────────────────────────
@@ -1614,23 +1648,28 @@ io.on('connection', socket => {
     const roomId = sockRoom[socket.id];
     const seat   = sockSeat[socket.id];
     const room   = rooms[roomId];
-    if (!room || room.phase !== 'SCORING') return;
+    return routeClassicReady(room, { socketId: socket.id, seat }, {
+      standard: (classicRoom, request) => classicAdapter.readyNext(classicRoom, request),
+      legacy: () => {
+        if (!room || room.phase !== 'SCORING') return;
 
-    // 教学模式：房主点击下一副牌时，同时标记其所有控制座位
-    if (room.teachingMode && socket.id === room.ownerSocketId && room.ownerControlledSeats.length > 0) {
-      const newStatus = !room.readyStatus[room.ownerControlledSeats[0]];
-      for (const ts of room.ownerControlledSeats) room.readyStatus[ts] = newStatus;
-    } else {
-      room.readyStatus[seat] = !room.readyStatus[seat];
-    }
-    io.to(roomId).emit('nextDealUpdate', { readyStatus: room.readyStatus, playerNames: room.playerNames });
+        // 教学模式：房主点击下一副牌时，同时标记其所有控制座位
+        if (room.teachingMode && socket.id === room.ownerSocketId && room.ownerControlledSeats.length > 0) {
+          const newStatus = !room.readyStatus[room.ownerControlledSeats[0]];
+          for (const ts of room.ownerControlledSeats) room.readyStatus[ts] = newStatus;
+        } else {
+          room.readyStatus[seat] = !room.readyStatus[seat];
+        }
+        io.to(roomId).emit('nextDealUpdate', { readyStatus: room.readyStatus, playerNames: room.playerNames });
 
-    const allReady = SEATS.every(s => room.sockets[s] && room.readyStatus[s]);
-    if (allReady) {
-      room.dealNumber++;
-      SEATS.forEach(s => room.readyStatus[s] = false);
-      startGame(room);
-    }
+        const allReady = SEATS.every(s => room.sockets[s] && room.readyStatus[s]);
+        if (allReady) {
+          room.dealNumber++;
+          SEATS.forEach(s => room.readyStatus[s] = false);
+          startGame(room);
+        }
+      },
+    });
   });
 
   // ── 断线 ─────────────────────────────────────────────
@@ -1639,6 +1678,12 @@ io.on('connection', socket => {
     const seat   = sockSeat[socket.id];
     const room   = rooms[roomId];
     if (room && seat) {
+      routeClassicDisconnectReady(room, { socketId: socket.id, seat }, {
+        standard: (classicRoom, request) => (
+          classicAdapter.clearReadyForDisconnect(classicRoom, request)
+        ),
+        legacy: () => { room.readyStatus[seat] = false; },
+      });
       if (room.mode === 'complex') {
         if (room.sockets[seat] === socket.id) {
           const side = sideOf(seat);
@@ -1653,7 +1698,6 @@ io.on('connection', socket => {
       } else {
       room.sockets[seat]     = null;
       room.playerNames[seat] = null;
-      room.readyStatus[seat] = false;
       io.to(roomId).emit('playerDisconnected', { seat });
       }
       if (room.phase === 'LOBBY' && SEATS.every(s => !room.sockets[s])) {
@@ -4242,5 +4286,13 @@ if (require.main === module) {
 }
 
 module.exports = {
-  configureNewRoom, makeRoom, roomState, routeClassicStart, routeClassicBid,
+  configureNewRoom,
+  makeRoom,
+  roomState,
+  routeClassicStart,
+  routeClassicBid,
+  routeClassicPlay,
+  routeClassicReady,
+  routeClassicDisconnectReady,
+  resetSeatReadyForLifecycle,
 };

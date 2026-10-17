@@ -124,6 +124,7 @@ function emitBiddingEnded(io, room, event, logger) {
 
 function emitPassedOut(io, room, event, logger) {
   const state = projectClassicState(room);
+  const latestScore = state.boardScores.at(-1);
   forEachPlayer(room, (seat, socketId) => {
     const viewer = playerViewer(seat);
     const projected = classicEventFor(event, viewer);
@@ -133,14 +134,109 @@ function emitPassedOut(io, room, event, logger) {
       score: projected.payload.score,
       boardScores: cloneValue(view.boardScores),
       ddTable: cloneValue(view.ddTable),
+      hands: cloneValue(latestScore.initialHands),
     }, logger);
   });
+}
+
+function emitPerPlayer(io, room, name, payloadFactory, logger) {
+  forEachPlayer(room, (seat, socketId) => {
+    safeEmit(io, socketId, name, cloneValue(payloadFactory(seat)), logger);
+  });
+}
+
+function playUpdatePayload(state, viewer) {
+  const view = classicViewFor(state, viewer);
+  return {
+    currentPlayer: view.currentPlayer,
+    currentTrick: cloneValue(view.currentTrick),
+    completedCount: view.completedCount,
+    nsTricks: view.nsTricks,
+    ewTricks: view.ewTricks,
+    dummyRevealed: view.dummyRevealed,
+    dummy: view.dummy,
+    declarer: view.declarer,
+    declarerControlledBy: null,
+    teachingCurrentSeat: null,
+    teachingCurrentHand: null,
+  };
+}
+
+function emitPlayUpdate(io, room, logger) {
+  const state = projectClassicState(room);
+  emitPerPlayer(io, room, 'playUpdate', seat => (
+    playUpdatePayload(state, playerViewer(seat))
+  ), logger);
+}
+
+function emitDummyRevealed(io, room, event, logger) {
+  const state = projectClassicState(room);
+  emitPerPlayer(io, room, 'dummyRevealed', seat => {
+    const projected = classicEventFor(event, playerViewer(seat));
+    const view = classicViewFor(state, playerViewer(seat));
+    return {
+      dummy: projected.payload.dummy,
+      dummyHand: cloneValue(view.hands[projected.payload.dummy]),
+    };
+  }, logger);
+}
+
+function emitCardPlayed(io, room, event, logger) {
+  emitPerPlayer(io, room, 'cardPlayed', seat => {
+    const projected = classicEventFor(event, playerViewer(seat));
+    return cloneValue(projected.payload);
+  }, logger);
+}
+
+function emitTrickEnded(io, room, event, logger) {
+  emitPerPlayer(io, room, 'trickEnd', seat => {
+    const projected = classicEventFor(event, playerViewer(seat));
+    return cloneValue(projected.payload);
+  }, logger);
+}
+
+function emitPlayedGameEnd(io, room, event, logger) {
+  const state = projectClassicState(room);
+  const latestScore = state.boardScores.at(-1);
+  emitPerPlayer(io, room, 'gameEnd', seat => {
+    const projected = classicEventFor(event, playerViewer(seat));
+    const view = classicViewFor(state, playerViewer(seat));
+    return {
+      passedOut: false,
+      contract: cloneValue(projected.payload.contract),
+      declarer: projected.payload.declarer,
+      dummy: latestScore.dummy,
+      declarerTricks: latestScore.declarerTricks,
+      needed: latestScore.needed,
+      score: projected.payload.score,
+      made: latestScore.made,
+      diff: latestScore.diff,
+      vulnerability: latestScore.vulnerability,
+      boardScores: cloneValue(view.boardScores),
+      ddTable: cloneValue(latestScore.ddTable),
+      hands: cloneValue(latestScore.initialHands),
+    };
+  }, logger);
+}
+
+function emitReadyUpdated(io, room, event, logger) {
+  emitPerPlayer(io, room, 'nextDealUpdate', seat => {
+    const projected = classicEventFor(event, playerViewer(seat));
+    return {
+      readyStatus: cloneValue(projected.payload.readyStatus),
+      playerNames: cloneValue(room.playerNames),
+    };
+  }, logger);
 }
 
 function emitClassicEvents(io, room, events, logger = null) {
   const auctionFinished = events.some(event => (
     event?.name === 'classic.bidding-ended'
     || (event?.name === 'classic.finished' && event?.payload?.reason === 'passed-out')
+  ));
+  const hasPlayedCard = events.some(event => event?.name === 'classic.card-played');
+  const playFinished = events.some(event => (
+    event?.name === 'classic.finished' && event?.payload?.reason !== 'passed-out'
   ));
   for (const event of events) {
     if (event.name === 'classic.started') emitStarted(io, room, event, logger);
@@ -150,6 +246,16 @@ function emitClassicEvents(io, room, events, logger = null) {
       emitBiddingEnded(io, room, event, logger);
     } else if (event.name === 'classic.finished' && event.payload.reason === 'passed-out') {
       emitPassedOut(io, room, event, logger);
+    } else if (event.name === 'classic.dummy-revealed') {
+      emitDummyRevealed(io, room, event, logger);
+    } else if (event.name === 'classic.card-played') {
+      emitCardPlayed(io, room, event, logger);
+    } else if (event.name === 'classic.trick-ended') {
+      emitTrickEnded(io, room, event, logger);
+    } else if (event.name === 'classic.finished') {
+      emitPlayedGameEnd(io, room, event, logger);
+    } else if (event.name === 'classic.ready-updated') {
+      emitReadyUpdated(io, room, event, logger);
     } else if (event.name === 'classic.dd-table-ready' && room.phase === 'SCORING') {
       const projected = classicEventFor(event, { role: 'SPECTATOR', seat: null });
       safeEmit(io, room.id, 'ddTableReady', {
@@ -157,6 +263,7 @@ function emitClassicEvents(io, room, events, logger = null) {
       }, logger);
     }
   }
+  if (hasPlayedCard && !playFinished) emitPlayUpdate(io, room, logger);
 }
 
 function projectClassicState(room) {
@@ -460,7 +567,101 @@ function createClassicNodeAdapter({ io, dealFactory, calcDDTable, logger } = {})
     }
   }
 
-  return { initializeRoom, start, bid };
+  function play(room, request = {}) {
+    const socketId = request?.socketId;
+    const seat = authoritativeSeat(room, socketId, request?.seat);
+    try {
+      if (room.claimReq) return { ok: false, code: 'CLASSIC_WRONG_PHASE' };
+      const legacyCard = request?.card;
+      const card = { suit: legacyCard?.suit, rank: legacyCard?.rank };
+      const state = projectClassicState(room);
+      const command = {
+        name: 'classic.play',
+        payload: { expectedRevision: room.classicRevision, card },
+      };
+      const baseContext = {
+        actor: actorFor(room, socketId, seat), occupiedSeats: occupiedSeats(room),
+      };
+      const preflight = preflightClassicCommand(state, command, baseContext);
+      if (!preflight.ok) {
+        return mapClassicNodeFailure({
+          io, logger, room, socketId, method: 'play', seat, bid: null, failure: preflight,
+        });
+      }
+      const result = applyClassicCommand(state, command, { ...baseContext, deal: null });
+      if (!result.ok) {
+        return mapClassicNodeFailure({
+          io, logger, room, socketId, method: 'play', seat, bid: null, failure: result,
+        });
+      }
+      applyClassicState(room, result.state);
+      room.classicRevision += 1;
+      emitClassicEvents(io, room, result.events, logger);
+      return compactSuccess(room, result);
+    } catch (failure) {
+      return mapClassicNodeFailure({
+        io, logger, room, socketId, method: 'play', seat, bid: null, failure,
+      });
+    }
+  }
+
+  function runReadyCommand(room, request, method, disconnectOnly) {
+    const socketId = request?.socketId;
+    const seat = authoritativeSeat(room, socketId, request?.seat);
+    try {
+      const state = projectClassicState(room);
+      const command = {
+        name: 'classic.ready-next',
+        payload: { expectedRevision: room.classicRevision },
+      };
+      const baseContext = {
+        actor: actorFor(room, socketId, seat), occupiedSeats: occupiedSeats(room),
+      };
+      if (disconnectOnly && state.phase === 'SCORING'
+          && seat !== null && state.readyStatus[seat] === false) {
+        return { ok: true, phase: state.phase, revision: room.classicRevision };
+      }
+      const preflight = preflightClassicCommand(state, command, baseContext);
+      if (!preflight.ok) {
+        return mapClassicNodeFailure({
+          io, logger, room, socketId, method, seat, bid: null,
+          failure: preflight,
+        });
+      }
+      if (disconnectOnly && preflight.needsDeal) {
+        throw new ClassicInvariantError('disconnect readiness clear cannot start a deal');
+      }
+      const deal = !disconnectOnly && preflight.needsDeal
+        ? dealFactory({ dealNumber: preflight.nextDealNumber })
+        : null;
+      const result = applyClassicCommand(state, command, { ...baseContext, deal });
+      if (!result.ok) {
+        return mapClassicNodeFailure({
+          io, logger, room, socketId, method, seat, bid: null,
+          failure: result,
+        });
+      }
+      applyClassicState(room, result.state);
+      room.classicRevision += 1;
+      emitClassicEvents(io, room, result.events, logger);
+      launchEffects(room, result.effects);
+      return compactSuccess(room, result);
+    } catch (failure) {
+      return mapClassicNodeFailure({
+        io, logger, room, socketId, method, seat, bid: null, failure,
+      });
+    }
+  }
+
+  function readyNext(room, request = {}) {
+    return runReadyCommand(room, request, 'readyNext', false);
+  }
+
+  function clearReadyForDisconnect(room, request = {}) {
+    return runReadyCommand(room, request, 'clearReadyForDisconnect', true);
+  }
+
+  return { initializeRoom, start, bid, play, readyNext, clearReadyForDisconnect };
 }
 
 module.exports = {

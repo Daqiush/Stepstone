@@ -315,7 +315,9 @@ test('createClassicNodeAdapter rejects missing boundary dependencies', () => {
     logger: { error() {} },
   };
   const adapter = createClassicNodeAdapter(valid);
-  assert.deepEqual(Object.keys(adapter), ['initializeRoom', 'start', 'bid']);
+  assert.deepEqual(Object.keys(adapter), [
+    'initializeRoom', 'start', 'bid', 'play', 'readyNext', 'clearReadyForDisconnect',
+  ]);
   for (const key of Object.keys(valid)) {
     assert.throws(
       () => createClassicNodeAdapter({ ...valid, [key]: null }),
@@ -798,21 +800,395 @@ test('four opening passes emit only private-safe legacy gameEnd frames with no f
   assert.equal(h.fixture.named('gameEnd').length, 4);
   for (const emission of h.fixture.named('gameEnd')) {
     assert.deepEqual(Object.keys(emission.payload), [
-      'passedOut', 'score', 'boardScores', 'ddTable',
+      'passedOut', 'score', 'boardScores', 'ddTable', 'hands',
     ]);
     assert.equal(emission.payload.passedOut, true);
     assert.equal(emission.payload.score, 0);
     assert.equal(emission.payload.ddTable, null);
+    assert.deepEqual(emission.payload.hands, h.room.boardScores.at(-1).initialHands);
+    assert.notEqual(emission.payload.hands, h.room.boardScores.at(-1).initialHands);
     assert.equal(JSON.stringify(emission.payload).includes('initialHands'), false);
   }
 });
 
-test('server routing seam delegates only standard classic start and bid paths', () => {
+function makePlayingCoreState() {
+  let state = createClassicDealState(createClassicLobbyState(), {
+    hands: orderedDeal(), boardInfo: boardInfoFor(1),
+  });
+  for (const [seat, bid] of [
+    ['N', '1NT'], ['E', 'Pass'], ['S', 'Pass'], ['W', 'Pass'],
+  ]) {
+    state = applyClassicCommand(state, {
+      name: 'classic.bid',
+      payload: { expectedRevision: 0, bid, alert: false, explain: null },
+    }, {
+      actor: { role: seat === 'N' ? 'OWNER' : 'PLAYER', seat },
+      occupiedSeats: ['N', 'E', 'S', 'W'],
+      deal: null,
+    }).state;
+  }
+  return state;
+}
+
+function activePlayHarness() {
+  const h = adapterHarness();
+  applyClassicState(h.room, makePlayingCoreState());
+  h.room.claimReq = null;
+  h.fixture.clear();
+  return h;
+}
+
+function playAs(h, seat, card) {
+  return h.adapter.play(h.room, {
+    socketId: h.fixture.socketIds[seat], seat, card,
+  });
+}
+
+function assertPerSeatNames(h, names) {
+  for (const seat of ['N', 'E', 'S', 'W']) {
+    assert.deepEqual(
+      h.fixture.forTarget(h.fixture.socketIds[seat]).map(event => event.name),
+      names,
+      seat,
+    );
+  }
+}
+
+test('adapter play maps opening, ordinary, and non-final fourth-card events in exact private order', () => {
+  const h = activePlayHarness();
+
+  assert.deepEqual(playAs(h, 'E', { suit: 'H', rank: '2' }), {
+    ok: true, phase: 'PLAYING', revision: 1,
+  });
+  assertPerSeatNames(h, ['dummyRevealed', 'cardPlayed', 'playUpdate']);
+  for (const seat of ['N', 'E', 'S', 'W']) {
+    const frames = h.fixture.forTarget(h.fixture.socketIds[seat]);
+    assert.deepEqual(frames[0].payload, {
+      dummy: 'S', dummyHand: h.room.hands.S,
+    });
+    assert.notEqual(frames[0].payload.dummyHand, h.room.hands.S);
+    assert.deepEqual(frames[1].payload, {
+      seat: 'E', card: { suit: 'H', rank: '2' },
+      currentTrick: [{ seat: 'E', card: { suit: 'H', rank: '2' } }],
+    });
+    assert.equal(JSON.stringify(frames.slice(1)).includes('dummyHand'), false);
+    assert.equal(JSON.stringify(frames).includes('initialHands'), false);
+  }
+  const northReveal = h.fixture.forTarget(h.fixture.socketIds.N)[0].payload;
+  const eastReveal = h.fixture.forTarget(h.fixture.socketIds.E)[0].payload;
+  assert.notEqual(northReveal, eastReveal);
+  assert.notEqual(northReveal.dummyHand, eastReveal.dummyHand);
+
+  h.fixture.clear();
+  assert.deepEqual(playAs(h, 'N', { suit: 'D', rank: '2' }), {
+    ok: true, phase: 'PLAYING', revision: 2,
+  });
+  assertPerSeatNames(h, ['cardPlayed', 'playUpdate']);
+  assert.equal(JSON.stringify(h.fixture.emissions).includes('dummyHand'), false);
+
+  h.fixture.clear();
+  assert.deepEqual(playAs(h, 'W', { suit: 'C', rank: '2' }), {
+    ok: true, phase: 'PLAYING', revision: 3,
+  });
+  h.fixture.clear();
+  assert.deepEqual(playAs(h, 'N', { suit: 'S', rank: '2' }), {
+    ok: true, phase: 'PLAYING', revision: 4,
+  });
+  assertPerSeatNames(h, ['cardPlayed', 'trickEnd', 'playUpdate']);
+  for (const emission of h.fixture.named('trickEnd')) {
+    assert.deepEqual(Object.keys(emission.payload), [
+      'trick', 'winner', 'nsTricks', 'ewTricks',
+    ]);
+  }
+});
+
+test('adapter final play emits cardPlayed, trickEnd, gameEnd without playUpdate and exposes detached replay hands', () => {
+  const h = activePlayHarness();
+  const plays = [];
+  for (const rank of ['2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K', 'A']) {
+    plays.push(
+      ['E', { suit: 'H', rank }],
+      ['N', { suit: 'D', rank }],
+      ['W', { suit: 'C', rank }],
+      ['N', { suit: 'S', rank }],
+    );
+  }
+  for (const [seat, card] of plays.slice(0, -1)) {
+    const result = playAs(h, seat, card);
+    assert.equal(result.ok, true);
+  }
+  h.fixture.clear();
+
+  assert.deepEqual(playAs(h, 'N', { suit: 'S', rank: 'A' }), {
+    ok: true, phase: 'SCORING', revision: 52,
+  });
+  assertPerSeatNames(h, ['cardPlayed', 'trickEnd', 'gameEnd']);
+  assert.equal(h.fixture.named('playUpdate').length, 0);
+  const archive = h.room.boardScores.at(-1);
+  for (const emission of h.fixture.named('gameEnd')) {
+    assert.deepEqual(Object.keys(emission.payload), [
+      'passedOut', 'contract', 'declarer', 'dummy', 'declarerTricks', 'needed',
+      'score', 'made', 'diff', 'vulnerability', 'boardScores', 'ddTable', 'hands',
+    ]);
+    assert.equal(emission.payload.passedOut, false);
+    assert.deepEqual(emission.payload.hands, archive.initialHands);
+    assert.notEqual(emission.payload.hands, archive.initialHands);
+    assert.notEqual(emission.payload.boardScores, h.room.boardScores);
+    assert.equal(JSON.stringify(emission.payload).includes('initialHands'), false);
+  }
+  const north = h.fixture.forTarget(h.fixture.socketIds.N).at(-1).payload;
+  const east = h.fixture.forTarget(h.fixture.socketIds.E).at(-1).payload;
+  assert.notEqual(north, east);
+  assert.notEqual(north.hands, east.hands);
+});
+
+test('adapter play uses the authoritative socket seat and only declarer may act for dummy', () => {
+  const h = activePlayHarness();
+  assert.deepEqual(h.adapter.play(h.room, {
+    socketId: h.fixture.socketIds.E,
+    seat: 'N',
+    card: { suit: 'H', rank: '2' },
+  }), { ok: true, phase: 'PLAYING', revision: 1 });
+  assert.equal(h.room.currentTrick[0].seat, 'E');
+
+  h.fixture.clear();
+  const before = JSON.stringify(projectClassicState(h.room));
+  assert.deepEqual(playAs(h, 'S', { suit: 'D', rank: '2' }), {
+    ok: false, code: 'CLASSIC_NOT_YOUR_TURN',
+  });
+  assert.deepEqual(h.fixture.named('appError').map(event => event.payload.msg), ['还没到你出牌']);
+  assert.equal(JSON.stringify(projectClassicState(h.room)), before);
+  assert.equal(h.room.classicRevision, 1);
+
+  h.fixture.clear();
+  assert.deepEqual(playAs(h, 'N', { suit: 'D', rank: '2' }), {
+    ok: true, phase: 'PLAYING', revision: 2,
+  });
+  assert.equal(h.room.currentTrick[1].seat, 'S');
+});
+
+test('adapter play maps not-held and follow-suit failures atomically to legacy Chinese errors', () => {
+  const notHeld = activePlayHarness();
+  const beforeNotHeld = JSON.stringify(notHeld.room);
+  assert.deepEqual(playAs(notHeld, 'E', { suit: 'S', rank: '2' }), {
+    ok: false, code: 'CLASSIC_CARD_NOT_HELD',
+  });
+  assert.deepEqual(notHeld.fixture.named('appError').map(event => event.payload.msg), ['该牌不在你手中']);
+  assert.equal(JSON.stringify(notHeld.room), beforeNotHeld);
+
+  const hands = orderedDeal();
+  hands.E = hands.E.filter(card => !(card.suit === 'H' && card.rank === '3'));
+  hands.E.push({ suit: 'D', rank: '3' });
+  hands.S = hands.S.filter(card => !(card.suit === 'D' && card.rank === '3'));
+  hands.S.push({ suit: 'H', rank: '3' });
+  const follow = adapterHarness();
+  let state = createClassicDealState(createClassicLobbyState(), {
+    hands, boardInfo: boardInfoFor(1),
+  });
+  for (const [seat, bid] of [
+    ['N', '1NT'], ['E', 'Pass'], ['S', 'Pass'], ['W', 'Pass'],
+  ]) {
+    state = applyClassicCommand(state, {
+      name: 'classic.bid',
+      payload: { expectedRevision: 0, bid, alert: false, explain: null },
+    }, {
+      actor: { role: seat === 'N' ? 'OWNER' : 'PLAYER', seat },
+      occupiedSeats: ['N', 'E', 'S', 'W'], deal: null,
+    }).state;
+  }
+  applyClassicState(follow.room, state);
+  follow.room.claimReq = null;
+  playAs(follow, 'E', { suit: 'H', rank: '2' });
+  follow.fixture.clear();
+  const beforeFollow = JSON.stringify(follow.room);
+  assert.deepEqual(playAs(follow, 'N', { suit: 'D', rank: '2' }), {
+    ok: false, code: 'CLASSIC_MUST_FOLLOW_SUIT',
+  });
+  assert.deepEqual(follow.fixture.named('appError').map(event => event.payload.msg), ['必须跟出同花色']);
+  assert.equal(JSON.stringify(follow.room), beforeFollow);
+});
+
+test('adapter play keeps claim-pending and malformed requests silent or contained without mutation', () => {
+  const h = activePlayHarness();
+  h.room.claimReq = { claimer: 'N' };
+  const before = JSON.stringify(h.room);
+  assert.deepEqual(playAs(h, 'E', { suit: 'H', rank: '2' }), {
+    ok: false, code: 'CLASSIC_WRONG_PHASE',
+  });
+  assert.equal(JSON.stringify(h.room), before);
+  assert.deepEqual(h.fixture.emissions, []);
+
+  h.room.claimReq = null;
+  assert.doesNotThrow(() => {
+    assert.deepEqual(playAs(h, 'E', null), {
+      ok: false, code: 'CLASSIC_INPUT_INVALID',
+    });
+  });
+  assert.equal(h.room.classicRevision, 0);
+  assert.deepEqual(h.fixture.named('appError').map(event => event.payload.msg), ['请求格式无效']);
+});
+
+function makePassedOutCoreState() {
+  let state = createClassicDealState(createClassicLobbyState(), {
+    hands: orderedDeal(), boardInfo: boardInfoFor(1),
+  });
+  for (const seat of ['N', 'E', 'S', 'W']) {
+    state = applyClassicCommand(state, {
+      name: 'classic.bid',
+      payload: { expectedRevision: 0, bid: 'Pass', alert: false, explain: null },
+    }, {
+      actor: { role: seat === 'N' ? 'OWNER' : 'PLAYER', seat },
+      occupiedSeats: ['N', 'E', 'S', 'W'], deal: null,
+    }).state;
+  }
+  return state;
+}
+
+function scoringHarness() {
+  const h = adapterHarness();
+  applyClassicState(h.room, makePassedOutCoreState());
+  h.room.claimReq = null;
+  h.fixture.clear();
+  return h;
+}
+
+function readyAs(h, seat) {
+  return h.adapter.readyNext(h.room, {
+    socketId: h.fixture.socketIds[seat], seat,
+  });
+}
+
+test('adapter readyNext toggles and untoggles one seat without consuming a deal', () => {
+  const h = scoringHarness();
+  assert.deepEqual(readyAs(h, 'N'), {
+    ok: true, phase: 'SCORING', revision: 1,
+  });
+  assert.deepEqual(h.dealCalls, []);
+  assert.deepEqual(h.room.readyStatus, { N: true, E: false, S: false, W: false });
+  assertPerSeatNames(h, ['nextDealUpdate']);
+  for (const emission of h.fixture.named('nextDealUpdate')) {
+    assert.deepEqual(Object.keys(emission.payload), ['readyStatus', 'playerNames']);
+    assert.deepEqual(emission.payload.readyStatus, h.room.readyStatus);
+    assert.deepEqual(emission.payload.playerNames, h.room.playerNames);
+    assert.notEqual(emission.payload.readyStatus, h.room.readyStatus);
+    assert.notEqual(emission.payload.playerNames, h.room.playerNames);
+  }
+  const north = h.fixture.forTarget(h.fixture.socketIds.N)[0].payload;
+  const east = h.fixture.forTarget(h.fixture.socketIds.E)[0].payload;
+  assert.notEqual(north, east);
+  north.readyStatus.N = false;
+  assert.equal(east.readyStatus.N, true);
+  assert.equal(h.room.readyStatus.N, true);
+
+  h.fixture.clear();
+  assert.deepEqual(readyAs(h, 'N'), {
+    ok: true, phase: 'SCORING', revision: 2,
+  });
+  assert.deepEqual(h.dealCalls, []);
+  assert.deepEqual(h.room.readyStatus, { N: false, E: false, S: false, W: false });
+  assertPerSeatNames(h, ['nextDealUpdate']);
+});
+
+test('adapter fourth ready consumes exactly deal N+1 and emits readiness before new deal frames', async () => {
+  const h = scoringHarness();
+  h.room.readyStatus = { N: true, E: true, S: true, W: false };
+  h.room.classicRevision = 7;
+
+  assert.deepEqual(readyAs(h, 'W'), {
+    ok: true, phase: 'BIDDING', revision: 8,
+  });
+  assert.deepEqual(h.dealCalls, [{ dealNumber: 2 }]);
+  assert.equal(h.room.dealNumber, 2);
+  assert.deepEqual(h.room.readyStatus, { N: false, E: false, S: false, W: false });
+  assertPerSeatNames(h, ['nextDealUpdate', 'gameStart', 'biddingUpdate']);
+  for (const emission of h.fixture.named('nextDealUpdate')) {
+    assert.deepEqual(emission.payload.readyStatus, { N: true, E: true, S: true, W: true });
+  }
+  assert.equal(h.ddsCalls.length, 0);
+  await flushAsyncEffects();
+  assert.equal(h.ddsCalls.length, 1);
+  assert.equal(h.room.ddsStatus, 'READY');
+  assert.equal(h.room.classicRevision, 8);
+
+  h.fixture.clear();
+  assert.deepEqual(readyAs(h, 'W'), { ok: false, code: 'CLASSIC_WRONG_PHASE' });
+  assert.deepEqual(h.dealCalls, [{ dealNumber: 2 }]);
+  assert.equal(h.room.classicRevision, 8);
+  assert.deepEqual(h.fixture.emissions, []);
+});
+
+test('adapter readyNext preflight failures consume no deal and never mutate canonical state', () => {
+  const wrongPhase = activePlayHarness();
+  const beforePhase = JSON.stringify(wrongPhase.room);
+  assert.deepEqual(wrongPhase.adapter.readyNext(wrongPhase.room, {
+    socketId: wrongPhase.fixture.socketIds.E, seat: 'E',
+  }), { ok: false, code: 'CLASSIC_WRONG_PHASE' });
+  assert.deepEqual(wrongPhase.dealCalls, []);
+  assert.equal(JSON.stringify(wrongPhase.room), beforePhase);
+  assert.deepEqual(wrongPhase.fixture.emissions, []);
+
+  const forbidden = scoringHarness();
+  const beforeForbidden = JSON.stringify(forbidden.room);
+  assert.deepEqual(forbidden.adapter.readyNext(forbidden.room, {
+    socketId: 'spectator', seat: 'N',
+  }), { ok: false, code: 'CLASSIC_FORBIDDEN' });
+  assert.deepEqual(forbidden.dealCalls, []);
+  assert.equal(JSON.stringify(forbidden.room), beforeForbidden);
+  assert.deepEqual(forbidden.fixture.emissions, []);
+});
+
+test('adapter readyNext contains dealFactory failure before any state or revision change', () => {
+  const h = adapterHarness({
+    dealFactory: () => { throw new Error('trusted deal source failed'); },
+  });
+  applyClassicState(h.room, makePassedOutCoreState());
+  h.room.readyStatus = { N: true, E: true, S: true, W: false };
+  h.room.claimReq = null;
+  h.fixture.clear();
+  const before = JSON.stringify(h.room);
+
+  assert.doesNotThrow(() => {
+    assert.deepEqual(readyAs(h, 'W'), { ok: false, code: 'CLASSIC_SERVER_ERROR' });
+  });
+  assert.equal(JSON.stringify(h.room), before);
+  assert.equal(h.room.classicRevision, 0);
+  assert.deepEqual(h.fixture.named('appError').map(event => event.payload.msg), [
+    '服务器暂时无法处理，请稍后重试',
+  ]);
+  assert.equal(h.logs.some(log => log.metadata.errorMessage === 'trusted deal source failed'), true);
+});
+
+test('adapter clearReadyForDisconnect canonically clears only a true scoring readiness', () => {
+  const ready = scoringHarness();
+  ready.room.readyStatus.N = true;
+  assert.deepEqual(ready.adapter.clearReadyForDisconnect(ready.room, {
+    socketId: ready.fixture.socketIds.N, seat: 'N',
+  }), { ok: true, phase: 'SCORING', revision: 1 });
+  assert.equal(ready.room.readyStatus.N, false);
+  assert.deepEqual(ready.dealCalls, []);
+  assertPerSeatNames(ready, ['nextDealUpdate']);
+
+  const idle = scoringHarness();
+  const before = JSON.stringify(idle.room);
+  assert.deepEqual(idle.adapter.clearReadyForDisconnect(idle.room, {
+    socketId: idle.fixture.socketIds.N, seat: 'N',
+  }), { ok: true, phase: 'SCORING', revision: 0 });
+  assert.equal(JSON.stringify(idle.room), before);
+  assert.deepEqual(idle.dealCalls, []);
+  assert.deepEqual(idle.fixture.emissions, []);
+});
+
+test('server routing seams delegate only standard classic start, bid, play, and readiness paths', () => {
   const serverPath = require.resolve('../server.js');
   delete require.cache[serverPath];
   const serverApi = require(serverPath);
   try {
-    for (const route of [serverApi.routeClassicStart, serverApi.routeClassicBid]) {
+    for (const route of [
+      serverApi.routeClassicStart,
+      serverApi.routeClassicBid,
+      serverApi.routeClassicPlay,
+      serverApi.routeClassicReady,
+    ]) {
       const variants = [
         [{ mode: 'classic', teachingMode: false }, 'standard'],
         [{ mode: 'classic', teachingMode: true }, 'legacy'],
@@ -829,6 +1205,62 @@ test('server routing seam delegates only standard classic start and bid paths', 
         assert.deepEqual(calls, [expected]);
         assert.equal(result, `${expected}-result`);
       }
+    }
+  } finally {
+    delete require.cache[serverPath];
+  }
+});
+
+test('server lifecycle seams preserve canonical readiness ownership and legacy resets', () => {
+  const serverPath = require.resolve('../server.js');
+  delete require.cache[serverPath];
+  const serverApi = require(serverPath);
+  try {
+    const standardReady = {
+      mode: 'classic', teachingMode: false, phase: 'SCORING',
+      readyStatus: { N: true, E: false, S: false, W: false },
+    };
+    const calls = [];
+    assert.equal(serverApi.routeClassicDisconnectReady(
+      standardReady,
+      { socketId: 'n', seat: 'N' },
+      {
+        standard: () => { calls.push('standard'); return 'cleared'; },
+        legacy: () => { calls.push('legacy'); return 'legacy'; },
+      },
+    ), 'cleared');
+    assert.deepEqual(calls, ['standard']);
+
+    calls.length = 0;
+    standardReady.readyStatus.N = false;
+    assert.equal(serverApi.routeClassicDisconnectReady(
+      standardReady,
+      { socketId: 'n', seat: 'N' },
+      {
+        standard: () => { calls.push('standard'); },
+        legacy: () => { calls.push('legacy'); },
+      },
+    ), undefined);
+    assert.deepEqual(calls, []);
+
+    standardReady.readyStatus.N = true;
+    serverApi.resetSeatReadyForLifecycle(standardReady, 'N');
+    assert.equal(standardReady.readyStatus.N, true);
+
+    for (const room of [
+      { mode: 'classic', teachingMode: true, readyStatus: { N: true } },
+      { mode: 'ult', teachingMode: false, readyStatus: { N: true } },
+      { mode: 'problem', teachingMode: false, readyStatus: { N: true } },
+      { mode: 'complex', teachingMode: false, readyStatus: { N: true } },
+    ]) {
+      const legacyCalls = [];
+      serverApi.routeClassicDisconnectReady(room, { socketId: 'n', seat: 'N' }, {
+        standard: () => legacyCalls.push('standard'),
+        legacy: () => legacyCalls.push('legacy'),
+      });
+      assert.deepEqual(legacyCalls, ['legacy']);
+      serverApi.resetSeatReadyForLifecycle(room, 'N');
+      assert.equal(room.readyStatus.N, false);
     }
   } finally {
     delete require.cache[serverPath];
