@@ -5,7 +5,10 @@ const { Server } = require('socket.io');
 const path    = require('path');
 const fs      = require('fs');
 const complexRules = require('./complex-bridge');
-const { createClassicNodeAdapter } = require('./classic/node-adapter.js');
+const {
+  createClassicNodeAdapter,
+  sendClassicReconnectState,
+} = require('./classic/node-adapter.js');
 
 let calcDDTable = null;
 let solveBoard  = null;
@@ -573,6 +576,10 @@ function sendReconnectState(room, seat, sock) {
   // 大招模式：独立重连流程
   if (room.mode === 'ult') {
     sendUltReconnectState(room, seat, sock);
+    return;
+  }
+  if (room.mode === 'classic' && !room.teachingMode) {
+    sendClassicReconnectState(room, seat, sock);
     return;
   }
 
@@ -4406,15 +4413,39 @@ io.on('connection', (socket) => {
 // NOTE: 实际 ownerStartGame 的 problem 路由在主 io.on('connection') 里通过修改 makeRoom 完成，
 // 见下方 PATCH 注释。
 
+function startServer(port = PORT) {
+  if (server.listening) return Promise.resolve(server.address().port);
+  return new Promise((resolve, reject) => {
+    const onError = error => {
+      server.off('listening', onListening);
+      reject(error);
+    };
+    const onListening = () => {
+      server.off('error', onError);
+      resolve(server.address().port);
+    };
+    server.once('error', onError);
+    server.once('listening', onListening);
+    server.listen(port);
+  });
+}
+
 if (require.main === module) {
-  server.listen(PORT, () => {
+  startServer(PORT).then(actualPort => {
     console.log(`\n🃏  Stepstone 桥牌服务器已启动`);
-    console.log(`    本地访问: http://localhost:${PORT}`);
-    console.log(`    使用路由侠等工具映射端口 ${PORT} 即可联机\n`);
+    console.log(`    本地访问: http://localhost:${actualPort}`);
+    console.log(`    使用路由侠等工具映射端口 ${actualPort} 即可联机\n`);
+  }).catch(error => {
+    console.error(error);
+    process.exitCode = 1;
   });
 }
 
 module.exports = {
+  app,
+  server,
+  io,
+  startServer,
   configureNewRoom,
   makeRoom,
   roomState,

@@ -23,6 +23,7 @@ const {
   emitClassicEvents,
   mapClassicNodeFailure,
   projectClassicState,
+  sendClassicReconnectState,
 } = require('../classic/node-adapter.js');
 
 function deepFreeze(value) {
@@ -1754,6 +1755,141 @@ test('last-trick request and vote metadata leave canonical classic JSON byte-ide
   h.room.viewReq = null;
   assert.equal(JSON.stringify(projectClassicState(h.room)), before);
   assert.equal(h.room.classicRevision, 0);
+});
+
+function reconnectFrames(room, seat) {
+  const frames = [];
+  sendClassicReconnectState(room, seat, {
+    emit(name, payload) { frames.push({ name, payload }); },
+  });
+  return frames;
+}
+
+function assertNoReconnectArchiveLeak(frames) {
+  const json = JSON.stringify(frames);
+  assert.equal(json.includes('initialHands'), false);
+  assert.equal(json.includes('classicClaimedPartialTricks'), false);
+}
+
+function annotatedPlayingHarness() {
+  const h = activeBidHarness();
+  bidAs(h, 'N', '1NT', true, 'balanced');
+  assert.equal(h.adapter.appendBidQuestion(h.room, {
+    socketId: h.fixture.socketIds.E, seat: 'E', bidIndex: 0, question: 'forcing?',
+  }).ok, true);
+  assert.equal(h.adapter.answerBidQuestion(h.room, {
+    socketId: h.fixture.socketIds.N, seat: 'N', bidIndex: 0, qaIdx: 0, answer: 'no',
+  }).ok, true);
+  for (const seat of ['E', 'S', 'W']) assert.equal(bidAs(h, seat, 'Pass').ok, true);
+  h.room.claimReq = null;
+  h.room.viewReq = null;
+  h.fixture.clear();
+  return h;
+}
+
+test('classic reconnect maps BIDDING from canonical per-seat views in legacy order', () => {
+  const h = activeBidHarness();
+  bidAs(h, 'N', '1H', true, 'five hearts');
+  assert.equal(h.adapter.appendBidQuestion(h.room, {
+    socketId: h.fixture.socketIds.E, seat: 'E', bidIndex: 0, question: 'forcing?',
+  }).ok, true);
+  assert.equal(h.adapter.answerBidQuestion(h.room, {
+    socketId: h.fixture.socketIds.N, seat: 'N', bidIndex: 0, qaIdx: 0, answer: 'yes',
+  }).ok, true);
+
+  const north = reconnectFrames(h.room, 'N');
+  const east = reconnectFrames(h.room, 'E');
+  const south = reconnectFrames(h.room, 'S');
+  for (const [seat, frames] of [['N', north], ['E', east], ['S', south]]) {
+    assert.deepEqual(frames.map(frame => frame.name), ['gameStart', 'biddingUpdate']);
+    assert.deepEqual(frames[0].payload.hand, h.room.hands[seat]);
+    assert.notEqual(frames[0].payload.hand, h.room.hands[seat]);
+    assert.equal(frames[0].payload.seat, seat);
+    assert.deepEqual(frames[0].payload.playerNames, h.room.playerNames);
+    assert.equal(Object.hasOwn(frames[0].payload, 'hands'), false);
+    assertNoReconnectArchiveLeak(frames);
+  }
+  assert.deepEqual(north[1].payload.history[0], {
+    seat: 'N', bid: '1H', alert: true, explain: 'five hearts',
+    qa: [{ asker: 'E', question: 'forcing?', answer: 'yes', answerer: 'N' }],
+  });
+  assert.deepEqual(east[1].payload.history[0], north[1].payload.history[0]);
+  assert.deepEqual(south[1].payload.history[0], { seat: 'N', bid: '1H' });
+});
+
+test('classic reconnect restores PLAYING claim and last-trick metadata without partner hand leaks', () => {
+  const h = activePlayHarness();
+  assert.equal(playAs(h, 'E', { suit: 'H', rank: '2' }).ok, true);
+  h.room.claimReq = {
+    claimer: 'N', tricksToWin: 7, reason: 'remaining winners',
+    voters: ['E', 'W'], votes: { E: true },
+  };
+
+  for (const seat of ['N', 'E', 'S']) {
+    const frames = reconnectFrames(h.room, seat);
+    assert.deepEqual(frames.map(frame => frame.name), [
+      'gameStart', 'biddingEnd', 'dummyRevealed', 'playUpdate',
+      'claimRequest', 'claimVoteUpdate',
+    ]);
+    assert.deepEqual(frames[0].payload.hand, h.room.hands[seat]);
+    assert.deepEqual(frames[2].payload.dummyHand, h.room.hands.S);
+    assert.equal(Object.hasOwn(frames[3].payload, 'hands'), false);
+    assert.deepEqual(frames[4].payload.allHands, seat === 'E' ? h.room.hands : {});
+    if (seat === 'E') assert.notEqual(frames[4].payload.allHands, h.room.hands);
+    assert.deepEqual(frames[5].payload, {
+      votes: { E: true }, voters: ['E', 'W'],
+    });
+    assertNoReconnectArchiveLeak(frames);
+  }
+
+  h.room.claimReq = null;
+  h.room.viewReq = { requester: 'N', opponents: ['E', 'W'], votes: { E: true } };
+  for (const seat of ['N', 'E', 'S']) {
+    const viewFrames = reconnectFrames(h.room, seat);
+    assert.deepEqual(viewFrames.map(frame => frame.name), [
+      'gameStart', 'biddingEnd', 'dummyRevealed', 'playUpdate',
+      'viewLastTrickRequest', 'viewLastTrickVoteUpdate',
+    ]);
+    assert.deepEqual(viewFrames.at(-2).payload, {
+      requester: 'N', requesterName: 'North',
+    });
+    assert.deepEqual(viewFrames.at(-1).payload, { votes: { E: true } });
+    assertNoReconnectArchiveLeak(viewFrames);
+  }
+});
+
+test('classic reconnect restores SCORING without score hands or initialHands', () => {
+  const h = annotatedPlayingHarness();
+  assert.equal(playAs(h, 'E', { suit: 'H', rank: '2' }).ok, true);
+  h.room.claimReq = {
+    claimer: 'N', tricksToWin: 7, reason: 'rest', voters: ['E', 'W'], votes: {},
+  };
+  assert.equal(h.adapter.settleClaim(h.room, {
+    socketId: h.fixture.socketIds.N, claimer: 'N', tricksToWin: 7, reason: 'rest',
+  }).ok, true);
+
+  const scoreFrames = {};
+  for (const seat of ['N', 'E', 'S']) {
+    const frames = reconnectFrames(h.room, seat);
+    scoreFrames[seat] = frames;
+    assert.deepEqual(frames.map(frame => frame.name), [
+      'gameStart', 'biddingEnd', 'dummyRevealed', 'gameEnd',
+    ]);
+    assert.deepEqual(frames[0].payload.hand, h.room.hands[seat]);
+    assert.equal(frames[3].payload.passedOut, false);
+    assert.equal(Object.hasOwn(frames[3].payload, 'hands'), false);
+    assert.equal(Object.hasOwn(frames[3].payload.boardScores[0], 'initialHands'), false);
+    assertNoReconnectArchiveLeak(frames);
+  }
+  const northAuction = scoreFrames.N[3].payload.boardScores[0].biddingHistory[0];
+  const eastAuction = scoreFrames.E[3].payload.boardScores[0].biddingHistory[0];
+  const southAuction = scoreFrames.S[3].payload.boardScores[0].biddingHistory[0];
+  assert.deepEqual(northAuction, {
+    seat: 'N', bid: '1NT', alert: true, explain: 'balanced',
+    qa: [{ asker: 'E', question: 'forcing?', answer: 'no', answerer: 'N' }],
+  });
+  assert.deepEqual(eastAuction, northAuction);
+  assert.deepEqual(southAuction, { seat: 'N', bid: '1NT' });
 });
 
 test('deferred server routing uses compatibility only for standard classic rooms', () => {

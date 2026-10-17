@@ -251,6 +251,113 @@ function emitReadyUpdated(io, room, event, logger) {
   }, logger);
 }
 
+function sendClassicReconnectState(room, seat, socket) {
+  if (!socket || typeof socket.emit !== 'function') {
+    throw new TypeError('invalid classic reconnect socket');
+  }
+  const state = projectClassicState(room);
+  const viewer = playerViewer(seat);
+  const view = classicViewFor(state, viewer);
+
+  socket.emit('gameStart', {
+    hand: cloneValue(view.hands[seat]),
+    boardInfo: cloneValue(view.boardInfo),
+    seat,
+    playerNames: cloneValue(room.playerNames),
+    boardScores: cloneValue(view.boardScores),
+  });
+
+  if (view.phase === 'BIDDING') {
+    socket.emit('biddingUpdate', {
+      history: legacyAuction(view.biddingHistory),
+      currentBidder: view.currentBidder,
+      currentContract: cloneValue(view.currentContract),
+      consecutivePasses: view.consecutivePasses,
+    });
+    return;
+  }
+
+  socket.emit('biddingEnd', {
+    contract: cloneValue(view.currentContract),
+    declarer: view.declarer,
+    dummy: view.dummy,
+    leader: view.leader,
+    biddingHistory: legacyAuction(view.biddingHistory),
+  });
+
+  if (view.dummyRevealed) {
+    socket.emit('dummyRevealed', {
+      dummy: view.dummy,
+      dummyHand: cloneValue(view.hands[view.dummy]),
+    });
+  }
+
+  if (view.phase === 'PLAYING') {
+    socket.emit('playUpdate', playUpdatePayload(state, viewer));
+
+    if (room.claimReq) {
+      const req = room.claimReq;
+      const claimerSide = sideOf(req.claimer);
+      const adjudicatesForOpponent = Array.isArray(req.voters)
+        && req.voters.includes(seat)
+        && sideOf(seat) !== claimerSide;
+      socket.emit('claimRequest', {
+        claimer: req.claimer,
+        claimerName: room.playerNames[req.claimer],
+        tricksToWin: req.tricksToWin,
+        reason: req.reason,
+        allHands: adjudicatesForOpponent ? cloneValue(state.hands) : {},
+        remaining: 13 - view.completedCount,
+        claimerSide,
+      });
+      if (req.votes && Object.keys(req.votes).length > 0) {
+        socket.emit('claimVoteUpdate', {
+          votes: cloneValue(req.votes),
+          voters: cloneValue(req.voters),
+        });
+      }
+    }
+
+    if (room.viewReq && SEATS.includes(room.viewReq.requester)) {
+      const req = room.viewReq;
+      socket.emit('viewLastTrickRequest', {
+        requester: req.requester,
+        requesterName: room.playerNames[req.requester],
+      });
+      if (req.votes && Object.keys(req.votes).length > 0) {
+        socket.emit('viewLastTrickVoteUpdate', { votes: cloneValue(req.votes) });
+      }
+    }
+    return;
+  }
+
+  if (view.phase !== 'SCORING') return;
+  const latestScore = view.boardScores.at(-1);
+  if (!latestScore) return;
+  const payload = latestScore.passedOut
+    ? {
+        passedOut: true,
+        score: 0,
+        boardScores: cloneValue(view.boardScores),
+        ddTable: cloneValue(latestScore.ddTable),
+      }
+    : {
+        passedOut: false,
+        contract: cloneValue(latestScore.contract),
+        declarer: latestScore.declarer,
+        dummy: latestScore.dummy,
+        declarerTricks: latestScore.declarerTricks,
+        needed: latestScore.needed,
+        score: latestScore.score,
+        made: latestScore.made,
+        diff: latestScore.diff,
+        vulnerability: latestScore.vulnerability,
+        boardScores: cloneValue(view.boardScores),
+        ddTable: cloneValue(latestScore.ddTable),
+      };
+  socket.emit('gameEnd', payload);
+}
+
 function emitClassicEvents(io, room, events, logger = null) {
   const auctionFinished = events.some(event => (
     event?.name === 'classic.bidding-ended'
@@ -883,4 +990,5 @@ module.exports = {
   emitClassicEvents,
   mapClassicNodeFailure,
   projectClassicState,
+  sendClassicReconnectState,
 };
