@@ -18,7 +18,11 @@ export async function createRoomWorkerRuntime({ persistenceDirectory = null, var
         local: true,
         persist: true,
         persistTo: persistenceDirectory,
-        vars: { ...vars, ROOM_FOUNDATION_TEST: 'true' },
+        vars: {
+          CLASSIC_TEST_DDS_PAUSE: 'idle',
+          ...vars,
+          ROOM_FOUNDATION_TEST: 'true',
+        },
         logLevel: 'none',
         experimental: { disableDevRegistry: true, disableExperimentalWarning: true },
       });
@@ -34,7 +38,11 @@ export async function createRoomWorkerRuntime({ persistenceDirectory = null, var
       root: ROOT,
       workers: [{
         configPath: './workers/wrangler.jsonc',
-        vars: { ...vars, ROOM_FOUNDATION_TEST: 'true' },
+        vars: {
+          CLASSIC_TEST_DDS_PAUSE: 'idle',
+          ...vars,
+          ROOM_FOUNDATION_TEST: 'true',
+        },
       }],
     });
     const listening = await server.listen();

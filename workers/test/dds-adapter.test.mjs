@@ -71,3 +71,36 @@ test('maps out-of-range Wasm table values and solve scores to DDS_FAILURE', asyn
   const solveClient = createWasmDdsClient({ loadModule: async () => ({ solveBoardPbn: () => ({ score: 14, cards: [] }) }) });
   await assert.rejects(() => solveClient.solveBoard({ hands, trump: 'NT', trickLeader: 'S', trickPlayed: [] }), (error) => error instanceof DdsRuntimeError && error.code === 'DDS_FAILURE');
 });
+
+test('shares one in-flight module load and retries after an initialization rejection', async () => {
+  let loads = 0;
+  let releaseFirst;
+  const firstLoad = new Promise((resolve, reject) => { releaseFirst = { resolve, reject }; });
+  const client = createWasmDdsClient({
+    loadModule: async () => {
+      loads += 1;
+      if (loads === 1) return firstLoad;
+      return {
+        calcDDTablePbn: () => ({
+          N: { S: 4, H: 3, D: 2, C: 1, NT: 5 },
+          E: { S: 8, H: 7, D: 6, C: 5, NT: 9 },
+          S: { S: 12, H: 11, D: 10, C: 9, NT: 13 },
+          W: { S: 1, H: 0, D: 13, C: 12, NT: 2 },
+        }),
+      };
+    },
+  });
+
+  const first = client.calcDDTable(hands);
+  const overlapping = client.calcDDTable(hands);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(loads, 1);
+  releaseFirst.reject(new Error('one-time initialization failure'));
+  await assert.rejects(first, DdsRuntimeError);
+  await assert.rejects(overlapping, DdsRuntimeError);
+
+  assert.deepEqual(await client.calcDDTable(hands), [
+    [4, 8, 12, 1], [3, 7, 11, 0], [2, 6, 10, 13], [1, 5, 9, 12], [5, 9, 13, 2],
+  ]);
+  assert.equal(loads, 2);
+});

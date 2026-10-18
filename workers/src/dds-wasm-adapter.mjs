@@ -24,7 +24,17 @@ function dealToPbn(deal) {
 export function createWasmDdsClient({ loadModule }) {
   if (typeof loadModule !== 'function') throw new TypeError('loadModule must be a function');
   let modulePromise;
-  const load = () => (modulePromise ??= Promise.resolve().then(loadModule));
+  const load = () => {
+    if (!modulePromise) {
+      const pending = Promise.resolve().then(loadModule);
+      const guarded = pending.catch((error) => {
+        if (modulePromise === guarded) modulePromise = undefined;
+        throw error;
+      });
+      modulePromise = guarded;
+    }
+    return modulePromise;
+  };
   const call = async (method, payload) => {
     try {
       const wasm = await load();

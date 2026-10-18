@@ -289,6 +289,26 @@ async function registryTestBridge(request, env) {
       rpcResult = await env.STEPSTONE_ROOM.get(roomId).testInspectClassicDealCalls(input);
       break;
     }
+    case 'inspectRoomClassicDds': {
+      const roomId = env.STEPSTONE_ROOM.idFromName(`${input.code}:${input.incarnation}`);
+      rpcResult = await env.STEPSTONE_ROOM.get(roomId).testInspectClassicDds(input);
+      break;
+    }
+    case 'resolveRoomClassicDds': {
+      const roomId = env.STEPSTONE_ROOM.idFromName(`${input.code}:${input.incarnation}`);
+      rpcResult = await env.STEPSTONE_ROOM.get(roomId).testResolveClassicDds(input);
+      break;
+    }
+    case 'seedRoomClassicDdsAction': {
+      const roomId = env.STEPSTONE_ROOM.idFromName(`${input.code}:${input.incarnation}`);
+      rpcResult = await env.STEPSTONE_ROOM.get(roomId).testSeedClassicDdsAction(input);
+      break;
+    }
+    case 'attemptRoomClassicDds': {
+      const roomId = env.STEPSTONE_ROOM.idFromName(`${input.code}:${input.incarnation}`);
+      rpcResult = await env.STEPSTONE_ROOM.get(roomId).testAttemptClassicDds(input);
+      break;
+    }
     case 'corruptRoomCommandCache': {
       const roomId = env.STEPSTONE_ROOM.idFromName(`${input.code}:${input.incarnation}`);
       rpcResult = await env.STEPSTONE_ROOM.get(roomId).testCorruptCommandCache(input);

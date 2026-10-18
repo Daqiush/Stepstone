@@ -21,8 +21,18 @@ import {
   storeCommandResult,
 } from './command-cache.mjs';
 import stateModule from '../../../classic/state.cjs';
+import nodeCompatModule from '../../../classic/node-compat.cjs';
 import { applyWorkerClassicCommand } from './classic-command.mjs';
 import { createWorkerClassicDealFactory } from './classic-deal.mjs';
+import {
+  CLASSIC_DDS_ACTION_ID,
+  CLASSIC_DDS_ACTION_KIND,
+  buildClassicDdsAction,
+  calculateClassicDdTable,
+  parseClassicDdsActionPayload,
+  retryClassicDdsAction,
+  validateClassicDdsTable,
+} from './classic-dds-action.mjs';
 import {
   composeClassicEventFrame,
   composeRoomSnapshot,
@@ -39,6 +49,7 @@ import {
 import { createTestLatencyController } from './test-latency.mjs';
 
 const { createClassicLobbyState } = stateModule;
+const { applyClassicDdsCompletion } = nodeCompatModule;
 
 const REQUEST_ID = /^[A-Za-z0-9_-]{16,64}$/u;
 const REQUEST_HASH = /^[0-9a-f]{64}$/u;
@@ -129,6 +140,8 @@ export class StepstoneRoom {
     this.ctx = ctx;
     this.env = env;
     this.classicDealCalls = 0;
+    this.classicDdsCalls = 0;
+    this.classicDdsPaused = [];
     try {
       const classicDealFactory = createWorkerClassicDealFactory({ env });
       this.classicDealFactory = (input) => {
@@ -651,6 +664,172 @@ export class StepstoneRoom {
     return this.runStateMutation(() => this.consumeDueActionsLocked(Date.now()));
   }
 
+  exactClassicDdsAction(action, descriptor) {
+    if (!action
+      || action.action_id !== CLASSIC_DDS_ACTION_ID
+      || action.kind !== CLASSIC_DDS_ACTION_KIND
+      || action.incarnation !== descriptor.incarnation) return null;
+    let payload;
+    try { payload = parseClassicDdsActionPayload(JSON.parse(action.payload_json)); }
+    catch { return null; }
+    return payload.generationId === descriptor.generationId
+      && payload.dealNumber === descriptor.dealNumber
+      && payload.attempt === descriptor.attempt ? payload : null;
+  }
+
+  classicDdsDescriptor(action) {
+    if (!action
+      || action.action_id !== CLASSIC_DDS_ACTION_ID
+      || action.kind !== CLASSIC_DDS_ACTION_KIND
+      || !Number.isSafeInteger(action.incarnation)
+      || action.incarnation < 1) return null;
+    let payload;
+    try { payload = parseClassicDdsActionPayload(JSON.parse(action.payload_json)); }
+    catch { return null; }
+    return { incarnation: action.incarnation, ...payload };
+  }
+
+  async computeClassicDdTable(hands, descriptor) {
+    if (this.env?.ROOM_FOUNDATION_TEST === 'true'
+      && this.env?.CLASSIC_TEST_DDS_PAUSE === 'true') {
+      this.classicDdsCalls += 1;
+      return new Promise((resolve, reject) => {
+        this.classicDdsPaused.push({ descriptor: { ...descriptor }, resolve, reject });
+      });
+    }
+    return calculateClassicDdTable(hands);
+  }
+
+  snapshotClassicDdsInput(descriptor) {
+    const action = row(this.sql.exec(
+      `SELECT * FROM pending_actions
+       WHERE action_id = ? AND kind = ? AND incarnation = ? LIMIT 1`,
+      CLASSIC_DDS_ACTION_ID,
+      CLASSIC_DDS_ACTION_KIND,
+      descriptor.incarnation,
+    ));
+    if (!this.exactClassicDdsAction(action, descriptor)) return null;
+    const identity = this.roomIdentity();
+    if (!identity
+      || identity.stored.status !== 'ACTIVE'
+      || identity.stored.incarnation !== descriptor.incarnation
+      || identity.state.status !== 'ACTIVE'
+      || identity.state.classic?.ddsStatus !== 'PENDING'
+      || identity.state.classic.dealNumber !== descriptor.dealNumber) return null;
+    return identity.state.classic.initialHands;
+  }
+
+  async attemptClassicDdsAction(descriptor) {
+    let hands;
+    try {
+      hands = await this.runStateMutation(() => this.snapshotClassicDdsInput(descriptor));
+      if (hands === null) return false;
+    } catch {
+      return false;
+    }
+
+    let completion;
+    try {
+      if (this.env?.ROOM_FOUNDATION_TEST === 'true'
+        && this.env?.CLASSIC_TEST_DDS_PAUSE === 'idle') {
+        this.classicDdsCalls += 1;
+        return false;
+      }
+      const table = validateClassicDdsTable(await this.computeClassicDdTable(hands, descriptor));
+      completion = { failed: false, ddTable: table };
+    } catch {
+      completion = { failed: true, ddTable: null };
+    }
+    return this.settleClassicDdsAction(descriptor, completion, Date.now());
+  }
+
+  settleClassicDdsAction(descriptor, completion, now) {
+    return this.runStateMutation(async () => {
+      let committed = null;
+      await this.ctx.storage.transaction(async () => {
+        const action = row(this.sql.exec(
+          `SELECT * FROM pending_actions
+           WHERE action_id = ? AND kind = ? AND incarnation = ? LIMIT 1`,
+          CLASSIC_DDS_ACTION_ID,
+          CLASSIC_DDS_ACTION_KIND,
+          descriptor.incarnation,
+        ));
+        const payload = this.exactClassicDdsAction(action, descriptor);
+        if (!payload) return;
+        const identity = this.roomIdentity();
+        if (!identity
+          || identity.stored.status !== 'ACTIVE'
+          || identity.stored.incarnation !== descriptor.incarnation
+          || identity.state.status !== 'ACTIVE'
+          || identity.state.classic?.ddsStatus !== 'PENDING'
+          || identity.state.classic.dealNumber !== descriptor.dealNumber) return;
+
+        if (completion.failed && payload.attempt < 3) {
+          const retry = retryClassicDdsAction(payload, now);
+          const updated = this.sql.exec(
+            `UPDATE pending_actions SET due_at = ?, payload_json = ?
+             WHERE action_id = ? AND kind = ? AND incarnation = ? AND payload_json = ?`,
+            retry.dueAt,
+            JSON.stringify(retry.payload),
+            CLASSIC_DDS_ACTION_ID,
+            CLASSIC_DDS_ACTION_KIND,
+            descriptor.incarnation,
+            action.payload_json,
+          );
+          updated.toArray();
+          if (updated.rowsWritten !== 1) return;
+          await this.recomputeAlarm();
+          committed = { kind: 'retry' };
+          return;
+        }
+
+        const classicResult = applyClassicDdsCompletion(identity.state.classic, {
+          dealNumber: descriptor.dealNumber,
+          ddTable: completion.failed ? null : completion.ddTable,
+          failed: completion.failed,
+        });
+        if (classicResult.reply.name === 'classic.dd-ignored') return;
+        const state = {
+          ...identity.state,
+          revision: identity.state.revision + 1,
+          classic: classicResult.state,
+        };
+        const serialized = JSON.stringify(state);
+        assertRoomSnapshotSize(serialized);
+        const updated = this.sql.exec(
+          `UPDATE room_state SET revision = ?, status = ?, expires_at = ?, state_json = ?
+           WHERE incarnation = ? AND revision = ? AND status = 'ACTIVE' AND state_json = ?`,
+          state.revision,
+          state.status,
+          state.expiresAt,
+          serialized,
+          state.incarnation,
+          identity.state.revision,
+          identity.stored.state_json,
+        );
+        updated.toArray();
+        if (updated.rowsWritten !== 1) throw new CommandCasError();
+        const deleted = this.sql.exec(
+          `DELETE FROM pending_actions
+           WHERE action_id = ? AND kind = ? AND incarnation = ? AND payload_json = ?`,
+          CLASSIC_DDS_ACTION_ID,
+          CLASSIC_DDS_ACTION_KIND,
+          descriptor.incarnation,
+          action.payload_json,
+        );
+        deleted.toArray();
+        if (deleted.rowsWritten !== 1) throw new CommandCasError();
+        await this.recomputeAlarm();
+        committed = { kind: 'terminal', state, serialized, events: classicResult.events };
+      });
+      if (committed?.kind !== 'terminal') return committed !== null;
+      this.commandState = committed.state;
+      this.commandStateJson = committed.serialized;
+      this.broadcastClassicCommit(committed.state, committed.events);
+      return true;
+    });
+  }
+
   registryStub() {
     const id = this.env.LOBBY_REGISTRY.idFromName('singleton');
     return this.env.LOBBY_REGISTRY.get(id);
@@ -968,6 +1147,23 @@ export class StepstoneRoom {
         else if (await this.beginClosing(action, now)) await this.processRegistryRelease(now);
       } else if (action.kind === 'registry-release') {
         await this.processRegistryRelease(now);
+      } else if (action.kind === CLASSIC_DDS_ACTION_KIND) {
+        const descriptor = this.classicDdsDescriptor(action);
+        if (descriptor) {
+          this.ctx.waitUntil(this.attemptClassicDdsAction(descriptor));
+        } else {
+          await this.ctx.storage.transaction(async () => {
+            this.sql.exec(
+              `DELETE FROM pending_actions
+               WHERE action_id = ? AND kind = ? AND incarnation = ? AND payload_json = ?`,
+              action.action_id,
+              action.kind,
+              action.incarnation,
+              action.payload_json,
+            );
+            await this.recomputeAlarm();
+          });
+        }
       } else {
         await this.deletePendingAction(action.action_id);
       }
@@ -1467,9 +1663,12 @@ export class StepstoneRoom {
     } else {
       this.broadcastRoomSnapshot(current);
     }
+    if (outcome.kind === 'mutation' && outcome.classicDdsAction !== null) {
+      this.ctx.waitUntil(this.attemptClassicDdsAction(outcome.classicDdsAction));
+    }
   }
 
-  commitCommandLocked({ attachment, command, requestHash, fault }) {
+  async commitCommandLocked({ attachment, command, requestHash, fault }) {
     if (fault?.type === 'corrupt-state-before-cas'
       || fault?.type === 'mutate-state-before-cas') {
       this.ctx.storage.transactionSync(() => {
@@ -1490,7 +1689,7 @@ export class StepstoneRoom {
     }
 
     const currentAccounting = emptySqlAccounting();
-    const currentOutcome = this.ctx.storage.transactionSync(() => {
+    const currentOutcome = await this.ctx.storage.transaction(async () => {
       const state = this.commandState;
       const expectedStateJson = this.commandStateJson;
       if (!this.commandCacheReady
@@ -1582,12 +1781,39 @@ export class StepstoneRoom {
         expectedStateJson,
       );
       if (updated.rowsWritten !== 1) throw new CommandCasError();
+      let classicDdsAction = null;
+      const ddsEffect = classicResult?.effects?.find(
+        effect => effect?.type === 'classic.compute-dd-table',
+      );
+      if (ddsEffect) {
+        const action = buildClassicDdsAction({ dealNumber: ddsEffect.dealNumber, now });
+        executeAccountedSql(
+          this.sql,
+          currentAccounting,
+          `INSERT INTO pending_actions
+             (action_id, incarnation, due_at, kind, payload_json)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(action_id) DO UPDATE SET
+             incarnation = excluded.incarnation,
+             due_at = excluded.due_at,
+             kind = excluded.kind,
+             payload_json = excluded.payload_json`,
+          action.actionId,
+          proposed.incarnation,
+          action.dueAt,
+          action.kind,
+          JSON.stringify(action.payload),
+        );
+        await this.recomputeAlarm();
+        classicDdsAction = { incarnation: proposed.incarnation, ...action.payload };
+      }
       if (fault?.type === 'before-commit') throw new Error('injected command precommit failure');
       return {
         kind: 'mutation', state: proposed, stateJson: serialized,
         session, committedRevision, compactReply,
         classicEvents: classicResult?.events ?? null,
         classicEffects: classicResult?.effects ?? null,
+        classicDdsAction,
       };
     });
     this.lastCommandAccounting = currentAccounting;
@@ -2126,6 +2352,86 @@ export class StepstoneRoom {
       || identity.state.roomCode !== code
       || identity.stored.incarnation !== incarnation) return failure('ROOM_NOT_FOUND');
     return result({ calls: this.classicDealCalls });
+  }
+
+  testInspectClassicDds({ code, incarnation } = {}) {
+    if (this.env?.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
+    const identity = this.cachedRoomIdentity();
+    if (!validCodeIncarnation(code, incarnation)
+      || !identity
+      || identity.state.roomCode !== code
+      || identity.stored.incarnation !== incarnation) return failure('ROOM_NOT_FOUND');
+    return result({
+      calls: this.classicDdsCalls,
+      paused: this.classicDdsPaused.map(entry => ({ descriptor: { ...entry.descriptor } })),
+    });
+  }
+
+  testResolveClassicDds({ code, incarnation, result: outcome, table } = {}) {
+    if (this.env?.ROOM_FOUNDATION_TEST !== 'true'
+      || this.env?.CLASSIC_TEST_DDS_PAUSE !== 'true') return failure('ROOM_NOT_FOUND');
+    const identity = this.cachedRoomIdentity();
+    if (!validCodeIncarnation(code, incarnation)
+      || !identity
+      || identity.state.roomCode !== code
+      || identity.stored.incarnation !== incarnation) return failure('ROOM_NOT_FOUND');
+    if (!['success', 'failure', 'malformed'].includes(outcome)) {
+      return failure('INVALID_REQUEST');
+    }
+    const paused = this.classicDdsPaused.shift();
+    if (!paused) return failure('INVALID_STATE');
+    if (outcome === 'failure') paused.reject(new Error('injected classic DDS failure'));
+    else if (outcome === 'malformed') paused.resolve([[99]]);
+    else paused.resolve(table);
+    return result({ resolved: true, descriptor: { ...paused.descriptor } });
+  }
+
+  async testSeedClassicDdsAction({ code, incarnation, dueAt, payload } = {}) {
+    if (this.env?.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
+    const identity = this.cachedRoomIdentity();
+    if (!validCodeIncarnation(code, incarnation)
+      || !validTime(dueAt)
+      || payload === null
+      || typeof payload !== 'object'
+      || Array.isArray(payload)) return failure('INVALID_REQUEST');
+    if (!identity
+      || identity.state.roomCode !== code
+      || identity.stored.incarnation !== incarnation) return failure('ROOM_NOT_FOUND');
+    await this.ctx.storage.transaction(async () => {
+      this.sql.exec(
+        `INSERT INTO pending_actions
+           (action_id, incarnation, due_at, kind, payload_json)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(action_id) DO UPDATE SET
+           incarnation = excluded.incarnation,
+           due_at = excluded.due_at,
+           kind = excluded.kind,
+           payload_json = excluded.payload_json`,
+        CLASSIC_DDS_ACTION_ID,
+        incarnation,
+        dueAt,
+        CLASSIC_DDS_ACTION_KIND,
+        JSON.stringify(payload),
+      );
+      await this.recomputeAlarm();
+    });
+    return result({ seeded: true });
+  }
+
+  async testAttemptClassicDds({ code, incarnation, descriptor } = {}) {
+    if (this.env?.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
+    if (!validCodeIncarnation(code, incarnation)
+      || !exactKeys(descriptor, ['incarnation', 'generationId', 'dealNumber', 'attempt'])
+      || descriptor.incarnation !== incarnation) return failure('INVALID_REQUEST');
+    try {
+      parseClassicDdsActionPayload({
+        generationId: descriptor.generationId,
+        dealNumber: descriptor.dealNumber,
+        attempt: descriptor.attempt,
+      });
+    }
+    catch { return failure('INVALID_REQUEST'); }
+    return result({ attempted: await this.attemptClassicDdsAction(descriptor) });
   }
 
   testCorruptCommandCache(input = {}) {
