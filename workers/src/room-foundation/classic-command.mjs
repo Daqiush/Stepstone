@@ -34,8 +34,11 @@ function normalizedPayload(command) {
   const normalized = cloneOwnEntries(payload);
   if (command?.name !== 'classic.play' || !isPlainObject(payload.card)) return normalized;
   normalized.card = cloneOwnEntries(payload.card);
-  if (Number.isInteger(payload.card.rank)
-    && Object.hasOwn(PUBLIC_RANKS, payload.card.rank)) {
+  if (Object.hasOwn(payload.card, 'rank')) {
+    if (!Number.isInteger(payload.card.rank)
+      || !Object.hasOwn(PUBLIC_RANKS, payload.card.rank)) {
+      throw new ClassicInputError('Worker card rank must be an integer from 2 through 14');
+    }
     normalized.card.rank = PUBLIC_RANKS[payload.card.rank];
   }
   return normalized;

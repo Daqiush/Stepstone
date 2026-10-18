@@ -227,16 +227,25 @@ test('adapter normalizes public integer ranks and preserves exact payload valida
 
   for (const payload of [
     { expectedRevision: 0, card: { suit: 'H', rank: 15 } },
+    { expectedRevision: 0, card: { suit: 'H', rank: -1 } },
+    { expectedRevision: 0, card: { suit: 'H', rank: 10.5 } },
+    { expectedRevision: 0, card: { suit: 'H', rank: '10' } },
+    { expectedRevision: 0, card: { suit: 'H', rank: 'T' } },
+    { expectedRevision: 0, card: { suit: 'H', rank: 'A' } },
     { expectedRevision: 0, card: { suit: 'H', rank: 10, extra: true } },
     { expectedRevision: 0, card: { suit: 'H' } },
   ]) {
+    const before = JSON.stringify(payload);
+    let callsForInvalid = 0;
     assert.deepEqual(applyWorkerClassicCommand({
       state,
       command: frame('classic.play', payload),
       session: session('PLAYER', 'E'),
       authorities,
-      dealFactory() { assert.fail('malformed play cannot request a deal'); },
+      dealFactory() { callsForInvalid += 1; return canonicalDeal(2); },
     }), { ok: false, code: 'INVALID_COMMAND' });
+    assert.equal(JSON.stringify(payload), before);
+    assert.equal(callsForInvalid, 0);
   }
 });
 
