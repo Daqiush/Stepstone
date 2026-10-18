@@ -112,30 +112,31 @@ test('detects deterministic canonical reuse conflicts within one session only', 
     v: 1,
   };
   const changed = { ...first, payload: { expectedRevision: 1 } };
-  const firstHash = await fingerprintCommand(first);
+  const options = { foundationTestEnabled: true };
+  const firstHash = await fingerprintCommand(first, options);
   const cache = storeCommandResult({}, entry({
     commandId: first.id,
     requestHash: firstHash,
   }), NOW);
 
-  assert.equal(await fingerprintCommand(reordered), firstHash);
-  assert.equal((await fingerprintCommand(changed)) === firstHash, false);
+  assert.equal(await fingerprintCommand(reordered, options), firstHash);
+  assert.equal((await fingerprintCommand(changed, options)) === firstHash, false);
   assert.equal(inspectCommandCache(cache, {
     sessionId: SESSION_A,
     commandId: first.id,
-    requestHash: await fingerprintCommand(reordered),
+    requestHash: await fingerprintCommand(reordered, options),
     now: NOW,
   }).kind, 'duplicate');
   assert.deepEqual(inspectCommandCache(cache, {
     sessionId: SESSION_A,
     commandId: first.id,
-    requestHash: await fingerprintCommand(changed),
+    requestHash: await fingerprintCommand(changed, options),
     now: NOW,
   }), { kind: 'conflict' });
   assert.deepEqual(inspectCommandCache(cache, {
     sessionId: SESSION_B,
     commandId: first.id,
-    requestHash: await fingerprintCommand(changed),
+    requestHash: await fingerprintCommand(changed, options),
     now: NOW,
   }), { kind: 'miss' });
 });

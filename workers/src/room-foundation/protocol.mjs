@@ -173,19 +173,32 @@ export function parseHelloFrame(value) {
   return { ...value };
 }
 
-export function parseCommandFrame(value) {
+const classicCommandNames = new Set([
+  'classic.start',
+  'classic.bid',
+  'classic.play',
+  'classic.ready-next',
+]);
+
+export function parseCommandFrame(value, { foundationTestEnabled = false } = {}) {
   assertVersion(value);
   if (!hasExactKeys(value, ['v', 'type', 'id', 'name', 'payload'])) fail('INVALID_COMMAND');
   if (value.type !== 'command' || !isValidId(value.id)) fail('INVALID_COMMAND');
   assertCommandPayloadSize(value.payload);
 
   if (value.name === 'foundation.increment') {
+    if (!foundationTestEnabled) fail('INVALID_COMMAND');
     if (!hasExactKeys(value.payload, ['expectedRevision'])) fail('INVALID_COMMAND');
     if (!Number.isSafeInteger(value.payload.expectedRevision) || value.payload.expectedRevision < 0) {
       fail('INVALID_COMMAND');
     }
   } else if (value.name === 'room.sync') {
     if (!hasExactKeys(value.payload, [])) fail('INVALID_COMMAND');
+  } else if (classicCommandNames.has(value.name)) {
+    if (!isPlainObject(value.payload)
+      || !Object.hasOwn(value.payload, 'expectedRevision')
+      || !Number.isSafeInteger(value.payload.expectedRevision)
+      || value.payload.expectedRevision < 0) fail('INVALID_COMMAND');
   } else {
     fail('INVALID_COMMAND');
   }
@@ -251,8 +264,8 @@ export async function fingerprintJoinRequest(value) {
   return fingerprintParsed(parseJoinRequest(value));
 }
 
-export async function fingerprintCommand(value) {
-  return fingerprintParsed(parseCommandFrame(value));
+export async function fingerprintCommand(value, options) {
+  return fingerprintParsed(parseCommandFrame(value, options));
 }
 
 export async function hashReconnectToken(value) {

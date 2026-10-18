@@ -61,6 +61,11 @@ const validCommand = Object.freeze({
   name: 'foundation.increment',
   payload: { expectedRevision: 4 },
 });
+const foundationOptions = Object.freeze({ foundationTestEnabled: true });
+
+function parseFoundationCommand(value) {
+  return parseCommandFrame(value, foundationOptions);
+}
 
 function expectProtocolError(fn, code) {
   assert.throws(fn, (error) => error instanceof ProtocolError && error.code === code);
@@ -143,7 +148,7 @@ test('request, command, and rotation IDs use exactly 16-64 URL-safe characters',
     [parseCreateRequest, validCreate, 'requestId'],
     [parseJoinRequest, validJoin, 'requestId'],
     [parseHelloFrame, validHello, 'id'],
-    [parseCommandFrame, validCommand, 'id'],
+    [parseFoundationCommand, validCommand, 'id'],
   ];
   for (const [parse, base, field] of fields) {
     for (const accepted of ['a'.repeat(16), 'Z'.repeat(64), 'abc_DEF-01234567']) {
@@ -187,7 +192,8 @@ test('reconnect tokens must be canonical unpadded base64url encoding of exactly 
 
 test('hello and command frames have strict type-specific version-1 envelopes', () => {
   assert.deepEqual(parseHelloFrame(validHello), validHello);
-  assert.deepEqual(parseCommandFrame(validCommand), validCommand);
+  assert.deepEqual(parseCommandFrame(validCommand, foundationOptions), validCommand);
+  expectProtocolError(() => parseCommandFrame(validCommand), 'INVALID_COMMAND');
   assert.deepEqual(parseCommandFrame({
     ...validCommand, name: 'room.sync', payload: {},
   }), {
@@ -199,11 +205,11 @@ test('hello and command frames have strict type-specific version-1 envelopes', (
     ['hello unknown', parseHelloFrame, { ...validHello, extra: 1 }, 'INVALID_COMMAND'],
     ['hello next token', parseHelloFrame, { ...validHello, nextReconnectToken: 'x' }, 'AUTH_INVALID'],
     ['hello version', parseHelloFrame, { ...validHello, v: 2 }, 'PROTOCOL_MISMATCH'],
-    ['command type', parseCommandFrame, { ...validCommand, type: 'hello' }, 'INVALID_COMMAND'],
-    ['command unknown', parseCommandFrame, { ...validCommand, extra: 1 }, 'INVALID_COMMAND'],
-    ['command name', parseCommandFrame, { ...validCommand, name: 'foundation.reset' }, 'INVALID_COMMAND'],
-    ['command payload unknown', parseCommandFrame, { ...validCommand, payload: { expectedRevision: 4, extra: 1 } }, 'INVALID_COMMAND'],
-    ['command revision negative', parseCommandFrame, { ...validCommand, payload: { expectedRevision: -1 } }, 'INVALID_COMMAND'],
+    ['command type', parseFoundationCommand, { ...validCommand, type: 'hello' }, 'INVALID_COMMAND'],
+    ['command unknown', parseFoundationCommand, { ...validCommand, extra: 1 }, 'INVALID_COMMAND'],
+    ['command name', parseFoundationCommand, { ...validCommand, name: 'foundation.reset' }, 'INVALID_COMMAND'],
+    ['command payload unknown', parseFoundationCommand, { ...validCommand, payload: { expectedRevision: 4, extra: 1 } }, 'INVALID_COMMAND'],
+    ['command revision negative', parseFoundationCommand, { ...validCommand, payload: { expectedRevision: -1 } }, 'INVALID_COMMAND'],
     ['sync payload nonempty', parseCommandFrame, { ...validCommand, name: 'room.sync', payload: { expectedRevision: 4 } }, 'INVALID_COMMAND'],
     ['command version', parseCommandFrame, { ...validCommand, v: 2 }, 'PROTOCOL_MISMATCH'],
   ];
@@ -213,6 +219,40 @@ test('hello and command frames have strict type-specific version-1 envelopes', (
       return true;
     });
   }
+});
+
+test('generic command parsing owns only classic envelopes and revisions', () => {
+  const commands = [
+    ['classic.start', { expectedRevision: 4 }],
+    ['classic.bid', { expectedRevision: 4, bid: '1NT', alert: false, explain: null }],
+    ['classic.play', { expectedRevision: 4, card: { suit: 'S', rank: 14 } }],
+    ['classic.ready-next', { expectedRevision: 4 }],
+  ];
+  for (const [name, payload] of commands) {
+    const frame = { ...validCommand, name, payload };
+    assert.deepEqual(parseCommandFrame(frame), frame, name);
+  }
+
+  for (const payload of [
+    { expectedRevision: 4, extra: true },
+    { expectedRevision: 4 },
+    { expectedRevision: 4, bid: 'garbage', alert: false, explain: 'not allowed' },
+    { expectedRevision: 4, card: { suit: 'X', rank: 'A', extra: true } },
+  ]) {
+    assert.deepEqual(
+      parseCommandFrame({ ...validCommand, name: 'classic.bid', payload }),
+      { ...validCommand, name: 'classic.bid', payload },
+    );
+  }
+
+  for (const frame of [
+    { ...validCommand, name: 'classic.start', payload: {} },
+    { ...validCommand, name: 'classic.start', payload: { expectedRevision: -1 } },
+    { ...validCommand, name: 'classic.start', payload: { expectedRevision: 1.5 } },
+    { ...validCommand, name: 'classic.start', payload: [] },
+    { ...validCommand, name: 'classic.start', deal: {}, payload: { expectedRevision: 0 } },
+    { ...validCommand, name: 'classic.start', seat: 'N', payload: { expectedRevision: 0 } },
+  ]) expectProtocolError(() => parseCommandFrame(frame), 'INVALID_COMMAND');
 });
 
 test('command payload enforces the exact 8 KiB post-parse boundary', () => {
@@ -286,14 +326,14 @@ test('canonical fingerprints are SHA-256 hashes and reject unknown fields before
   assert.equal(await fingerprintJoinRequest(reorderedJoin), await fingerprintJoinRequest(validJoin));
   assert.equal(await fingerprintCommand({
     payload: { expectedRevision: 4 }, name: 'foundation.increment', id: commandId, type: 'command', v: 1,
-  }), await fingerprintCommand(validCommand));
+  }, foundationOptions), await fingerprintCommand(validCommand, foundationOptions));
 
   await assert.rejects(
     fingerprintCreateRequest({ ...validCreate, secret: 'must-not-be-ignored' }),
     (error) => error.code === 'INVALID_REQUEST',
   );
   await assert.rejects(
-    fingerprintCommand({ ...validCommand, payload: { expectedRevision: 4, hidden: true } }),
+    fingerprintCommand({ ...validCommand, payload: { expectedRevision: 4, hidden: true } }, foundationOptions),
     (error) => error.code === 'INVALID_COMMAND',
   );
 });
@@ -332,6 +372,13 @@ test('public error codes and responses are closed, stable, and do not expose int
     'COMMAND_CONFLICT',
     'ROOM_CAPACITY_EXCEEDED',
     'SERVICE_CAPACITY',
+    'CLASSIC_WRONG_PHASE',
+    'CLASSIC_FORBIDDEN',
+    'CLASSIC_SEATS_INCOMPLETE',
+    'CLASSIC_NOT_YOUR_TURN',
+    'CLASSIC_INVALID_BID',
+    'CLASSIC_CARD_NOT_HELD',
+    'CLASSIC_MUST_FOLLOW_SUIT',
   ]);
   assert.equal(Object.isFrozen(ERROR_CODES), true);
 
@@ -349,6 +396,13 @@ test('public error codes and responses are closed, stable, and do not expose int
     ['COMMAND_CONFLICT', 409],
     ['ROOM_CAPACITY_EXCEEDED', 409],
     ['SERVICE_CAPACITY', 503],
+    ['CLASSIC_WRONG_PHASE', 409],
+    ['CLASSIC_FORBIDDEN', 403],
+    ['CLASSIC_SEATS_INCOMPLETE', 409],
+    ['CLASSIC_NOT_YOUR_TURN', 409],
+    ['CLASSIC_INVALID_BID', 409],
+    ['CLASSIC_CARD_NOT_HELD', 409],
+    ['CLASSIC_MUST_FOLLOW_SUIT', 409],
   ]) {
     const response = publicErrorResponse(code, new Error('SQL token_hash secret'));
     assert.ok(response instanceof Response);
@@ -357,4 +411,5 @@ test('public error codes and responses are closed, stable, and do not expose int
     assert.equal(await response.text(), JSON.stringify({ v: 1, error: { code } }));
   }
   assert.throws(() => publicErrorResponse('INTERNAL_SQL_FAILURE'), TypeError);
+  assert.throws(() => publicErrorResponse('CLASSIC_INVALID_DEAL_CONTEXT'), TypeError);
 });

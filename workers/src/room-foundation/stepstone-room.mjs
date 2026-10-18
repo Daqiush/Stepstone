@@ -1255,8 +1255,11 @@ export class StepstoneRoom {
     let command;
     let requestHash;
     try {
-      command = parseCommandFrame(frame);
-      requestHash = await fingerprintCommand(command);
+      const commandOptions = {
+        foundationTestEnabled: this.env?.ROOM_FOUNDATION_TEST === 'true',
+      };
+      command = parseCommandFrame(frame, commandOptions);
+      requestHash = await fingerprintCommand(command, commandOptions);
     } catch (error) {
       this.closeForProtocol(socket, error);
       return;

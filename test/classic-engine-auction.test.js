@@ -283,6 +283,7 @@ test('classic.bid enforces exact payload types and bounded alert text', () => {
     { expectedRevision: 0, bid: 'Pass', alert: false, explain: null, extra: true },
     { expectedRevision: -1, bid: 'Pass', alert: false, explain: null },
     { expectedRevision: 0, bid: 1, alert: false, explain: null },
+    { expectedRevision: 0, bid: 'bogus', alert: false, explain: null },
     { expectedRevision: 0, bid: 'Pass', alert: null, explain: null },
     { expectedRevision: 0, bid: 'Pass', alert: false, explain: 'not alerted' },
     { expectedRevision: 0, bid: '1C', alert: true, explain: '😀'.repeat(501) },
@@ -310,8 +311,6 @@ test('classic.bid returns exact phase, authorization, turn, and bid domain failu
       { ok: false, code: 'CLASSIC_FORBIDDEN' }],
     [state, bidCommand('Pass'), preflightContext(player('E')),
       { ok: false, code: 'CLASSIC_NOT_YOUR_TURN' }],
-    [state, bidCommand('bogus'), preflightContext(player('N')),
-      { ok: false, code: 'CLASSIC_INVALID_BID' }],
     [state, bidCommand('X'), preflightContext(player('N')),
       { ok: false, code: 'CLASSIC_INVALID_BID' }],
   ];

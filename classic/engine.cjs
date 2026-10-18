@@ -133,6 +133,8 @@ function validateBidPayload(payload) {
   input(Number.isSafeInteger(payload.expectedRevision) && payload.expectedRevision >= 0,
     'expectedRevision must be a nonnegative safe integer');
   input(typeof payload.bid === 'string', 'bid must be a string');
+  const { parseBid } = require('./rules.cjs');
+  input(parseBid(payload.bid) !== null, 'bid must be canonical');
   input(typeof payload.alert === 'boolean', 'alert must be boolean');
   input(payload.explain === null || (typeof payload.explain === 'string'
     && [...payload.explain].length <= 500), 'explain must be bounded text or null');
