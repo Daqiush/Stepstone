@@ -284,6 +284,11 @@ async function registryTestBridge(request, env) {
       rpcResult = await env.STEPSTONE_ROOM.get(roomId).testInspectCommandHook(input);
       break;
     }
+    case 'inspectRoomClassicDealCalls': {
+      const roomId = env.STEPSTONE_ROOM.idFromName(`${input.code}:${input.incarnation}`);
+      rpcResult = await env.STEPSTONE_ROOM.get(roomId).testInspectClassicDealCalls(input);
+      break;
+    }
     case 'corruptRoomCommandCache': {
       const roomId = env.STEPSTONE_ROOM.idFromName(`${input.code}:${input.incarnation}`);
       rpcResult = await env.STEPSTONE_ROOM.get(roomId).testCorruptCommandCache(input);
@@ -317,6 +322,11 @@ async function registryTestBridge(request, env) {
     case 'seedRoomMalformedHandshakeAction': {
       const roomId = env.STEPSTONE_ROOM.idFromName(`${input.code}:${input.incarnation}`);
       rpcResult = await env.STEPSTONE_ROOM.get(roomId).testSeedMalformedHandshakeAction(input);
+      break;
+    }
+    case 'seedRoomOwnerExpiryAt': {
+      const roomId = env.STEPSTONE_ROOM.idFromName(`${input.code}:${input.incarnation}`);
+      rpcResult = await env.STEPSTONE_ROOM.get(roomId).testSeedOwnerExpiryAt(input);
       break;
     }
     case 'dropRoomAlarm': {

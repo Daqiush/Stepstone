@@ -128,8 +128,13 @@ export class StepstoneRoom {
   constructor(ctx, env) {
     this.ctx = ctx;
     this.env = env;
+    this.classicDealCalls = 0;
     try {
-      this.classicDealFactory = createWorkerClassicDealFactory({ env });
+      const classicDealFactory = createWorkerClassicDealFactory({ env });
+      this.classicDealFactory = (input) => {
+        if (this.env?.ROOM_FOUNDATION_TEST === 'true') this.classicDealCalls += 1;
+        return classicDealFactory(input);
+      };
     } catch (error) {
       this.classicDealFactory = () => { throw error; };
     }
@@ -2113,6 +2118,16 @@ export class StepstoneRoom {
     });
   }
 
+  testInspectClassicDealCalls({ code, incarnation } = {}) {
+    if (this.env?.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
+    const identity = this.cachedRoomIdentity();
+    if (!validCodeIncarnation(code, incarnation)
+      || !identity
+      || identity.state.roomCode !== code
+      || identity.stored.incarnation !== incarnation) return failure('ROOM_NOT_FOUND');
+    return result({ calls: this.classicDealCalls });
+  }
+
   testCorruptCommandCache(input = {}) {
     return this.runStateMutation(() => this.testCorruptCommandCacheLocked(input));
   }
@@ -2351,6 +2366,44 @@ export class StepstoneRoom {
          VALUES ('handshake-timeout:malformed', ?, ?, 'handshake-timeout', '{"wrong":true}')`,
         incarnation,
         dueAt,
+      );
+      await this.recomputeAlarm();
+    });
+    return result({ seeded: true });
+  }
+
+  testSeedOwnerExpiryAt(input = {}) {
+    return this.runStateMutation(() => this.testSeedOwnerExpiryAtLocked(input));
+  }
+
+  async testSeedOwnerExpiryAtLocked({ code, incarnation, dueAt } = {}) {
+    if (this.env?.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
+    if (!validCodeIncarnation(code, incarnation) || !validTime(dueAt)) {
+      return failure('INVALID_REQUEST');
+    }
+    const identity = this.cachedRoomIdentity();
+    if (!identity
+      || identity.state.roomCode !== code
+      || identity.stored.incarnation !== incarnation
+      || identity.stored.status !== 'ACTIVE') return failure('ROOM_NOT_FOUND');
+    const owner = row(this.sql.exec(
+      "SELECT session_id FROM sessions WHERE incarnation = ? AND role = 'OWNER' LIMIT 1",
+      incarnation,
+    ));
+    if (!owner) return failure('INVALID_STATE');
+    await this.ctx.storage.transaction(async () => {
+      this.sql.exec(
+        `INSERT INTO pending_actions (action_id, incarnation, due_at, kind, payload_json)
+         VALUES (?, ?, ?, 'owner-auth-expiry', ?)
+         ON CONFLICT(action_id) DO UPDATE SET
+           incarnation = excluded.incarnation,
+           due_at = excluded.due_at,
+           kind = excluded.kind,
+           payload_json = excluded.payload_json`,
+        OWNER_AUTH_ACTION_ID,
+        incarnation,
+        dueAt,
+        JSON.stringify({ sessionId: owner.session_id }),
       );
       await this.recomputeAlarm();
     });

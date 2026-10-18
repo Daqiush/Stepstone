@@ -79,6 +79,9 @@ class StepstoneRoom extends DurableObject {
     return this.implementation.testInspectCommandAccounting(input);
   }
   testInspectCommandHook(input) { return this.implementation.testInspectCommandHook(input); }
+  testInspectClassicDealCalls(input) {
+    return this.implementation.testInspectClassicDealCalls(input);
+  }
   testCorruptCommandCache(input) { return this.implementation.testCorruptCommandCache(input); }
   testSetStatus(input) { return this.implementation.testSetStatus(input); }
   testRecoverAlarmAt(input) { return this.implementation.testRecoverAlarmAt(input); }
@@ -90,6 +93,9 @@ class StepstoneRoom extends DurableObject {
   }
   testSeedMalformedHandshakeAction(input) {
     return this.implementation.testSeedMalformedHandshakeAction(input);
+  }
+  testSeedOwnerExpiryAt(input) {
+    return this.implementation.testSeedOwnerExpiryAt(input);
   }
   testDropAlarm(input) { return this.implementation.testDropAlarm(input); }
   testSeedPendingActions(input) { return this.implementation.testSeedPendingActions(input); }
