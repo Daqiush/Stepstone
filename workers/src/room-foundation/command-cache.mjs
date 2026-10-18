@@ -10,6 +10,10 @@ const ENTRY_KEYS = Object.freeze([
   'compactReply',
   'expiresAt',
 ]);
+const CLASSIC_COMMANDS = new Set([
+  'classic.start', 'classic.bid', 'classic.play', 'classic.ready-next',
+]);
+const CLASSIC_PHASES = new Set(['LOBBY', 'BIDDING', 'PLAYING', 'SCORING']);
 
 function plainObject(value) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -26,6 +30,11 @@ function exactKeys(value, expected) {
 }
 
 function validEntry(value, sessionId) {
+  const foundationReply = exactKeys(value?.compactReply, ['name'])
+    && value.compactReply.name === 'foundation.increment';
+  const classicReply = exactKeys(value?.compactReply, ['name', 'phase'])
+    && CLASSIC_COMMANDS.has(value.compactReply.name)
+    && CLASSIC_PHASES.has(value.compactReply.phase);
   return exactKeys(value, ENTRY_KEYS)
     && value.sessionId === sessionId
     && ID.test(value.sessionId)
@@ -33,8 +42,7 @@ function validEntry(value, sessionId) {
     && SHA256.test(value.requestHash)
     && Number.isSafeInteger(value.committedRevision)
     && value.committedRevision >= 0
-    && exactKeys(value.compactReply, ['name'])
-    && value.compactReply.name === 'foundation.increment'
+    && (foundationReply || classicReply)
     && Number.isSafeInteger(value.expiresAt)
     && value.expiresAt >= 0;
 }

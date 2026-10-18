@@ -613,9 +613,9 @@ export class LobbyRegistry {
     if (this.env.ROOM_FOUNDATION_TEST !== 'true') return failure('ROOM_NOT_FOUND');
     if (!validTime(now)) return failure('INVALID_REQUEST');
     const beforeAlarmAt = await this.ctx.storage.getAlarm();
-    const wallClockNow = Date.now();
-    await this.recoverAlarmAt(now, wallClockNow);
+    await this.recoverAlarmAt(now, Date.now());
     const afterAlarmAt = await this.ctx.storage.getAlarm();
+    const wallClockNow = Date.now();
     await this.reconcile(now);
     return result({
       beforeAlarmAt,

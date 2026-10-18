@@ -253,22 +253,33 @@ test('reconciles an expired lease through the Durable Object alarm handler', asy
 });
 
 test('reconstructs with a provisioning alarm due and subsequently reconciles it', async () => {
-  const id = requestId('restartdue');
-  const controlledNow = now + 45 * 60_000;
-  const allocation = await ok('allocateAt', {
-    requestId: id, requestHash: requestHash('b'), now: controlledNow,
-  });
-  const response = createResponse(id, allocation);
-  await ok('setRoomInitialization', { ...allocation, response });
-  const beforeRestart = await ok('inspect');
-  assert.equal(beforeRestart.alarmAt, allocation.leaseExpiresAt);
-  await runtime.restartRegistry();
+  // Keep the eviction proof independent of references retained by earlier registry cases.
+  const isolated = await createRoomWorkerRuntime();
+  const call = async (action, input = {}) => {
+    const response = await isolated.registry(action, input);
+    assert.equal(response.status, 200, JSON.stringify(response.body));
+    assert.equal(response.body.ok, true, JSON.stringify(response.body));
+    return response.body.value;
+  };
+  try {
+    const id = requestId('restartdue');
+    const controlledNow = now + 45 * 60_000;
+    const allocation = await call('allocateAt', {
+      requestId: id, requestHash: requestHash('b'), now: controlledNow,
+    });
+    const response = createResponse(id, allocation);
+    await call('setRoomInitialization', { ...allocation, response });
+    const beforeRestart = await call('inspect');
+    assert.equal(beforeRestart.alarmAt, allocation.leaseExpiresAt);
+    await isolated.restartRegistry();
 
-  await ok('runAlarmAt', { now: allocation.leaseExpiresAt });
-  const inspection = await waitForInspection((state) => (
-    roomRow(state, allocation)?.status === 'ACTIVE'
-  ));
-  assert.equal(creationRequest(inspection, id).status, 'ACTIVE');
+    await call('runAlarmAt', { now: allocation.leaseExpiresAt });
+    const inspection = await call('inspect');
+    assert.equal(roomRow(inspection, allocation)?.status, 'ACTIVE');
+    assert.equal(creationRequest(inspection, id).status, 'ACTIVE');
+  } finally {
+    await isolated.close();
+  }
 });
 
 test('terminal release atomically replaces its fallback alarm with earliest live work', async () => {

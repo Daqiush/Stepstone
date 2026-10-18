@@ -6,7 +6,7 @@ const ROOT = fileURLToPath(new URL('../../..', import.meta.url));
 const CONFIG_PATH = fileURLToPath(new URL('../../wrangler.jsonc', import.meta.url));
 const ENTRY_PATH = fileURLToPath(new URL('../../src/index.mjs', import.meta.url));
 
-export async function createRoomWorkerRuntime({ persistenceDirectory = null } = {}) {
+export async function createRoomWorkerRuntime({ persistenceDirectory = null, vars = {} } = {}) {
   let server;
   let worker;
   let serverUrl;
@@ -18,7 +18,7 @@ export async function createRoomWorkerRuntime({ persistenceDirectory = null } = 
         local: true,
         persist: true,
         persistTo: persistenceDirectory,
-        vars: { ROOM_FOUNDATION_TEST: 'true' },
+        vars: { ...vars, ROOM_FOUNDATION_TEST: 'true' },
         logLevel: 'none',
         experimental: { disableDevRegistry: true, disableExperimentalWarning: true },
       });
@@ -34,7 +34,7 @@ export async function createRoomWorkerRuntime({ persistenceDirectory = null } = 
       root: ROOT,
       workers: [{
         configPath: './workers/wrangler.jsonc',
-        vars: { ROOM_FOUNDATION_TEST: 'true' },
+        vars: { ...vars, ROOM_FOUNDATION_TEST: 'true' },
       }],
     });
     const listening = await server.listen();

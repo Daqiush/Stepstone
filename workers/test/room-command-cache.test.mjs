@@ -47,6 +47,37 @@ test('stores compact command results immutably without snapshots', () => {
   }), { kind: 'duplicate', entry: entry() });
 });
 
+test('accepts only allowlisted classic compact replies with an exact phase', () => {
+  for (const [name, phase] of [
+    ['classic.start', 'BIDDING'],
+    ['classic.bid', 'PLAYING'],
+    ['classic.play', 'SCORING'],
+    ['classic.ready-next', 'BIDDING'],
+  ]) {
+    const classicEntry = entry({ compactReply: { name, phase } });
+    const stored = storeCommandResult({}, classicEntry, NOW);
+    assert.equal(isValidCommandCache(stored), true);
+    assert.deepEqual(inspectCommandCache(stored, {
+      sessionId: SESSION_A,
+      commandId: classicEntry.commandId,
+      requestHash: HASH_A,
+      now: NOW,
+    }), { kind: 'duplicate', entry: classicEntry });
+  }
+
+  for (const compactReply of [
+    { name: 'foundation.increment', phase: 'LOBBY' },
+    { name: 'classic.start' },
+    { name: 'classic.unknown', phase: 'BIDDING' },
+    { name: 'classic.start', phase: 'CORRUPTED' },
+    { name: 'classic.start', phase: 'BIDDING', extra: true },
+  ]) {
+    assert.equal(isValidCommandCache({
+      [SESSION_A]: [entry({ compactReply })],
+    }), false);
+  }
+});
+
 test('bounds each session independently to the newest 128 live entries', () => {
   let cache = {};
   for (let index = 0; index < LIMITS.recentCommandsPerPlayer + 2; index += 1) {

@@ -234,6 +234,31 @@ test('owner and player increment once, spectators are forbidden, and sync is rea
   assert.equal(afterSync.lastCommand.totalRowsWritten, 0);
 });
 
+test('spectator classic mutations reach the classic domain authorization boundary', async () => {
+  const room = await createRoom('classic_boundary_owner');
+  const spectator = await join(room, 'spectator', 'classic_boundary_watch');
+  const ownerAuth = await authenticate(room, room);
+  const spectatorAuth = await authenticate(room, spectator);
+  const command = {
+    v: 1,
+    type: 'command',
+    id: id('classic_boundary_start'),
+    name: 'classic.start',
+    payload: { expectedRevision: 0 },
+  };
+
+  spectatorAuth.socket.send(command);
+  assert.deepEqual(await parseMessage(spectatorAuth.socket), {
+    v: 1,
+    type: 'error',
+    id: command.id,
+    payload: { code: 'CLASSIC_FORBIDDEN', revision: 0 },
+  });
+  await ownerAuth.socket.expectNoMessage();
+  assert.equal((await inspect(room)).roomState.revision, 0);
+  assert.equal((await accounting(room)).cumulative.roomStateRowsWritten, 0);
+});
+
 test('rejects stale revisions and conflicting command reuse without writes or broadcasts', async () => {
   const room = await createRoom('conflict_owner');
   const peer = await join(room, 'player', 'conflict_peer');
