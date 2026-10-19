@@ -40,6 +40,51 @@ const ZERO_COST = Object.freeze({
   deletedRowsWritten: 0,
 });
 
+export const MEASURED_CLASSIC_DDS_SQL_PROFILES = Object.freeze({
+  actionCreation: Object.freeze({
+    rowsRead: 3,
+    tableRowsWritten: 1,
+    indexRowsWritten: 2,
+    alarmRowsWritten: 1,
+    deletedRowsWritten: 0,
+  }),
+  alarmComputation: Object.freeze({
+    rowsRead: 5,
+    tableRowsWritten: 0,
+    indexRowsWritten: 0,
+    alarmRowsWritten: 0,
+    deletedRowsWritten: 0,
+  }),
+  retryUpdate: Object.freeze({
+    rowsRead: 3,
+    tableRowsWritten: 1,
+    indexRowsWritten: 1,
+    alarmRowsWritten: 1,
+    deletedRowsWritten: 0,
+  }),
+  staleOverlapGuard: Object.freeze({
+    rowsRead: 1,
+    tableRowsWritten: 0,
+    indexRowsWritten: 0,
+    alarmRowsWritten: 0,
+    deletedRowsWritten: 0,
+  }),
+  successfulSettlement: Object.freeze({
+    rowsRead: 5,
+    tableRowsWritten: 1,
+    indexRowsWritten: 0,
+    alarmRowsWritten: 1,
+    deletedRowsWritten: 1,
+  }),
+  exhaustedSettlement: Object.freeze({
+    rowsRead: 5,
+    tableRowsWritten: 1,
+    indexRowsWritten: 0,
+    alarmRowsWritten: 1,
+    deletedRowsWritten: 1,
+  }),
+});
+
 export const MEASURED_ROOM_SQL_PROFILES = Object.freeze({
   initialization: Object.freeze({ rowsRead: 12, rowsWritten: 23 }),
   // Four scenario joins observe [8, 13, 18, 19] reads as the compact
@@ -138,6 +183,35 @@ const BASE_OPERATIONS = Object.freeze({
   'creation request retention cleanup': { countPerRoom: 1, costEach: cost({ rowsRead: 2, indexRowsWritten: 6, deletedRowsWritten: 2 }) },
 });
 
+const CLASSIC_COMMAND_RESERVATION = Object.freeze({
+  dealStarts: 1,
+  maximumLegalAuctionCalls: 319,
+  cardPlays: 52,
+  reconnectSnapshots: 4,
+  commandsUsed: 372,
+  commandsReserved: 1_000,
+  commandsRemaining: 628,
+});
+
+const CLASSIC_DDS_COMMON_OPERATIONS = Object.freeze({
+  'classic DDS action creation': Object.freeze({
+    countPerRoom: 1,
+    costEach: MEASURED_CLASSIC_DDS_SQL_PROFILES.actionCreation,
+  }),
+  'classic DDS alarm computation': Object.freeze({
+    countPerRoom: 3,
+    costEach: MEASURED_CLASSIC_DDS_SQL_PROFILES.alarmComputation,
+  }),
+  'classic DDS guarded retry update': Object.freeze({
+    countPerRoom: 2,
+    costEach: MEASURED_CLASSIC_DDS_SQL_PROFILES.retryUpdate,
+  }),
+  'classic DDS stale overlap guard': Object.freeze({
+    countPerRoom: 1,
+    costEach: MEASURED_CLASSIC_DDS_SQL_PROFILES.staleOverlapGuard,
+  }),
+});
+
 function operationWithTotal(operation) {
   const total = {};
   for (const key of Object.keys(ZERO_COST)) {
@@ -150,8 +224,40 @@ function sumOperations(operations, key) {
   return Object.values(operations).reduce((sum, operation) => sum + operation.total[key], 0);
 }
 
+function summarizeRows(operations, roomsPerDay) {
+  const readPerRoom = sumOperations(operations, 'rowsRead');
+  const tableRowsWrittenPerRoom = sumOperations(operations, 'tableRowsWritten');
+  const indexRowsWrittenPerRoom = sumOperations(operations, 'indexRowsWritten');
+  const alarmRowsWrittenPerRoom = sumOperations(operations, 'alarmRowsWritten');
+  const deletedRowsWrittenPerRoom = sumOperations(operations, 'deletedRowsWritten');
+  const writtenPerRoom = tableRowsWrittenPerRoom + indexRowsWrittenPerRoom
+    + alarmRowsWrittenPerRoom + deletedRowsWrittenPerRoom;
+  return {
+    operations,
+    readPerRoom,
+    readPerDay: readPerRoom * roomsPerDay,
+    tableRowsWrittenPerRoom,
+    tableRowsWrittenPerDay: tableRowsWrittenPerRoom * roomsPerDay,
+    indexRowsWrittenPerRoom,
+    indexRowsWrittenPerDay: indexRowsWrittenPerRoom * roomsPerDay,
+    alarmRowsWrittenPerRoom,
+    alarmRowsWrittenPerDay: alarmRowsWrittenPerRoom * roomsPerDay,
+    deletedRowsWrittenPerRoom,
+    deletedRowsWrittenPerDay: deletedRowsWrittenPerRoom * roomsPerDay,
+    writtenPerRoom,
+    writtenPerDay: writtenPerRoom * roomsPerDay,
+  };
+}
+
 function gate(name, actual, target, allowance) {
-  return Object.freeze({ name, actual, target, allowance, passed: actual <= target });
+  return Object.freeze({
+    name,
+    actual,
+    target,
+    allowance,
+    passed: actual <= target,
+    freePassed: actual <= allowance,
+  });
 }
 
 function rounded(value) {
@@ -202,14 +308,14 @@ export function simulatePlanBBudget({
     'reuse initialization': sqlProfiles.room.initialization.rowsRead,
     'reuse activation': sqlProfiles.registry.reuseActivation.rowsRead,
   };
-  const operations = Object.fromEntries(Object.entries(BASE_OPERATIONS).map(([name, operation]) => {
+  const baseOperations = Object.fromEntries(Object.entries(BASE_OPERATIONS).map(([name, operation]) => {
     const measuredRowsRead = measuredReads[name] ?? operation.costEach.rowsRead;
     return [name, operationWithTotal({
       ...operation,
       costEach: cost({ ...operation.costEach, rowsRead: measuredRowsRead }),
     })];
   }));
-  operations['hypothetical per-command regression'] = operationWithTotal({
+  baseOperations['hypothetical per-command regression'] = operationWithTotal({
     countPerRoom: 1_000,
     costEach: cost({
       rowsRead: extra.recipientRowsReadPerCommand,
@@ -226,29 +332,43 @@ export function simulatePlanBBudget({
   const websocketLookupRpcs = 9;
   const websocketRoomRequests = 9
     * (PUBLIC_ROOM_ROUTER_DO_CALL_GRAPH.websocket.length - 1);
+  const lifecycleAlarmInvocations = 2;
+  const ddsAlarmInvocations = 3;
+  const ddsComputeExecutionsPerRoom = 4;
   const billedPerRoom = createRpcs + joinLookupRpcs + joinRoomRpcs
-    + websocketLookupRpcs + websocketRoomRequests + websocketMessageBillingGroups + 2 + 3 + 3;
+    + websocketLookupRpcs + websocketRoomRequests + websocketMessageBillingGroups
+    + lifecycleAlarmInvocations + ddsAlarmInvocations + 3 + 3;
   const requestTriggeredHandlerExecutionsPerRoom = createRpcs + joinLookupRpcs + joinRoomRpcs
     + websocketLookupRpcs + websocketRoomRequests
-    + websocketMessages + 2 + 3 + 3;
+    + websocketMessages + lifecycleAlarmInvocations + ddsAlarmInvocations + 3 + 3;
   const websocketCloseHandlersPerRoom = 9;
   const handlerExecutionsPerRoom = requestTriggeredHandlerExecutionsPerRoom
     + websocketCloseHandlersPerRoom;
-  operations['worst-case room wake reconstruction'] = operationWithTotal({
+  baseOperations['worst-case room wake reconstruction'] = operationWithTotal({
     countPerRoom: handlerExecutionsPerRoom,
     costEach: cost({ rowsRead: sqlProfiles.room.wakeReconstruction.rowsRead }),
   });
-  const durationGbSecondsPerDay = rounded(
-    roomsPerDay * handlerExecutionsPerRoom * 0.5 * 0.128,
+  const commonOperations = { ...baseOperations };
+  for (const [name, operation] of Object.entries(CLASSIC_DDS_COMMON_OPERATIONS)) {
+    commonOperations[name] = operationWithTotal(operation);
+  }
+  const buildVariantOperations = (name, profile) => ({
+    ...commonOperations,
+    [name]: operationWithTotal({ countPerRoom: 1, costEach: profile }),
+  });
+  const successOperations = buildVariantOperations(
+    'classic DDS successful trusted settlement',
+    MEASURED_CLASSIC_DDS_SQL_PROFILES.successfulSettlement,
   );
-
-  const readPerRoom = sumOperations(operations, 'rowsRead');
-  const tableRowsWrittenPerRoom = sumOperations(operations, 'tableRowsWritten');
-  const indexRowsWrittenPerRoom = sumOperations(operations, 'indexRowsWritten');
-  const alarmRowsWrittenPerRoom = sumOperations(operations, 'alarmRowsWritten');
-  const deletedRowsWrittenPerRoom = sumOperations(operations, 'deletedRowsWritten');
-  const writtenPerRoom = tableRowsWrittenPerRoom + indexRowsWrittenPerRoom
-    + alarmRowsWrittenPerRoom + deletedRowsWrittenPerRoom;
+  const exhaustionOperations = buildVariantOperations(
+    'classic DDS exhausted trusted settlement',
+    MEASURED_CLASSIC_DDS_SQL_PROFILES.exhaustedSettlement,
+  );
+  const durationGbSecondsPerDay = rounded(
+    roomsPerDay * (handlerExecutionsPerRoom + ddsComputeExecutionsPerRoom) * 0.5 * 0.128,
+  );
+  const successRows = summarizeRows(successOperations, roomsPerDay);
+  const exhaustionRows = summarizeRows(exhaustionOperations, roomsPerDay);
 
   // Snapshot size is protocol-capped at 512 KiB. The remaining terms reserve
   // 4 KiB per retained session/action row and a 2x SQLite/index overhead.
@@ -265,7 +385,9 @@ export function simulatePlanBBudget({
       websocketRoomRequests,
       websocketMessages,
       websocketMessageBillingGroups,
-      alarmInvocations: 2,
+      lifecycleAlarmInvocations,
+      ddsAlarmInvocations,
+      alarmInvocations: lifecycleAlarmInvocations + ddsAlarmInvocations,
       releaseRpcs: 3,
       reuseRpcs: 3,
     },
@@ -281,37 +403,63 @@ export function simulatePlanBBudget({
     websocketCloseHandlersPerRoom,
     handlerExecutionsPerRoom,
     handlerExecutionsPerDay: handlerExecutionsPerRoom * roomsPerDay,
+    ddsComputeExecutionsPerRoom,
+    ddsComputeExecutionsPerDay: ddsComputeExecutionsPerRoom * roomsPerDay,
+    durationExecutionUnitsPerRoom: handlerExecutionsPerRoom + ddsComputeExecutionsPerRoom,
+    durationExecutionUnitsPerDay:
+      (handlerExecutionsPerRoom + ddsComputeExecutionsPerRoom) * roomsPerDay,
     activeSecondsPerHandler: 0.5,
     memoryGb: 0.128,
     gbSecondsPerDay: durationGbSecondsPerDay,
   };
-  const rows = {
-    operations,
-    readPerRoom,
-    readPerDay: readPerRoom * roomsPerDay,
-    tableRowsWrittenPerRoom,
-    tableRowsWrittenPerDay: tableRowsWrittenPerRoom * roomsPerDay,
-    indexRowsWrittenPerRoom,
-    indexRowsWrittenPerDay: indexRowsWrittenPerRoom * roomsPerDay,
-    alarmRowsWrittenPerRoom,
-    alarmRowsWrittenPerDay: alarmRowsWrittenPerRoom * roomsPerDay,
-    deletedRowsWrittenPerRoom,
-    deletedRowsWrittenPerDay: deletedRowsWrittenPerRoom * roomsPerDay,
-    writtenPerRoom,
-    writtenPerDay: writtenPerRoom * roomsPerDay,
-  };
   const storage = { bytes: storageBytes, gigabytes: storageBytes / GB };
-  const gates = [
+  const gatesForRows = variantRows => [
     gate('billedRequests', requests.billedPerDay, PLAN_B_TARGETS.billedRequestsPerDay, PLAN_B_FREE_ALLOWANCES.billedRequestsPerDay),
     gate('duration', duration.gbSecondsPerDay, PLAN_B_TARGETS.durationGbSecondsPerDay, PLAN_B_FREE_ALLOWANCES.durationGbSecondsPerDay),
-    gate('rowsRead', rows.readPerDay, PLAN_B_TARGETS.rowsReadPerDay, PLAN_B_FREE_ALLOWANCES.rowsReadPerDay),
-    gate('rowsWritten', rows.writtenPerDay, PLAN_B_TARGETS.rowsWrittenPerDay, PLAN_B_FREE_ALLOWANCES.rowsWrittenPerDay),
+    gate('rowsRead', variantRows.readPerDay, PLAN_B_TARGETS.rowsReadPerDay, PLAN_B_FREE_ALLOWANCES.rowsReadPerDay),
+    gate('rowsWritten', variantRows.writtenPerDay, PLAN_B_TARGETS.rowsWrittenPerDay, PLAN_B_FREE_ALLOWANCES.rowsWrittenPerDay),
     gate('storage', storage.bytes, PLAN_B_TARGETS.storageBytes, PLAN_B_FREE_ALLOWANCES.storageBytes),
   ];
+  const successGates = gatesForRows(successRows);
+  const exhaustionGates = gatesForRows(exhaustionRows);
+  const rows = {
+    ...exhaustionRows,
+    variants: {
+      successAfterEviction: { ...successRows, gates: successGates },
+      attempt3Exhaustion: { ...exhaustionRows, gates: exhaustionGates },
+    },
+  };
+  const gates = gatesForRows(rows);
+
+  const dds = {
+    logicalAttemptsPerDeal: 3,
+    computationsPerDeal: 4,
+    immediateComputationsPerDeal: 1,
+    alarmComputationsPerDeal: 3,
+    alarmHandlerInvocationsPerDeal: 3,
+    variants: {
+      successAfterEviction: {
+        outcome: 'READY', evictions: 1, logicalAttempts: 3, computations: 4,
+      },
+      attempt3Exhaustion: {
+        outcome: 'FAILED', evictions: 0, logicalAttempts: 3, computations: 4,
+      },
+    },
+  };
 
   return {
-    scenario: { roomsPerDay, commandsPerRoom: 1_000, initialSocketsPerRoom: 5, reconnectsPerRoom: 4 },
-    sqlProfiles,
+    scenario: {
+      roomsPerDay,
+      commandsPerRoom: 1_000,
+      initialSocketsPerRoom: 5,
+      reconnectsPerRoom: 4,
+      classicDealsPerRoom: 1,
+      logicalDdsAttemptsPerDeal: 3,
+      maxDdsComputationsPerDeal: 4,
+    },
+    classicDeal: { commandReservation: { ...CLASSIC_COMMAND_RESERVATION } },
+    dds,
+    sqlProfiles: { ...sqlProfiles, classicDds: MEASURED_CLASSIC_DDS_SQL_PROFILES },
     requests,
     duration,
     rows,
@@ -359,12 +507,44 @@ export function assertPlanBBudget(report) {
       || item.actual !== expectedActuals[item.name]
       || item.target !== expectedTargets[item.name]
       || item.allowance !== expectedAllowances[item.name]
-      || typeof item.passed !== 'boolean' || item.passed !== (item.actual <= item.target)) {
+      || typeof item.passed !== 'boolean' || item.passed !== (item.actual <= item.target)
+      || typeof item.freePassed !== 'boolean'
+      || item.freePassed !== (item.actual <= item.allowance)) {
       throw new TypeError('Invalid or missing Plan B budget gates');
     }
     names.add(item.name);
   }
-  const failed = report.gates.filter((item) => item.passed !== true);
+  for (const variantName of ['successAfterEviction', 'attempt3Exhaustion']) {
+    const variant = report?.rows?.variants?.[variantName];
+    if (!variant || !Array.isArray(variant.gates)
+      || variant.gates.length !== expectedNames.length) {
+      throw new TypeError('Invalid or missing Plan B budget gates');
+    }
+    const variantActuals = {
+      billedRequests: report.requests.billedPerDay,
+      duration: report.duration.gbSecondsPerDay,
+      rowsRead: variant.readPerDay,
+      rowsWritten: variant.writtenPerDay,
+      storage: report.storage.bytes,
+    };
+    const variantNames = new Set();
+    for (const item of variant.gates) {
+      if (item === null || typeof item !== 'object' || !expectedNames.includes(item.name)
+        || variantNames.has(item.name)
+        || item.actual !== variantActuals[item.name]
+        || item.target !== expectedTargets[item.name]
+        || item.allowance !== expectedAllowances[item.name]
+        || item.passed !== (item.actual <= item.target)
+        || item.freePassed !== (item.actual <= item.allowance)) {
+        throw new TypeError('Invalid or missing Plan B budget gates');
+      }
+      variantNames.add(item.name);
+    }
+    if (variant.gates.some(item => item.passed !== true || item.freePassed !== true)) {
+      throw new Error(`Plan B budget exceeded: ${variantName}`);
+    }
+  }
+  const failed = report.gates.filter((item) => item.passed !== true || item.freePassed !== true);
   if (failed.length > 0) {
     throw new Error(`Plan B budget exceeded: ${failed.map((item) => item.name).join(', ')}`);
   }

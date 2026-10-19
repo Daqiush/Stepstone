@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import {
+  MEASURED_CLASSIC_DDS_SQL_PROFILES,
   MEASURED_ROOM_SQL_PROFILES,
   PLAN_B_TARGETS,
   assertPlanBBudget,
@@ -13,6 +14,85 @@ import {
   measuredRegistrySqlProfiles,
   simulatePlanBBudget,
 } from '../src/room-foundation/budget-model.mjs';
+
+test('models one complete classic deal with bounded overlapping DDS recovery variants', () => {
+  const report = simulatePlanBBudget();
+
+  assert.deepEqual(report.scenario, {
+    roomsPerDay: 50,
+    commandsPerRoom: 1_000,
+    initialSocketsPerRoom: 5,
+    reconnectsPerRoom: 4,
+    classicDealsPerRoom: 1,
+    logicalDdsAttemptsPerDeal: 3,
+    maxDdsComputationsPerDeal: 4,
+  });
+  assert.deepEqual(report.classicDeal.commandReservation, {
+    dealStarts: 1,
+    maximumLegalAuctionCalls: 319,
+    cardPlays: 52,
+    reconnectSnapshots: 4,
+    commandsUsed: 372,
+    commandsReserved: 1_000,
+    commandsRemaining: 628,
+  });
+  assert.deepEqual(report.dds, {
+    logicalAttemptsPerDeal: 3,
+    computationsPerDeal: 4,
+    immediateComputationsPerDeal: 1,
+    alarmComputationsPerDeal: 3,
+    alarmHandlerInvocationsPerDeal: 3,
+    variants: {
+      successAfterEviction: {
+        outcome: 'READY',
+        evictions: 1,
+        logicalAttempts: 3,
+        computations: 4,
+      },
+      attempt3Exhaustion: {
+        outcome: 'FAILED',
+        evictions: 0,
+        logicalAttempts: 3,
+        computations: 4,
+      },
+    },
+  });
+
+  const { successAfterEviction, attempt3Exhaustion } = report.rows.variants;
+  assert.ok(successAfterEviction.operations['classic DDS successful trusted settlement']);
+  assert.equal(successAfterEviction.operations['classic DDS exhausted trusted settlement'], undefined);
+  assert.ok(attempt3Exhaustion.operations['classic DDS exhausted trusted settlement']);
+  assert.equal(attempt3Exhaustion.operations['classic DDS successful trusted settlement'], undefined);
+  for (const variant of [successAfterEviction, attempt3Exhaustion]) {
+    assert.equal(variant.operations['ordinary command'].countPerRoom, 1_000);
+    assert.equal(variant.operations['classic DDS action creation'].countPerRoom, 1);
+    assert.equal(variant.operations['classic DDS alarm computation'].countPerRoom, 3);
+    assert.equal(variant.operations['classic DDS guarded retry update'].countPerRoom, 2);
+    assert.equal(variant.operations['classic DDS stale overlap guard'].countPerRoom, 1);
+    assert.equal(variant.gates.every(gate => gate.passed), true);
+    assert.equal(variant.gates.every(gate => gate.freePassed), true);
+  }
+
+  for (const [operation, profile] of [
+    ['classic DDS action creation', MEASURED_CLASSIC_DDS_SQL_PROFILES.actionCreation],
+    ['classic DDS alarm computation', MEASURED_CLASSIC_DDS_SQL_PROFILES.alarmComputation],
+    ['classic DDS guarded retry update', MEASURED_CLASSIC_DDS_SQL_PROFILES.retryUpdate],
+    ['classic DDS stale overlap guard', MEASURED_CLASSIC_DDS_SQL_PROFILES.staleOverlapGuard],
+  ]) {
+    assert.deepEqual(successAfterEviction.operations[operation].costEach, profile, operation);
+    assert.deepEqual(attempt3Exhaustion.operations[operation].costEach, profile, operation);
+  }
+  assert.deepEqual(
+    successAfterEviction.operations['classic DDS successful trusted settlement'].costEach,
+    MEASURED_CLASSIC_DDS_SQL_PROFILES.successfulSettlement,
+  );
+  assert.deepEqual(
+    attempt3Exhaustion.operations['classic DDS exhausted trusted settlement'].costEach,
+    MEASURED_CLASSIC_DDS_SQL_PROFILES.exhaustedSettlement,
+  );
+  assert.equal(report.gates.every(gate => gate.passed), true);
+  assert.equal(report.gates.every(gate => gate.freePassed), true);
+});
 
 test('models the approved Plan B request and duration envelope exactly', () => {
   const report = simulatePlanBBudget();
@@ -26,19 +106,23 @@ test('models the approved Plan B request and duration envelope exactly', () => {
     websocketRoomRequests: 9,
     websocketMessages: 1_009,
     websocketMessageBillingGroups: 51,
-    alarmInvocations: 2,
+    lifecycleAlarmInvocations: 2,
+    ddsAlarmInvocations: 3,
+    alarmInvocations: 5,
     releaseRpcs: 3,
     reuseRpcs: 3,
   });
-  assert.equal(report.requests.billedPerRoom, 88);
-  assert.equal(report.requests.billedPerDay, 4_400);
-  assert.equal(report.duration.requestTriggeredHandlerExecutionsPerRoom, 1_046);
+  assert.equal(report.requests.billedPerRoom, 91);
+  assert.equal(report.requests.billedPerDay, 4_550);
+  assert.equal(report.duration.requestTriggeredHandlerExecutionsPerRoom, 1_049);
   assert.equal(report.duration.websocketCloseHandlersPerRoom, 9);
-  assert.equal(report.duration.handlerExecutionsPerRoom, 1_055);
+  assert.equal(report.duration.handlerExecutionsPerRoom, 1_058);
+  assert.equal(report.duration.ddsComputeExecutionsPerRoom, 4);
+  assert.equal(report.duration.durationExecutionUnitsPerRoom, 1_062);
   assert.equal(report.duration.activeSecondsPerHandler, 0.5);
   assert.equal(report.duration.memoryGb, 0.128);
-  assert.equal(report.duration.requestTriggeredGbSecondsPerDay, 3_347.2);
-  assert.equal(report.duration.gbSecondsPerDay, 3_376);
+  assert.equal(report.duration.requestTriggeredGbSecondsPerDay, 3_356.8);
+  assert.equal(report.duration.gbSecondsPerDay, 3_398.4);
   assert.equal(PLAN_B_TARGETS.storageBytes, 3_500_000_000);
   assert.equal(report.storage.gigabytes, report.storage.bytes / 1_000_000_000);
 });
@@ -62,6 +146,13 @@ test('fails closed when any budget gate is missing or malformed', () => {
   ]) {
     assert.throws(() => assertPlanBBudget(malformed), /invalid|missing|exceeded/iu);
   }
+
+  const variantFailure = structuredClone(valid);
+  variantFailure.rows.variants.successAfterEviction.gates[0].passed = false;
+  assert.throws(() => assertPlanBBudget(variantFailure), /invalid|missing|exceeded/iu);
+  const freeFailure = structuredClone(valid);
+  freeFailure.rows.variants.attempt3Exhaustion.gates[0].freePassed = false;
+  assert.throws(() => assertPlanBBudget(freeFailure), /invalid|missing|exceeded/iu);
 });
 
 test('counts current table, index, alarm, retention, and deleteAll write costs', () => {
@@ -113,12 +204,12 @@ test('counts current table, index, alarm, retention, and deleteAll write costs',
       operationName,
     );
   }
-  assert.equal(report.rows.writtenPerRoom, 1_269);
-  assert.equal(report.rows.writtenPerDay, 63_450);
-  assert.equal(report.rows.readPerDay, 194_050);
-  assert.equal(report.rows.indexRowsWrittenPerDay, 6_550);
-  assert.equal(report.rows.alarmRowsWrittenPerDay, 1_550);
-  assert.equal(report.rows.deletedRowsWrittenPerDay, 1_100);
+  assert.equal(report.rows.writtenPerRoom, 1_282);
+  assert.equal(report.rows.writtenPerDay, 64_100);
+  assert.equal(report.rows.readPerDay, 195_850);
+  assert.equal(report.rows.indexRowsWrittenPerDay, 6_750);
+  assert.equal(report.rows.alarmRowsWrittenPerDay, 1_750);
+  assert.equal(report.rows.deletedRowsWrittenPerDay, 1_150);
   assert.ok(report.rows.readPerDay <= report.targets.rowsReadPerDay);
   assert.ok(report.storage.bytes <= report.targets.storageBytes);
   assert.equal(report.gates.every((gate) => gate.passed), true);
@@ -145,7 +236,7 @@ test('derives registry scans from measured cardinality formulas and explicit run
     },
   });
   assert.equal(injected.rows.operations.allocation.costEach.rowsRead, 900);
-  assert.equal(injected.rows.readPerDay, 232_600);
+  assert.equal(injected.rows.readPerDay, 234_400);
 });
 
 test('fails the write gate for a command table or a command-maintained secondary index', () => {
@@ -209,8 +300,15 @@ test('room budget simulator runs independently and can merge an optional DDS rep
     encoding: 'utf8',
   });
   assert.equal(standalone.status, 0, standalone.stderr);
-  assert.match(standalone.stdout, /4,400 billed requests/u);
-  assert.match(standalone.stdout, /3,376 GB-s/u);
+  assert.match(standalone.stdout, /one complete classic deal.*372 of 1,000 commands/iu);
+  assert.match(standalone.stdout, /success after eviction.*READY/iu);
+  assert.match(standalone.stdout, /attempt-3 exhaustion.*FAILED/iu);
+  assert.match(standalone.stdout, /DDS.*3 logical attempts.*4 computations.*3 alarm requests/iu);
+  assert.match(standalone.stdout, /DDS rows.*30 read.*13 written/iu);
+  assert.match(standalone.stdout,
+    /Gates.*billedRequests=true\/true.*duration=true\/true.*rowsRead=true\/true.*rowsWritten=true\/true.*storage=true\/true/iu);
+  assert.match(standalone.stdout, /4,550 billed requests/u);
+  assert.match(standalone.stdout, /3,398.4 GB-s/u);
 
   const directory = mkdtempSync(join(tmpdir(), 'stepstone-room-budget-'));
   const reportPath = join(directory, 'dds-report.json');
@@ -224,10 +322,17 @@ test('room budget simulator runs independently and can merge an optional DDS rep
   assert.equal(merged.status, 0, merged.stderr);
   const saved = JSON.parse(readFileSync(reportPath, 'utf8'));
   assert.equal(saved.budget.rooms, 50);
-  assert.equal(saved.budget.requestsPerDay, 4_400);
-  assert.equal(saved.budget.requestTriggeredHandlerExecutionsPerRoom, 1_046);
-  assert.equal(saved.budget.handlerExecutionsPerRoom, 1_055);
-  assert.equal(saved.budget.durationGbSecondsPerDay, 3_376);
-  assert.equal(saved.budget.writesPerDay, 63_450);
-  assert.equal(saved.budget.readsPerDay, 194_050);
+  assert.equal(saved.budget.classicDealsPerRoom, 1);
+  assert.equal(saved.budget.logicalDdsAttemptsPerDeal, 3);
+  assert.equal(saved.budget.maxDdsComputationsPerDeal, 4);
+  assert.equal(saved.budget.requestsPerDay, 4_550);
+  assert.equal(saved.budget.requestTriggeredHandlerExecutionsPerRoom, 1_049);
+  assert.equal(saved.budget.handlerExecutionsPerRoom, 1_058);
+  assert.equal(saved.budget.ddsComputeExecutionsPerRoom, 4);
+  assert.equal(saved.budget.durationGbSecondsPerDay, 3_398.4);
+  assert.equal(saved.budget.writesPerDay, 64_100);
+  assert.equal(saved.budget.readsPerDay, 195_850);
+  assert.equal(saved.budget.variants.successAfterEviction.rowsReadPerRoom, 3_917);
+  assert.equal(saved.budget.variants.successAfterEviction.rowsWrittenPerRoom, 1_282);
+  assert.equal(saved.budget.variants.attempt3Exhaustion.rowsWrittenPerRoom, 1_282);
 });

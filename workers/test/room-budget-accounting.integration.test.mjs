@@ -3,12 +3,22 @@ import { randomBytes } from 'node:crypto';
 import { after, before, test } from 'node:test';
 
 import {
+  MEASURED_CLASSIC_DDS_SQL_PROFILES,
   MEASURED_ROOM_SQL_PROFILES,
   measuredRegistrySqlProfiles,
   simulatePlanBBudget,
 } from '../src/room-foundation/budget-model.mjs';
+import {
+  CLASSIC_DDS_ACTION_ID,
+} from '../src/room-foundation/classic-dds-contract.mjs';
 import { LIMITS } from '../src/room-foundation/constants.mjs';
+import fixturesModule from '../../test/helpers/classic-fixtures.js';
 import { createRoomWorkerRuntime } from './helpers/room-worker-runtime.mjs';
+
+const { orderedDeal } = fixturesModule;
+const DDS_TABLE = Array.from({ length: 5 }, (_, strain) => (
+  Array.from({ length: 4 }, (_, seat) => (strain + seat) % 14)
+));
 
 let runtime;
 
@@ -278,6 +288,7 @@ test('room initialization, join, auth, command, action, and alarm SQL match meas
       const observed = await roomCall('inspectRoomSqlAccounting');
       assert.equal(observed.totalRowsRead, MEASURED_ROOM_SQL_PROFILES[name].rowsRead, name);
       assert.equal(observed.totalRowsWritten, MEASURED_ROOM_SQL_PROFILES[name].rowsWritten, name);
+      return observed;
     };
 
     await assertProfile('initialization');
@@ -365,7 +376,16 @@ test('room initialization, join, auth, command, action, and alarm SQL match meas
     });
     assert.equal(JSON.parse(await reconnectSocket.nextMessage()).type, 'reply');
     assert.equal(JSON.parse(await reconnectSocket.nextMessage()).type, 'event');
-    await assertProfile('command');
+    const ordinaryCommand = await assertProfile('command');
+    assert.equal(ordinaryCommand.roomStateRowsRead ?? ordinaryCommand.statements
+      .filter(statement => statement.table === 'room_state')
+      .reduce((sum, statement) => sum + statement.rowsRead, 0), 1);
+    assert.equal(ordinaryCommand.roomStateRowsWritten ?? ordinaryCommand.statements
+      .filter(statement => statement.table === 'room_state')
+      .reduce((sum, statement) => sum + statement.rowsWritten, 0), 1);
+    assert.equal(ordinaryCommand.statements
+      .filter(statement => statement.table === 'sessions')
+      .reduce((sum, statement) => sum + statement.rowsRead, 0), 0);
 
     await registryCall('setReleaseFault', {
       code: room.roomCode,
@@ -393,5 +413,303 @@ test('room initialization, join, auth, command, action, and alarm SQL match meas
     );
   } finally {
     await isolated.close();
+  }
+});
+
+function splitMeasuredProfile(accounting, { alarmRowsWritten, subtractOrdinary = false } = {}) {
+  const profile = {
+    rowsRead: accounting.totalRowsRead,
+    tableRowsWritten: 0,
+    indexRowsWritten: 0,
+    alarmRowsWritten,
+    deletedRowsWritten: 0,
+  };
+  for (const statement of accounting.statements) {
+    if (statement.rowsWritten === 0) continue;
+    if (statement.operation === 'DELETE') {
+      profile.deletedRowsWritten += 1;
+      profile.indexRowsWritten += statement.rowsWritten - 1;
+    } else if (statement.table === 'pending_actions') {
+      profile.tableRowsWritten += 1;
+      profile.indexRowsWritten += statement.rowsWritten - 1;
+    } else {
+      profile.tableRowsWritten += statement.rowsWritten;
+    }
+  }
+  if (subtractOrdinary) {
+    profile.rowsRead -= MEASURED_ROOM_SQL_PROFILES.command.rowsRead;
+    profile.tableRowsWritten -= MEASURED_ROOM_SQL_PROFILES.command.rowsWritten;
+  }
+  return profile;
+}
+
+async function createMeasuredClassicRoom(target, label) {
+  let sequence = 0;
+  const nextId = suffix => `${label}_${suffix}_${String(++sequence).padStart(8, '0')}`;
+  const token = () => randomBytes(32).toString('base64url');
+  const post = (path, body) => target.request(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const ownerToken = token();
+  const created = await post('/api/rooms', {
+    v: 1, requestId: nextId('create'), displayName: 'North', reconnectToken: ownerToken,
+  });
+  assert.equal(created.status, 200, created.text);
+  const room = created.body;
+  const sessions = [{ ...room, reconnectToken: ownerToken }];
+  for (const displayName of ['East', 'South', 'West']) {
+    const reconnectToken = token();
+    const joined = await post(`/api/rooms/${room.roomCode}/join`, {
+      v: 1, requestId: nextId('join'), displayName, reconnectToken, requestedRole: 'player',
+    });
+    assert.equal(joined.status, 200, joined.text);
+    sessions.push({ ...joined.body, reconnectToken });
+  }
+  const sockets = [];
+  for (const session of sessions) {
+    const socket = await target.openWebSocket(
+      `/api/rooms/${room.roomCode}/${room.incarnation}/ws`,
+    );
+    socket.send({
+      v: 1, type: 'hello', id: nextId('hello'), reconnectToken: session.reconnectToken,
+      nextReconnectToken: token(),
+    });
+    assert.equal(JSON.parse(await socket.nextMessage()).type, 'hello-ok');
+    sockets.push(socket);
+  }
+  return { room, sockets, nextId };
+}
+
+async function roomValue(target, room, action, input = {}) {
+  const response = await target.room(action, {
+    code: room.roomCode, incarnation: room.incarnation, ...input,
+  });
+  assert.equal(response.status, 200, JSON.stringify(response.body));
+  return response.body.value;
+}
+
+async function accounting(target, room) {
+  return roomValue(target, room, 'inspectRoomSqlAccounting');
+}
+
+async function waitForAccounting(target, room, predicate) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const observed = await accounting(target, room);
+    if (predicate(observed)) return observed;
+    await target.wait(10);
+  }
+  assert.fail('timed out waiting for measured classic DDS SQL');
+}
+
+async function inspectRoom(target, room) {
+  return roomValue(target, room, 'inspectRoom');
+}
+
+async function waitForRoom(target, room, predicate) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const state = await inspectRoom(target, room);
+    if (predicate(state)) return state;
+    await target.wait(10);
+  }
+  assert.fail('timed out waiting for classic DDS room state');
+}
+
+async function startMeasuredClassicDeal(target, label) {
+  const { room, sockets, nextId } = await createMeasuredClassicRoom(target, label);
+  await roomValue(target, room, 'resetRoomSqlAccounting');
+  sockets[0].send({
+    v: 1,
+    type: 'command',
+    id: nextId('start'),
+    name: 'classic.start',
+    payload: { expectedRevision: 0 },
+  });
+  assert.equal(JSON.parse(await sockets[0].nextMessage()).type, 'reply');
+  for (const socket of sockets) {
+    for (let index = 0; index < 3; index += 1) await socket.nextMessage();
+  }
+  const creationAccounting = await waitForAccounting(target, room, observed => (
+    observed.statements.some(statement => (
+      statement.table === 'pending_actions' && statement.operation === 'SELECT'
+    ))
+  ));
+  const creation = splitMeasuredProfile(creationAccounting, {
+    alarmRowsWritten: 1,
+    subtractOrdinary: true,
+  });
+  return { room, sockets, creation };
+}
+
+async function pendingDdsAction(target, room) {
+  const state = await inspectRoom(target, room);
+  return state.pendingActions.find(action => action.actionId === CLASSIC_DDS_ACTION_ID);
+}
+
+async function resolveDds(target, room, result, table = undefined) {
+  await roomValue(target, room, 'resolveRoomClassicDds', {
+    result,
+    ...(table === undefined ? {} : { table }),
+  });
+}
+
+test('Miniflare measures exact classic DDS action, retry, stale, and terminal SQL splits', async () => {
+  const successRuntime = await createRoomWorkerRuntime({
+    vars: {
+      CLASSIC_TEST_DEALS_JSON: JSON.stringify([orderedDeal()]),
+      CLASSIC_TEST_DDS_PAUSE: 'true',
+    },
+  });
+  const failureRuntime = await createRoomWorkerRuntime({
+    vars: {
+      CLASSIC_TEST_DEALS_JSON: JSON.stringify([orderedDeal()]),
+      CLASSIC_TEST_DDS_PAUSE: 'true',
+    },
+  });
+  try {
+    const success = await startMeasuredClassicDeal(successRuntime, 'budget_dds_success');
+    assert.deepEqual(success.creation, MEASURED_CLASSIC_DDS_SQL_PROFILES.actionCreation);
+
+    const initialState = await inspectRoom(successRuntime, success.room);
+    const attempt1 = initialState.pendingActions.find(
+      action => action.actionId === CLASSIC_DDS_ACTION_ID,
+    );
+    assert.equal(initialState.alarmAt, attempt1.dueAt);
+    await roomValue(successRuntime, success.room, 'resetRoomSqlAccounting');
+    await roomValue(successRuntime, success.room, 'runRoomAlarmAt', { now: attempt1.dueAt });
+    const alarmAccounting = await waitForAccounting(successRuntime, success.room, observed => (
+      observed.statements.filter(statement => statement.table === 'pending_actions').length >= 2
+    ));
+    assert.deepEqual(
+      splitMeasuredProfile(alarmAccounting, { alarmRowsWritten: 0 }),
+      MEASURED_CLASSIC_DDS_SQL_PROFILES.alarmComputation,
+    );
+    await roomValue(successRuntime, success.room, 'dropRoomAlarm');
+    const overlap = await roomValue(successRuntime, success.room, 'inspectRoomClassicDds');
+    assert.equal(overlap.paused.length, 2);
+
+    await roomValue(successRuntime, success.room, 'resetRoomSqlAccounting');
+    await resolveDds(successRuntime, success.room, 'failure');
+    const retryAccounting = await waitForAccounting(successRuntime, success.room, observed => (
+      observed.statements.some(statement => (
+        statement.table === 'pending_actions' && statement.operation === 'UPDATE'
+      ))
+    ));
+    const retry = splitMeasuredProfile(retryAccounting, { alarmRowsWritten: 1 });
+    assert.deepEqual(retry, MEASURED_CLASSIC_DDS_SQL_PROFILES.retryUpdate);
+    await roomValue(successRuntime, success.room, 'resetRoomSqlAccounting');
+    await resolveDds(successRuntime, success.room, 'failure');
+    const staleAccounting = await waitForAccounting(successRuntime, success.room, observed => (
+      observed.statements.some(statement => statement.table === 'pending_actions')
+    ));
+    const stale = splitMeasuredProfile(staleAccounting, { alarmRowsWritten: 0 });
+    assert.deepEqual(stale, MEASURED_CLASSIC_DDS_SQL_PROFILES.staleOverlapGuard);
+
+    const attempt2 = await pendingDdsAction(successRuntime, success.room);
+    await successRuntime.restartRoom(success.room.roomCode, success.room.incarnation);
+    await roomValue(successRuntime, success.room, 'runRoomAlarmAt', { now: attempt2.dueAt });
+    await roomValue(successRuntime, success.room, 'dropRoomAlarm');
+    await roomValue(successRuntime, success.room, 'resetRoomSqlAccounting');
+    await resolveDds(successRuntime, success.room, 'failure');
+    const retry2Accounting = await waitForAccounting(successRuntime, success.room, observed => (
+      observed.statements.some(statement => (
+        statement.table === 'pending_actions' && statement.operation === 'UPDATE'
+      ))
+    ));
+    assert.deepEqual(
+      splitMeasuredProfile(retry2Accounting, { alarmRowsWritten: 1 }),
+      MEASURED_CLASSIC_DDS_SQL_PROFILES.retryUpdate,
+    );
+    const attempt3 = await pendingDdsAction(successRuntime, success.room);
+    await roomValue(successRuntime, success.room, 'runRoomAlarmAt', { now: attempt3.dueAt });
+    await roomValue(successRuntime, success.room, 'dropRoomAlarm');
+    await roomValue(successRuntime, success.room, 'resetRoomSqlAccounting');
+    await resolveDds(successRuntime, success.room, 'success', DDS_TABLE);
+    const successAccounting = await waitForAccounting(successRuntime, success.room, observed => (
+      observed.statements.some(statement => (
+        statement.table === 'pending_actions' && statement.operation === 'DELETE'
+      ))
+    ));
+    assert.deepEqual(
+      splitMeasuredProfile(successAccounting, { alarmRowsWritten: 1 }),
+      MEASURED_CLASSIC_DDS_SQL_PROFILES.successfulSettlement,
+    );
+    const readyState = await waitForRoom(
+      successRuntime,
+      success.room,
+      state => state.classicState.ddsStatus === 'READY',
+    );
+    assert.equal(readyState.classicState.ddsStatus, 'READY');
+    assert.equal(readyState.pendingActions.some(
+      action => action.actionId === CLASSIC_DDS_ACTION_ID,
+    ), false);
+
+    const failure = await startMeasuredClassicDeal(failureRuntime, 'budget_dds_failure');
+    assert.deepEqual(failure.creation, MEASURED_CLASSIC_DDS_SQL_PROFILES.actionCreation);
+    const failureAttempt1 = await pendingDdsAction(failureRuntime, failure.room);
+    await roomValue(failureRuntime, failure.room, 'runRoomAlarmAt', {
+      now: failureAttempt1.dueAt,
+    });
+    await roomValue(failureRuntime, failure.room, 'dropRoomAlarm');
+    assert.equal((await roomValue(
+      failureRuntime,
+      failure.room,
+      'inspectRoomClassicDds',
+    )).paused.length, 2);
+    for (const attempt of [1, 2, 3]) {
+      if (attempt > 1) {
+        const action = await pendingDdsAction(failureRuntime, failure.room);
+        await roomValue(failureRuntime, failure.room, 'runRoomAlarmAt', { now: action.dueAt });
+        await roomValue(failureRuntime, failure.room, 'dropRoomAlarm');
+      }
+      await roomValue(failureRuntime, failure.room, 'resetRoomSqlAccounting');
+      await resolveDds(failureRuntime, failure.room, 'failure');
+      const terminal = attempt === 3;
+      const observed = await waitForAccounting(failureRuntime, failure.room, profile => (
+        profile.statements.some(statement => (
+          statement.table === 'pending_actions'
+          && statement.operation === (terminal ? 'DELETE' : 'UPDATE')
+        ))
+      ));
+      assert.deepEqual(
+        splitMeasuredProfile(observed, { alarmRowsWritten: 1 }),
+        terminal
+          ? MEASURED_CLASSIC_DDS_SQL_PROFILES.exhaustedSettlement
+          : MEASURED_CLASSIC_DDS_SQL_PROFILES.retryUpdate,
+      );
+      const state = await waitForRoom(
+        failureRuntime,
+        failure.room,
+        value => terminal
+          ? value.classicState.ddsStatus === 'FAILED'
+          : value.pendingActions.some(item => item.actionId === CLASSIC_DDS_ACTION_ID),
+      );
+      const action = state.pendingActions.find(
+        item => item.actionId === CLASSIC_DDS_ACTION_ID,
+      );
+      if (terminal) {
+        assert.equal(state.classicState.ddsStatus, 'FAILED');
+        assert.equal(action, undefined);
+      }
+      if (attempt === 1) {
+        await roomValue(failureRuntime, failure.room, 'resetRoomSqlAccounting');
+        await resolveDds(failureRuntime, failure.room, 'failure');
+        const staleObserved = await waitForAccounting(
+          failureRuntime,
+          failure.room,
+          profile => profile.statements.some(statement => statement.table === 'pending_actions'),
+        );
+        assert.deepEqual(
+          splitMeasuredProfile(staleObserved, { alarmRowsWritten: 0 }),
+          MEASURED_CLASSIC_DDS_SQL_PROFILES.staleOverlapGuard,
+        );
+      }
+    }
+  } finally {
+    await successRuntime.close();
+    await failureRuntime.close();
   }
 });

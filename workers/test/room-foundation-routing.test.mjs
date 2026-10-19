@@ -3,9 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 
 import {
-  LobbyRegistry,
   PUBLIC_ROOM_ROUTER_DO_CALL_GRAPH,
-  StepstoneRoom,
   fetchWorker,
 } from '../src/room-foundation/router.mjs';
 
@@ -100,6 +98,14 @@ test('room routes stay opaque unless ROOM_FOUNDATION_TEST is exactly the string 
   }
 });
 
+test('the public room router has exactly one gated room-foundation dispatch', async () => {
+  const router = await readFile(new URL('../src/room-foundation/router.mjs', import.meta.url), 'utf8');
+  const dispatches = router.match(/return fetchRoomFoundation\(request, env\);/gu) ?? [];
+  assert.equal(dispatches.length, 1);
+  assert.match(router,
+    /if \(env\?\.ROOM_FOUNDATION_TEST === 'true' && isRoomPath\(path\)\) \{\s*return fetchRoomFoundation\(request, env\);\s*\}/u);
+});
+
 test('enabled room routes expose only the three future public route shapes', async () => {
   const env = { ROOM_FOUNDATION_TEST: 'true' };
   await assertRoomNotFound(await fetchWorker(request('/api/rooms'), env));
@@ -168,15 +174,21 @@ test('non-room paths retain the existing DDS harness dispatch', async () => {
   await assertOpaqueNotFound(await fetchWorker(request('/api/roomsets'), env));
 });
 
-test('Worker exports all configured Durable Object classes and placeholders fail closed', async () => {
-  assert.equal(typeof LobbyRegistry, 'function');
-  assert.equal(typeof StepstoneRoom, 'function');
-  await assertOpaqueNotFound(await new LobbyRegistry().fetch(request('/internal/allocate')));
-  await assertOpaqueNotFound(await new StepstoneRoom().fetch(request('/internal/initialize')));
-
+test('Worker entry alone exports configured Durable Object classes', async () => {
   const index = await readFile(new URL('../src/index.mjs', import.meta.url), 'utf8');
+  const router = await import('../src/room-foundation/router.mjs');
+  const routerSource = await readFile(
+    new URL('../src/room-foundation/router.mjs', import.meta.url),
+    'utf8',
+  );
+
   assert.match(index, /export\s*\{\s*FeasibilityRoom\s*\}/u);
   assert.match(index, /export\s*\{\s*LobbyRegistry\s*,\s*StepstoneRoom\s*\}/u);
+  assert.match(index, /default\s*\{\s*fetch:\s*fetchWorker\s*,?\s*\}/u);
+  assert.equal(Object.hasOwn(router, 'LobbyRegistry'), false);
+  assert.equal(Object.hasOwn(router, 'StepstoneRoom'), false);
+  assert.doesNotMatch(routerSource, /import\s*\{\s*StepstoneRoom\s*\}/u);
+  assert.doesNotMatch(routerSource, /export\s*\{\s*LobbyRegistry\s*,\s*StepstoneRoom\s*\}/u);
 });
 
 test('Wrangler keeps the DDS class and adds gated room classes without public routes', async () => {
@@ -184,7 +196,9 @@ test('Wrangler keeps the DDS class and adds gated room classes without public ro
   const config = JSON.parse(await readFile(configPath, 'utf8'));
 
   assert.equal(config.workers_dev, false);
-  for (const key of ['route', 'routes', 'zone_id', 'zone_name']) {
+  for (const key of [
+    'route', 'routes', 'custom_domain', 'custom_domains', 'zone_id', 'zone_name',
+  ]) {
     assert.equal(Object.hasOwn(config, key), false, `${key} must remain absent`);
   }
   assert.deepEqual(config.durable_objects.bindings, [
