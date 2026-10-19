@@ -24,6 +24,9 @@ const PUBLIC_RANKS = Object.freeze({
   2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9,
   T: 10, J: 11, Q: 12, K: 13, A: 14,
 });
+const TEST_SEATS = Object.freeze(['N', 'E', 'S', 'W']);
+const TEST_DENOMINATIONS = Object.freeze(['C', 'D', 'H', 'S', 'NT']);
+const MAXIMUM_AUCTION_EXPECTED_CALLS = Object.freeze(buildMaximumAuctionExpectedCalls());
 const PARTNER = Object.freeze({ N: 'S', E: 'W', S: 'N', W: 'E' });
 const CLASSIC_VIEW_KEYS = Object.freeze([
   'schemaVersion', 'mode', 'phase', 'dealNumber', 'boardInfo', 'readyStatus',
@@ -65,6 +68,15 @@ const NODE_PAYLOAD_KEYS = Object.freeze({
   nextDealUpdate: ['readyStatus', 'playerNames'],
   ddTableReady: ['ddTable'],
 });
+const LEGACY_PASSED_SCORE_KEYS = Object.freeze([
+  'dealNumber', 'boardNumber', 'score', 'passedOut', 'ddTable', 'biddingHistory',
+  'initialHands',
+]);
+const LEGACY_PLAYED_SCORE_KEYS = Object.freeze([
+  'dealNumber', 'boardNumber', 'passedOut', 'contract', 'declarer', 'dummy',
+  'declarerTricks', 'needed', 'score', 'made', 'diff', 'vulnerability',
+  'biddingHistory', 'completedTricks', 'ddTable', 'claim', 'initialHands',
+]);
 const FORBIDDEN_TRANSPORT_KEYS = new Set([
   'initialHands', 'reconnectToken', 'nextReconnectToken', 'commandCache',
   'pendingActions', 'actionId', 'generationId', 'token', 'cache',
@@ -105,6 +117,252 @@ function expectedAuction(history, viewerSeat, { legacy = false } = {}) {
   });
 }
 
+function buildMaximumAuctionExpectedCalls() {
+  const bids = ['Pass', 'Pass', 'Pass'];
+  for (let level = 1; level <= 7; level += 1) {
+    for (const denomination of TEST_DENOMINATIONS) {
+      bids.push(`${level}${denomination}`, 'Pass', 'Pass', 'X', 'Pass', 'Pass', 'XX',
+        'Pass', 'Pass');
+    }
+  }
+  bids.push('Pass');
+  return bids.map((bid, index) => Object.freeze({
+    actor: TEST_SEATS[index % TEST_SEATS.length], bid,
+  }));
+}
+
+function testAuctionSide(seat) {
+  return seat === 'N' || seat === 'S' ? 'NS' : 'EW';
+}
+
+function independentContractIndex(bid) {
+  const match = /^([1-7])(C|D|H|S|NT)$/.exec(bid);
+  if (!match) return null;
+  return (Number(match[1]) - 1) * TEST_DENOMINATIONS.length
+    + TEST_DENOMINATIONS.indexOf(match[2]);
+}
+
+function assertIndependentlyLegalAuction(calls) {
+  let contract = null;
+  let contractIndex = -1;
+  let doubled = false;
+  let redoubled = false;
+  let consecutivePasses = 0;
+  let terminationIndex = null;
+
+  calls.forEach((call, index) => {
+    assert.equal(terminationIndex, null, `call ${index + 1} occurs after termination`);
+    assert.equal(call.actor, TEST_SEATS[index % TEST_SEATS.length],
+      `call ${index + 1} actor rotation`);
+
+    const nextContractIndex = independentContractIndex(call.bid);
+    if (call.bid === 'Pass') {
+      consecutivePasses += 1;
+    } else if (nextContractIndex !== null) {
+      assert.ok(nextContractIndex > contractIndex, `call ${index + 1} contract order`);
+      contract = { bidder: call.actor, bid: call.bid };
+      contractIndex = nextContractIndex;
+      doubled = false;
+      redoubled = false;
+      consecutivePasses = 0;
+    } else if (call.bid === 'X') {
+      assert.ok(contract, `call ${index + 1} X requires a contract`);
+      assert.equal(doubled, false, `call ${index + 1} X requires an undoubled contract`);
+      assert.notEqual(testAuctionSide(call.actor), testAuctionSide(contract.bidder),
+        `call ${index + 1} X must be by opponents`);
+      doubled = true;
+      redoubled = false;
+      consecutivePasses = 0;
+    } else if (call.bid === 'XX') {
+      assert.ok(contract, `call ${index + 1} XX requires a contract`);
+      assert.equal(doubled, true, `call ${index + 1} XX requires X`);
+      assert.equal(redoubled, false, `call ${index + 1} duplicate XX`);
+      assert.equal(testAuctionSide(call.actor), testAuctionSide(contract.bidder),
+        `call ${index + 1} XX must be by declaring side`);
+      redoubled = true;
+      consecutivePasses = 0;
+    } else {
+      assert.fail(`call ${index + 1} has unknown bid ${call.bid}`);
+    }
+
+    const terminated = contract === null ? consecutivePasses === 4 : consecutivePasses === 3;
+    if (terminated) terminationIndex = index;
+    assert.equal(terminated, index === calls.length - 1,
+      `call ${index + 1} termination`);
+  });
+
+  assert.equal(terminationIndex, calls.length - 1);
+  assert.equal(contractIndex, 34);
+  assert.equal(contract.bid, '7NT');
+  assert.equal(doubled, true);
+  assert.equal(redoubled, true);
+}
+
+function expectedNodeBoardScores(state, viewerSeat, room) {
+  return state.boardScores.map(score => {
+    const biddingHistory = expectedAuction(score.biddingHistory, viewerSeat);
+    if (score.passedOut) {
+      return {
+        dealNumber: score.dealNumber,
+        boardNumber: score.boardNumber,
+        score: score.score,
+        passedOut: true,
+        ddTable: clone(score.ddTable),
+        biddingHistory,
+        initialHands: clone(score.initialHands),
+      };
+    }
+    let completedTricks = clone(score.completedTricks);
+    const partial = room.classicClaimedPartialTricks?.[score.dealNumber];
+    if (partial && !completedTricks.some(trick => trick.claimed === true)) {
+      completedTricks = [...completedTricks, clone(partial)];
+    }
+    return {
+      dealNumber: score.dealNumber,
+      boardNumber: score.boardNumber,
+      passedOut: false,
+      contract: clone(score.contract),
+      declarer: score.declarer,
+      dummy: score.dummy,
+      declarerTricks: score.declarerTricks,
+      needed: score.needed,
+      score: score.score,
+      made: score.made,
+      diff: score.diff,
+      vulnerability: score.vulnerability,
+      biddingHistory,
+      completedTricks,
+      ddTable: clone(score.ddTable),
+      claim: clone(score.claim),
+      initialHands: clone(score.initialHands),
+    };
+  });
+}
+
+function assertCardShape(card, label) {
+  exactKeys(card, ['suit', 'rank'], label);
+}
+
+function assertHandsShape(hands, label) {
+  exactKeys(hands, SEATS, label);
+  for (const seat of SEATS) {
+    assert.ok(Array.isArray(hands[seat]), `${label}.${seat}`);
+    hands[seat].forEach((card, index) => assertCardShape(card, `${label}.${seat}[${index}]`));
+  }
+}
+
+function assertDdTableShape(table, label) {
+  if (table === null) return;
+  assert.equal(table.length, 5, `${label} denominations`);
+  table.forEach((row, rowIndex) => {
+    assert.equal(row.length, 4, `${label}[${rowIndex}] seats`);
+    row.forEach((value, columnIndex) => {
+      assert.equal(Number.isInteger(value), true, `${label}[${rowIndex}][${columnIndex}]`);
+    });
+  });
+}
+
+function assertLegacyAuctionShape(history, viewerSeat, label) {
+  assert.ok(Array.isArray(history), label);
+  history.forEach((entry, index) => {
+    const hiddenPartner = viewerSeat !== null && viewerSeat !== entry.seat
+      && sameSide(viewerSeat, entry.seat);
+    exactKeys(entry, hiddenPartner ? ['seat', 'bid'] : ['seat', 'bid', 'alert', 'explain', 'qa'],
+      `${label}[${index}]`);
+    if (!hiddenPartner) {
+      assert.ok(Array.isArray(entry.qa), `${label}[${index}].qa`);
+      entry.qa.forEach((qa, qaIndex) => {
+        exactKeys(qa, ['asker', 'question', 'answer', 'answerer'],
+          `${label}[${index}].qa[${qaIndex}]`);
+      });
+    }
+  });
+}
+
+function assertLegacyReplayScores(actual, state, viewerSeat, room, label) {
+  const expected = expectedNodeBoardScores(state, viewerSeat, room);
+  assert.deepEqual(actual, expected, label);
+  assert.equal(actual.length, state.boardScores.length, `${label} length`);
+  actual.forEach((score, index) => {
+    const canonical = state.boardScores[index];
+    exactKeys(score, canonical.passedOut ? LEGACY_PASSED_SCORE_KEYS : LEGACY_PLAYED_SCORE_KEYS,
+      `${label}[${index}]`);
+    assertLegacyAuctionShape(score.biddingHistory, viewerSeat,
+      `${label}[${index}].biddingHistory`);
+    assertHandsShape(score.initialHands, `${label}[${index}].initialHands`);
+    assertDdTableShape(score.ddTable, `${label}[${index}].ddTable`);
+    if (!canonical.passedOut) {
+      exactKeys(score.contract,
+        ['level', 'suit', 'seat', 'doubled', 'redoubled', 'doublerSeat'],
+        `${label}[${index}].contract`);
+      assert.ok(Array.isArray(score.completedTricks), `${label}[${index}].completedTricks`);
+      score.completedTricks.forEach((trick, trickIndex) => {
+        exactKeys(trick, ['cards', 'winner'], `${label}[${index}].completedTricks[${trickIndex}]`);
+        assert.equal(trick.cards.length, 4,
+          `${label}[${index}].completedTricks[${trickIndex}].cards`);
+        trick.cards.forEach((play, playIndex) => {
+          exactKeys(play, ['seat', 'card'],
+            `${label}[${index}].completedTricks[${trickIndex}].cards[${playIndex}]`);
+          assertCardShape(play.card,
+            `${label}[${index}].completedTricks[${trickIndex}].cards[${playIndex}].card`);
+        });
+      });
+      if (score.claim !== null) {
+        exactKeys(score.claim, ['claimer', 'tricksToWin', 'reason'], `${label}[${index}].claim`);
+      }
+    }
+  });
+}
+
+function objectGraph(value, result = new Set()) {
+  if (value === null || typeof value !== 'object' || result.has(value)) return result;
+  result.add(value);
+  for (const child of Object.values(value)) objectGraph(child, result);
+  return result;
+}
+
+function assertNodePayloadsDetached(node, emissions) {
+  const roomObjects = objectGraph(node.room);
+  const priorPayloadObjects = new Set();
+  emissions.forEach((emission, index) => {
+    for (const object of objectGraph(emission.payload)) {
+      assert.equal(roomObjects.has(object), false, `Node emission ${index} aliases room state`);
+      assert.equal(priorPayloadObjects.has(object), false,
+        `Node emission ${index} aliases another recipient payload`);
+      priorPayloadObjects.add(object);
+    }
+  });
+}
+
+function expectedNodeGameEnd(state, viewerSeat, room) {
+  const score = state.boardScores.at(-1);
+  const boardScores = expectedNodeBoardScores(state, viewerSeat, room);
+  if (score.passedOut) {
+    return {
+      passedOut: true,
+      score: score.score,
+      boardScores,
+      ddTable: clone(state.ddTable),
+      hands: clone(score.initialHands),
+    };
+  }
+  return {
+    passedOut: false,
+    contract: clone(score.contract),
+    declarer: score.declarer,
+    dummy: score.dummy,
+    declarerTricks: score.declarerTricks,
+    needed: score.needed,
+    score: score.score,
+    made: score.made,
+    diff: score.diff,
+    vulnerability: score.vulnerability,
+    boardScores,
+    ddTable: clone(score.ddTable),
+    hands: clone(score.initialHands),
+  };
+}
+
 test('classic parity transcripts are fixed transport-neutral fixtures', () => {
   const fixtures = DOCUMENT;
   assert.equal(fixtures.schemaVersion, 1);
@@ -134,9 +392,14 @@ test('transport expectations do not call production event or view composers', ()
   assert.equal(source.includes(['classic', 'ViewFor'].join('')), false);
 });
 
-test('maximum auction contains exactly 319 legal calls and terminates only on the last call', () => {
+test('maximum auction independently contains 319 legal calls and terminates only last', () => {
   const fixture = DOCUMENT.transcripts.find(item => item.id === 'maximum-legal-auction');
   const calls = fixture.commands.slice(1);
+  const actualCalls = calls.map(item => ({
+    actor: item.actor, bid: item.command.payload.bid,
+  }));
+  assert.deepEqual(actualCalls, MAXIMUM_AUCTION_EXPECTED_CALLS);
+  assertIndependentlyLegalAuction(actualCalls);
   assert.equal(calls.length, 319);
   assert.deepEqual(calls.slice(0, 3).map(item => item.command.payload.bid),
     ['Pass', 'Pass', 'Pass']);
@@ -157,7 +420,11 @@ test('maximum auction contains exactly 319 legal calls and terminates only on th
     previousOpportunity = nextOpportunity;
   }
   assert.deepEqual(callTokens.slice(-3), ['Pass', 'Pass', 'Pass']);
+});
 
+test('maximum auction additionally executes every call through the shared core', () => {
+  const fixture = DOCUMENT.transcripts.find(item => item.id === 'maximum-legal-auction');
+  const calls = fixture.commands.slice(1);
   let state = createClassicLobbyState();
   const startCommand = { name: 'classic.start', payload: { expectedRevision: 0 } };
   const startContext = {
@@ -402,6 +669,7 @@ function expectedNodeDeliveryPlan(node, events, phase) {
 function assertNodeTransport(node, state, coreEvents, emissions) {
   assert.deepEqual(emissions.map(({ name, target }) => ({ name, target })),
     expectedNodeDeliveryPlan(node, coreEvents, state.phase));
+  assertNodePayloadsDetached(node, emissions);
   for (const emission of emissions) {
     const keys = emission.name === 'gameEnd'
       ? (emission.payload.passedOut
@@ -416,10 +684,21 @@ function assertNodeTransport(node, state, coreEvents, emissions) {
     const seat = SEATS.find(candidate => node.sockets[candidate] === emission.target) || null;
     if (emission.name === 'gameStart') {
       assert.ok(seat);
-      assert.deepEqual(emission.payload.hand, state.hands[seat]);
-      assert.deepEqual(emission.payload.boardInfo, state.boardInfo);
-      assert.equal(emission.payload.seat, seat);
-      assert.deepEqual(emission.payload.playerNames, node.room.playerNames);
+      const expected = {
+        hand: clone(state.hands[seat]),
+        boardInfo: clone(state.boardInfo),
+        seat,
+        playerNames: clone(node.room.playerNames),
+        boardScores: expectedNodeBoardScores(state, seat, node.room),
+      };
+      assert.deepEqual(emission.payload, expected);
+      exactKeys(emission.payload.boardInfo, ['number', 'dealNumber', 'vul', 'dealer'],
+        `Node gameStart ${seat} boardInfo`);
+      exactKeys(emission.payload.playerNames, SEATS, `Node gameStart ${seat} playerNames`);
+      assertHandsShape({ N: emission.payload.hand, E: [], S: [], W: [] },
+        `Node gameStart ${seat} own hand`);
+      assertLegacyReplayScores(emission.payload.boardScores, state, seat, node.room,
+        `Node gameStart ${seat} boardScores`);
     } else if (emission.name === 'biddingUpdate') {
       assert.deepEqual(emission.payload.history,
         expectedAuction(state.biddingHistory, seat, { legacy: true }));
@@ -462,10 +741,13 @@ function assertNodeTransport(node, state, coreEvents, emissions) {
       assert.deepEqual(emission.payload.ddTable, state.ddTable);
     } else if (emission.name === 'gameEnd') {
       const score = state.boardScores.at(-1);
-      assert.equal(emission.payload.passedOut, score.passedOut);
-      assert.equal(emission.payload.score, score.score);
+      assert.ok(seat);
+      assert.deepEqual(emission.payload, expectedNodeGameEnd(state, seat, node.room));
+      assertLegacyReplayScores(emission.payload.boardScores, state, seat, node.room,
+        `Node gameEnd ${seat} boardScores`);
       assert.deepEqual(emission.payload.ddTable, score.ddTable);
-      assert.deepEqual(emission.payload.hands, score.initialHands);
+      assertDdTableShape(emission.payload.ddTable, `Node gameEnd ${seat} ddTable`);
+      assertHandsShape(emission.payload.hands, `Node gameEnd ${seat} hands`);
     }
     assert.equal(Object.hasOwn(emission.payload, 'initialHands'), false);
   }
@@ -693,6 +975,7 @@ test('fixed transcripts stay byte-identical across pure core, Node adapter, and 
       },
     });
     let sequence = 0;
+    const nodeGameEndKinds = new Set();
     const nextId = label => `parity_${label.replace(/[^A-Za-z0-9_-]/gu, '_').slice(0, 40)}_${String(++sequence).padStart(8, '0')}`;
     try {
       for (const fixture of DOCUMENT.transcripts) {
@@ -724,8 +1007,12 @@ test('fixed transcripts stay byte-identical across pure core, Node adapter, and 
           assert.deepEqual({ ok: nodeResult.ok, name: item.command.name, phase: nodeResult.phase },
             { ok: true, ...item.expected });
           assert.equal(nodeResult.revision, pureRevision);
-          assertNodeTransport(node, pureState, pureResult.events,
-            node.emissions.slice(emissionStart));
+          const commandEmissions = node.emissions.slice(emissionStart);
+          assertNodeTransport(node, pureState, pureResult.events, commandEmissions);
+          if (commandEmissions.some(emission => emission.name === 'gameEnd')) {
+            const score = pureState.boardScores.at(-1);
+            nodeGameEndKinds.add(score.passedOut ? 'passed-out' : score.made ? 'made' : 'defeated');
+          }
 
           try {
             await sendWorker(runtime, worker, item, nextId, pureResult);
@@ -754,6 +1041,7 @@ test('fixed transcripts stay byte-identical across pure core, Node adapter, and 
         assert.equal(consumed, fixture.commands.length, fixture.id);
         assertCoverageOutcome(fixture, pureState);
       }
+      assert.deepEqual([...nodeGameEndKinds].sort(), ['defeated', 'made', 'passed-out']);
     } finally {
       await runtime.close();
     }
