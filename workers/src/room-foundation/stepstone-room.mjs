@@ -156,6 +156,8 @@ export class StepstoneRoom {
     this.sqlProfiler = rawSql && env?.ROOM_FOUNDATION_TEST === 'true'
       ? createSqlProfileRecorder(rawSql) : null;
     this.sql = this.sqlProfiler?.sql ?? rawSql;
+    this.alarmMutations = env?.ROOM_FOUNDATION_TEST === 'true'
+      ? { set: 0, delete: 0 } : null;
     this.commandState = null;
     this.commandStateJson = null;
     this.sessionAuthorities = new Map();
@@ -637,27 +639,37 @@ export class StepstoneRoom {
     return row(this.sql.exec('SELECT MIN(due_at) AS due_at FROM pending_actions'))?.due_at ?? null;
   }
 
+  async setStorageAlarm(scheduledTime) {
+    await this.ctx.storage.setAlarm(scheduledTime);
+    if (this.alarmMutations) this.alarmMutations.set += 1;
+  }
+
+  async deleteStorageAlarm() {
+    await this.ctx.storage.deleteAlarm();
+    if (this.alarmMutations) this.alarmMutations.delete += 1;
+  }
+
   async recoverAlarm(now = Date.now()) {
     const current = await this.ctx.storage.getAlarm();
     if (current !== null && current <= now) {
-      await this.ctx.storage.setAlarm(now);
+      await this.setStorageAlarm(now);
       return;
     }
     const next = this.nextDue();
     if (next === null) {
-      if (current !== null) await this.ctx.storage.deleteAlarm();
+      if (current !== null) await this.deleteStorageAlarm();
       return;
     }
     const target = Math.max(next, now);
     if (current === null || current > target) {
-      await this.ctx.storage.setAlarm(target);
+      await this.setStorageAlarm(target);
     }
   }
 
   async recomputeAlarm() {
     const next = this.nextDue();
-    if (next === null) await this.ctx.storage.deleteAlarm();
-    else await this.ctx.storage.setAlarm(Math.max(next, Date.now()));
+    if (next === null) await this.deleteStorageAlarm();
+    else await this.setStorageAlarm(Math.max(next, Date.now()));
   }
 
   alarm() {
@@ -777,7 +789,7 @@ export class StepstoneRoom {
             action.payload_json,
           );
           updated.toArray();
-          if (updated.rowsWritten !== 1) return;
+          if (updated.rowsWritten === 0) return;
           await this.recomputeAlarm();
           committed = { kind: 'retry' };
           return;
@@ -818,7 +830,7 @@ export class StepstoneRoom {
           action.payload_json,
         );
         deleted.toArray();
-        if (deleted.rowsWritten !== 1) throw new CommandCasError();
+        if (deleted.rowsWritten === 0) throw new CommandCasError();
         await this.recomputeAlarm();
         committed = { kind: 'terminal', state, serialized, events: classicResult.events };
       });
@@ -951,7 +963,7 @@ export class StepstoneRoom {
         now,
         JSON.stringify({ attempt: 0, phase: 'MARK' }),
       );
-      await this.ctx.storage.setAlarm(Math.max(now, Date.now()));
+      await this.setStorageAlarm(Math.max(now, Date.now()));
       transitioned = true;
     });
     if (!transitioned) return false;
@@ -1033,7 +1045,7 @@ export class StepstoneRoom {
             action.action_id,
             action.incarnation,
           );
-          await this.ctx.storage.setAlarm(Math.max(now, Date.now()));
+          await this.setStorageAlarm(Math.max(now, Date.now()));
         });
       }
 
@@ -1275,7 +1287,7 @@ export class StepstoneRoom {
          VALUES (?, ?, ?, 'owner-auth-expiry', ?)`,
         actionId, incarnation, dueAt, JSON.stringify({ sessionId }),
       );
-      await this.ctx.storage.setAlarm(dueAt);
+      await this.setStorageAlarm(dueAt);
     });
     this.commandState = state;
     this.commandStateJson = serializedState;
@@ -2462,6 +2474,8 @@ export class StepstoneRoom {
     }
     if (!validCodeIncarnation(code, incarnation)) return failure('INVALID_REQUEST');
     this.sqlProfiler.reset();
+    this.alarmMutations.set = 0;
+    this.alarmMutations.delete = 0;
     return result({ reset: true });
   }
 
@@ -2470,7 +2484,10 @@ export class StepstoneRoom {
       return failure('ROOM_NOT_FOUND');
     }
     if (!validCodeIncarnation(code, incarnation)) return failure('INVALID_REQUEST');
-    return result(this.sqlProfiler.snapshot());
+    return result({
+      ...this.sqlProfiler.snapshot(),
+      alarmMutations: { ...this.alarmMutations },
+    });
   }
 
   testConfigureLatency({ code, incarnation, delays } = {}) {
@@ -2523,7 +2540,7 @@ export class StepstoneRoom {
     const identity = this.roomIdentity();
     if (!identity || identity.stored.incarnation !== incarnation
       || identity.state.roomCode !== code) return failure('ROOM_NOT_FOUND');
-    await this.ctx.storage.setAlarm(currentAlarmAt);
+    await this.setStorageAlarm(currentAlarmAt);
     await this.recoverAlarm(now);
     return result({ alarmAt: await this.ctx.storage.getAlarm() });
   }
@@ -2727,7 +2744,7 @@ export class StepstoneRoom {
       || !identity
       || identity.state.roomCode !== code
       || identity.stored.incarnation !== incarnation) return failure('ROOM_NOT_FOUND');
-    await this.ctx.storage.deleteAlarm();
+    await this.deleteStorageAlarm();
     return result({ dropped: true });
   }
 

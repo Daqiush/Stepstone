@@ -416,12 +416,20 @@ test('room initialization, join, auth, command, action, and alarm SQL match meas
   }
 });
 
-function splitMeasuredProfile(accounting, { alarmRowsWritten, subtractOrdinary = false } = {}) {
+function splitMeasuredProfile(accounting, { subtractOrdinary = false } = {}) {
+  const alarmMutations = accounting.alarmMutations;
+  if (!alarmMutations
+    || !Number.isSafeInteger(alarmMutations.set)
+    || !Number.isSafeInteger(alarmMutations.delete)
+    || alarmMutations.set < 0
+    || alarmMutations.delete < 0) {
+    throw new TypeError('measured alarm mutations are required');
+  }
   const profile = {
     rowsRead: accounting.totalRowsRead,
     tableRowsWritten: 0,
     indexRowsWritten: 0,
-    alarmRowsWritten,
+    alarmRowsWritten: alarmMutations.set + alarmMutations.delete,
     deletedRowsWritten: 0,
   };
   for (const statement of accounting.statements) {
@@ -496,12 +504,14 @@ async function accounting(target, room) {
 
 async function waitForAccounting(target, room, predicate) {
   const deadline = Date.now() + 5_000;
+  let lastObserved = null;
   while (Date.now() < deadline) {
     const observed = await accounting(target, room);
+    lastObserved = observed;
     if (predicate(observed)) return observed;
     await target.wait(10);
   }
-  assert.fail('timed out waiting for measured classic DDS SQL');
+  assert.fail(`timed out waiting for measured classic DDS SQL: ${JSON.stringify(lastObserved)}`);
 }
 
 async function inspectRoom(target, room) {
@@ -533,15 +543,18 @@ async function startMeasuredClassicDeal(target, label) {
     for (let index = 0; index < 3; index += 1) await socket.nextMessage();
   }
   const creationAccounting = await waitForAccounting(target, room, observed => (
-    observed.statements.some(statement => (
+    observed.alarmMutations?.set === 1
+    && observed.alarmMutations?.delete === 0
+    && observed.statements.some(statement => (
       statement.table === 'pending_actions' && statement.operation === 'SELECT'
     ))
   ));
-  const creation = splitMeasuredProfile(creationAccounting, {
-    alarmRowsWritten: 1,
-    subtractOrdinary: true,
-  });
-  return { room, sockets, creation };
+  const creation = splitMeasuredProfile(creationAccounting, { subtractOrdinary: true });
+  const state = await inspectRoom(target, room);
+  const action = state.pendingActions.find(entry => entry.actionId === CLASSIC_DDS_ACTION_ID);
+  assert.ok(action);
+  assert.equal(state.alarmAt, action.dueAt);
+  return { room, sockets, creation, creationAccounting };
 }
 
 async function pendingDdsAction(target, room) {
@@ -554,6 +567,15 @@ async function resolveDds(target, room, result, table = undefined) {
     result,
     ...(table === undefined ? {} : { table }),
   });
+}
+
+async function assertAlarmMatchesEarliestPending(target, room) {
+  const state = await inspectRoom(target, room);
+  const earliest = state.pendingActions.length === 0
+    ? null
+    : Math.min(...state.pendingActions.map(action => action.dueAt));
+  assert.equal(state.alarmAt, earliest);
+  return state;
 }
 
 test('Miniflare measures exact classic DDS action, retry, stale, and terminal SQL splits', async () => {
@@ -571,7 +593,16 @@ test('Miniflare measures exact classic DDS action, retry, stale, and terminal SQ
   });
   try {
     const success = await startMeasuredClassicDeal(successRuntime, 'budget_dds_success');
+    assert.deepEqual(success.creationAccounting.alarmMutations, { set: 1, delete: 0 });
     assert.deepEqual(success.creation, MEASURED_CLASSIC_DDS_SQL_PROFILES.actionCreation);
+    const missingAlarmWrite = {
+      ...success.creationAccounting,
+      alarmMutations: { set: 0, delete: 0 },
+    };
+    assert.notDeepEqual(
+      splitMeasuredProfile(missingAlarmWrite, { subtractOrdinary: true }),
+      MEASURED_CLASSIC_DDS_SQL_PROFILES.actionCreation,
+    );
 
     const initialState = await inspectRoom(successRuntime, success.room);
     const attempt1 = initialState.pendingActions.find(
@@ -583,8 +614,9 @@ test('Miniflare measures exact classic DDS action, retry, stale, and terminal SQ
     const alarmAccounting = await waitForAccounting(successRuntime, success.room, observed => (
       observed.statements.filter(statement => statement.table === 'pending_actions').length >= 2
     ));
+    assert.deepEqual(alarmAccounting.alarmMutations, { set: 0, delete: 0 });
     assert.deepEqual(
-      splitMeasuredProfile(alarmAccounting, { alarmRowsWritten: 0 }),
+      splitMeasuredProfile(alarmAccounting),
       MEASURED_CLASSIC_DDS_SQL_PROFILES.alarmComputation,
     );
     await roomValue(successRuntime, success.room, 'dropRoomAlarm');
@@ -594,18 +626,23 @@ test('Miniflare measures exact classic DDS action, retry, stale, and terminal SQ
     await roomValue(successRuntime, success.room, 'resetRoomSqlAccounting');
     await resolveDds(successRuntime, success.room, 'failure');
     const retryAccounting = await waitForAccounting(successRuntime, success.room, observed => (
-      observed.statements.some(statement => (
+      observed.alarmMutations?.set === 1
+      && observed.alarmMutations?.delete === 0
+      && observed.statements.some(statement => (
         statement.table === 'pending_actions' && statement.operation === 'UPDATE'
       ))
     ));
-    const retry = splitMeasuredProfile(retryAccounting, { alarmRowsWritten: 1 });
+    assert.deepEqual(retryAccounting.alarmMutations, { set: 1, delete: 0 });
+    const retry = splitMeasuredProfile(retryAccounting);
     assert.deepEqual(retry, MEASURED_CLASSIC_DDS_SQL_PROFILES.retryUpdate);
+    await assertAlarmMatchesEarliestPending(successRuntime, success.room);
     await roomValue(successRuntime, success.room, 'resetRoomSqlAccounting');
     await resolveDds(successRuntime, success.room, 'failure');
     const staleAccounting = await waitForAccounting(successRuntime, success.room, observed => (
       observed.statements.some(statement => statement.table === 'pending_actions')
     ));
-    const stale = splitMeasuredProfile(staleAccounting, { alarmRowsWritten: 0 });
+    assert.deepEqual(staleAccounting.alarmMutations, { set: 0, delete: 0 });
+    const stale = splitMeasuredProfile(staleAccounting);
     assert.deepEqual(stale, MEASURED_CLASSIC_DDS_SQL_PROFILES.staleOverlapGuard);
 
     const attempt2 = await pendingDdsAction(successRuntime, success.room);
@@ -615,26 +652,33 @@ test('Miniflare measures exact classic DDS action, retry, stale, and terminal SQ
     await roomValue(successRuntime, success.room, 'resetRoomSqlAccounting');
     await resolveDds(successRuntime, success.room, 'failure');
     const retry2Accounting = await waitForAccounting(successRuntime, success.room, observed => (
-      observed.statements.some(statement => (
+      observed.alarmMutations?.set === 1
+      && observed.alarmMutations?.delete === 0
+      && observed.statements.some(statement => (
         statement.table === 'pending_actions' && statement.operation === 'UPDATE'
       ))
     ));
+    assert.deepEqual(retry2Accounting.alarmMutations, { set: 1, delete: 0 });
     assert.deepEqual(
-      splitMeasuredProfile(retry2Accounting, { alarmRowsWritten: 1 }),
+      splitMeasuredProfile(retry2Accounting),
       MEASURED_CLASSIC_DDS_SQL_PROFILES.retryUpdate,
     );
+    await assertAlarmMatchesEarliestPending(successRuntime, success.room);
     const attempt3 = await pendingDdsAction(successRuntime, success.room);
     await roomValue(successRuntime, success.room, 'runRoomAlarmAt', { now: attempt3.dueAt });
     await roomValue(successRuntime, success.room, 'dropRoomAlarm');
     await roomValue(successRuntime, success.room, 'resetRoomSqlAccounting');
     await resolveDds(successRuntime, success.room, 'success', DDS_TABLE);
     const successAccounting = await waitForAccounting(successRuntime, success.room, observed => (
-      observed.statements.some(statement => (
+      observed.alarmMutations?.set === 0
+      && observed.alarmMutations?.delete === 1
+      && observed.statements.some(statement => (
         statement.table === 'pending_actions' && statement.operation === 'DELETE'
       ))
     ));
+    assert.deepEqual(successAccounting.alarmMutations, { set: 0, delete: 1 });
     assert.deepEqual(
-      splitMeasuredProfile(successAccounting, { alarmRowsWritten: 1 }),
+      splitMeasuredProfile(successAccounting),
       MEASURED_CLASSIC_DDS_SQL_PROFILES.successfulSettlement,
     );
     const readyState = await waitForRoom(
@@ -646,8 +690,10 @@ test('Miniflare measures exact classic DDS action, retry, stale, and terminal SQ
     assert.equal(readyState.pendingActions.some(
       action => action.actionId === CLASSIC_DDS_ACTION_ID,
     ), false);
+    assert.equal(readyState.alarmAt, null);
 
     const failure = await startMeasuredClassicDeal(failureRuntime, 'budget_dds_failure');
+    assert.deepEqual(failure.creationAccounting.alarmMutations, { set: 1, delete: 0 });
     assert.deepEqual(failure.creation, MEASURED_CLASSIC_DDS_SQL_PROFILES.actionCreation);
     const failureAttempt1 = await pendingDdsAction(failureRuntime, failure.room);
     await roomValue(failureRuntime, failure.room, 'runRoomAlarmAt', {
@@ -669,13 +715,18 @@ test('Miniflare measures exact classic DDS action, retry, stale, and terminal SQ
       await resolveDds(failureRuntime, failure.room, 'failure');
       const terminal = attempt === 3;
       const observed = await waitForAccounting(failureRuntime, failure.room, profile => (
-        profile.statements.some(statement => (
+        profile.alarmMutations?.set === (terminal ? 0 : 1)
+        && profile.alarmMutations?.delete === (terminal ? 1 : 0)
+        && profile.statements.some(statement => (
           statement.table === 'pending_actions'
           && statement.operation === (terminal ? 'DELETE' : 'UPDATE')
         ))
       ));
+      assert.deepEqual(observed.alarmMutations, terminal
+        ? { set: 0, delete: 1 }
+        : { set: 1, delete: 0 });
       assert.deepEqual(
-        splitMeasuredProfile(observed, { alarmRowsWritten: 1 }),
+        splitMeasuredProfile(observed),
         terminal
           ? MEASURED_CLASSIC_DDS_SQL_PROFILES.exhaustedSettlement
           : MEASURED_CLASSIC_DDS_SQL_PROFILES.retryUpdate,
@@ -693,6 +744,9 @@ test('Miniflare measures exact classic DDS action, retry, stale, and terminal SQ
       if (terminal) {
         assert.equal(state.classicState.ddsStatus, 'FAILED');
         assert.equal(action, undefined);
+        assert.equal(state.alarmAt, null);
+      } else {
+        assert.equal(state.alarmAt, action.dueAt);
       }
       if (attempt === 1) {
         await roomValue(failureRuntime, failure.room, 'resetRoomSqlAccounting');
@@ -702,8 +756,9 @@ test('Miniflare measures exact classic DDS action, retry, stale, and terminal SQ
           failure.room,
           profile => profile.statements.some(statement => statement.table === 'pending_actions'),
         );
+        assert.deepEqual(staleObserved.alarmMutations, { set: 0, delete: 0 });
         assert.deepEqual(
-          splitMeasuredProfile(staleObserved, { alarmRowsWritten: 0 }),
+          splitMeasuredProfile(staleObserved),
           MEASURED_CLASSIC_DDS_SQL_PROFILES.staleOverlapGuard,
         );
       }

@@ -56,7 +56,8 @@ export const MEASURED_CLASSIC_DDS_SQL_PROFILES = Object.freeze({
     deletedRowsWritten: 0,
   }),
   retryUpdate: Object.freeze({
-    rowsRead: 3,
+    // Includes the MIN(due_at) scan that proves the persisted retry and alarm agree.
+    rowsRead: 4,
     tableRowsWritten: 1,
     indexRowsWritten: 1,
     alarmRowsWritten: 1,

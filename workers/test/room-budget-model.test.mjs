@@ -206,7 +206,7 @@ test('counts current table, index, alarm, retention, and deleteAll write costs',
   }
   assert.equal(report.rows.writtenPerRoom, 1_282);
   assert.equal(report.rows.writtenPerDay, 64_100);
-  assert.equal(report.rows.readPerDay, 195_850);
+  assert.equal(report.rows.readPerDay, 195_950);
   assert.equal(report.rows.indexRowsWrittenPerDay, 6_750);
   assert.equal(report.rows.alarmRowsWrittenPerDay, 1_750);
   assert.equal(report.rows.deletedRowsWrittenPerDay, 1_150);
@@ -236,7 +236,7 @@ test('derives registry scans from measured cardinality formulas and explicit run
     },
   });
   assert.equal(injected.rows.operations.allocation.costEach.rowsRead, 900);
-  assert.equal(injected.rows.readPerDay, 234_400);
+  assert.equal(injected.rows.readPerDay, 234_500);
 });
 
 test('fails the write gate for a command table or a command-maintained secondary index', () => {
@@ -304,7 +304,7 @@ test('room budget simulator runs independently and can merge an optional DDS rep
   assert.match(standalone.stdout, /success after eviction.*READY/iu);
   assert.match(standalone.stdout, /attempt-3 exhaustion.*FAILED/iu);
   assert.match(standalone.stdout, /DDS.*3 logical attempts.*4 computations.*3 alarm requests/iu);
-  assert.match(standalone.stdout, /DDS rows.*30 read.*13 written/iu);
+  assert.match(standalone.stdout, /DDS rows.*32 read.*13 written/iu);
   assert.match(standalone.stdout,
     /Gates.*billedRequests=true\/true.*duration=true\/true.*rowsRead=true\/true.*rowsWritten=true\/true.*storage=true\/true/iu);
   assert.match(standalone.stdout, /4,550 billed requests/u);
@@ -331,8 +331,8 @@ test('room budget simulator runs independently and can merge an optional DDS rep
   assert.equal(saved.budget.ddsComputeExecutionsPerRoom, 4);
   assert.equal(saved.budget.durationGbSecondsPerDay, 3_398.4);
   assert.equal(saved.budget.writesPerDay, 64_100);
-  assert.equal(saved.budget.readsPerDay, 195_850);
-  assert.equal(saved.budget.variants.successAfterEviction.rowsReadPerRoom, 3_917);
+  assert.equal(saved.budget.readsPerDay, 195_950);
+  assert.equal(saved.budget.variants.successAfterEviction.rowsReadPerRoom, 3_919);
   assert.equal(saved.budget.variants.successAfterEviction.rowsWrittenPerRoom, 1_282);
   assert.equal(saved.budget.variants.attempt3Exhaustion.rowsWrittenPerRoom, 1_282);
 });
