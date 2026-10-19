@@ -2871,8 +2871,8 @@
             "name": "classic.bid",
             "payload": {
               "bid": "1S",
-              "alert": false,
-              "explain": null
+              "alert": true,
+              "explain": "five spades"
             }
           },
           "expected": {
@@ -9341,217 +9341,217 @@
         {
           "N": [
             {
-              "suit": "S",
+              "suit": "H",
               "rank": "2"
             },
             {
-              "suit": "S",
+              "suit": "H",
               "rank": "3"
             },
             {
-              "suit": "S",
+              "suit": "H",
               "rank": "4"
             },
             {
-              "suit": "S",
+              "suit": "H",
               "rank": "5"
             },
             {
-              "suit": "S",
+              "suit": "H",
               "rank": "6"
             },
             {
-              "suit": "S",
+              "suit": "H",
               "rank": "7"
             },
             {
-              "suit": "S",
+              "suit": "H",
               "rank": "8"
             },
             {
-              "suit": "S",
+              "suit": "H",
               "rank": "9"
             },
             {
-              "suit": "S",
+              "suit": "H",
               "rank": "T"
             },
             {
-              "suit": "S",
+              "suit": "H",
               "rank": "J"
             },
             {
-              "suit": "S",
+              "suit": "H",
               "rank": "Q"
             },
             {
-              "suit": "S",
+              "suit": "H",
               "rank": "K"
             },
             {
-              "suit": "S",
+              "suit": "H",
               "rank": "A"
             }
           ],
           "E": [
             {
-              "suit": "H",
+              "suit": "D",
               "rank": "2"
             },
             {
-              "suit": "H",
+              "suit": "D",
               "rank": "3"
             },
             {
-              "suit": "H",
+              "suit": "D",
               "rank": "4"
             },
             {
-              "suit": "H",
+              "suit": "D",
               "rank": "5"
             },
             {
-              "suit": "H",
+              "suit": "D",
               "rank": "6"
             },
             {
-              "suit": "H",
+              "suit": "D",
               "rank": "7"
             },
             {
-              "suit": "H",
+              "suit": "D",
               "rank": "8"
             },
             {
-              "suit": "H",
+              "suit": "D",
               "rank": "9"
             },
             {
-              "suit": "H",
+              "suit": "D",
               "rank": "T"
             },
             {
-              "suit": "H",
+              "suit": "D",
               "rank": "J"
             },
             {
-              "suit": "H",
+              "suit": "D",
               "rank": "Q"
             },
             {
-              "suit": "H",
+              "suit": "D",
               "rank": "K"
             },
             {
-              "suit": "H",
+              "suit": "D",
               "rank": "A"
             }
           ],
           "S": [
             {
-              "suit": "D",
+              "suit": "C",
               "rank": "2"
             },
             {
-              "suit": "D",
+              "suit": "C",
               "rank": "3"
             },
             {
-              "suit": "D",
+              "suit": "C",
               "rank": "4"
             },
             {
-              "suit": "D",
+              "suit": "C",
               "rank": "5"
             },
             {
-              "suit": "D",
+              "suit": "C",
               "rank": "6"
             },
             {
-              "suit": "D",
+              "suit": "C",
               "rank": "7"
             },
             {
-              "suit": "D",
+              "suit": "C",
               "rank": "8"
             },
             {
-              "suit": "D",
+              "suit": "C",
               "rank": "9"
             },
             {
-              "suit": "D",
+              "suit": "C",
               "rank": "T"
             },
             {
-              "suit": "D",
+              "suit": "C",
               "rank": "J"
             },
             {
-              "suit": "D",
+              "suit": "C",
               "rank": "Q"
             },
             {
-              "suit": "D",
+              "suit": "C",
               "rank": "K"
             },
             {
-              "suit": "D",
+              "suit": "C",
               "rank": "A"
             }
           ],
           "W": [
             {
-              "suit": "C",
+              "suit": "S",
               "rank": "2"
             },
             {
-              "suit": "C",
+              "suit": "S",
               "rank": "3"
             },
             {
-              "suit": "C",
+              "suit": "S",
               "rank": "4"
             },
             {
-              "suit": "C",
+              "suit": "S",
               "rank": "5"
             },
             {
-              "suit": "C",
+              "suit": "S",
               "rank": "6"
             },
             {
-              "suit": "C",
+              "suit": "S",
               "rank": "7"
             },
             {
-              "suit": "C",
+              "suit": "S",
               "rank": "8"
             },
             {
-              "suit": "C",
+              "suit": "S",
               "rank": "9"
             },
             {
-              "suit": "C",
+              "suit": "S",
               "rank": "T"
             },
             {
-              "suit": "C",
+              "suit": "S",
               "rank": "J"
             },
             {
-              "suit": "C",
+              "suit": "S",
               "rank": "Q"
             },
             {
-              "suit": "C",
+              "suit": "S",
               "rank": "K"
             },
             {
-              "suit": "C",
+              "suit": "S",
               "rank": "A"
             }
           ]
@@ -9567,10 +9567,6 @@
           "expected": {
             "name": "classic.start",
             "phase": "BIDDING"
-          },
-          "ddsCheckpoint": {
-            "name": "deal-1-ready",
-            "table": "standard"
           }
         },
         {
@@ -9631,6 +9627,10 @@
           "expected": {
             "name": "classic.bid",
             "phase": "SCORING"
+          },
+          "ddsCheckpoint": {
+            "name": "deal-1-ready",
+            "table": "standard"
           }
         },
         {

@@ -16,7 +16,6 @@ const { applyClassicDdsCompletion } = require('../classic/node-compat.cjs');
 const {
   createClassicNodeAdapter, projectClassicState,
 } = require('../classic/node-adapter.js');
-const { classicViewFor } = require('../classic/views.cjs');
 const { assertTranscriptDeals } = require('./helpers/classic-fixtures.js');
 
 const TRANSCRIPT_PATH = path.join(__dirname, 'fixtures', 'classic-transcripts.json');
@@ -25,6 +24,86 @@ const PUBLIC_RANKS = Object.freeze({
   2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9,
   T: 10, J: 11, Q: 12, K: 13, A: 14,
 });
+const PARTNER = Object.freeze({ N: 'S', E: 'W', S: 'N', W: 'E' });
+const CLASSIC_VIEW_KEYS = Object.freeze([
+  'schemaVersion', 'mode', 'phase', 'dealNumber', 'boardInfo', 'readyStatus',
+  'biddingHistory', 'currentBidder', 'currentContract', 'consecutivePasses',
+  'declarer', 'dummy', 'leader', 'currentPlayer', 'currentTrick', 'completedCount',
+  'nsTricks', 'ewTricks', 'dummyRevealed', 'claimSettlement', 'boardScores',
+  'ddTable', 'ddsStatus', 'hands',
+]);
+const ROOM_SNAPSHOT_KEYS = Object.freeze([
+  'schemaVersion', 'roomCode', 'incarnation', 'revision', 'status', 'foundationCounter',
+  'createdAt', 'expiresAt', 'viewer', 'playerNames', 'classic',
+]);
+const WORKER_EVENT_KEYS = Object.freeze({
+  'classic.started': ['dealNumber', 'boardInfo'],
+  'classic.bidding-updated': [
+    'biddingHistory', 'currentBidder', 'currentContract', 'consecutivePasses',
+  ],
+  'classic.bidding-ended': ['contract', 'declarer', 'dummy', 'leader', 'biddingHistory'],
+  'classic.dummy-revealed': ['dummy'],
+  'classic.card-played': ['seat', 'card', 'currentTrick'],
+  'classic.trick-ended': ['trick', 'winner', 'nsTricks', 'ewTricks'],
+  'classic.ready-updated': ['readyStatus'],
+  'classic.dd-table-ready': ['dealNumber', 'ddTable'],
+});
+const NODE_PAYLOAD_KEYS = Object.freeze({
+  gameStart: ['hand', 'boardInfo', 'seat', 'playerNames', 'boardScores'],
+  biddingUpdate: ['history', 'currentBidder', 'currentContract', 'consecutivePasses'],
+  biddingEnd: [
+    'contract', 'declarer', 'dummy', 'leader', 'biddingHistory', 'declarerControlledBy',
+  ],
+  playUpdate: [
+    'currentPlayer', 'currentTrick', 'completedCount', 'nsTricks', 'ewTricks',
+    'dummyRevealed', 'dummy', 'declarer', 'declarerControlledBy',
+    'teachingCurrentSeat', 'teachingCurrentHand',
+  ],
+  dummyRevealed: ['dummy', 'dummyHand'],
+  cardPlayed: ['seat', 'card', 'currentTrick'],
+  trickEnd: ['trick', 'winner', 'nsTricks', 'ewTricks'],
+  nextDealUpdate: ['readyStatus', 'playerNames'],
+  ddTableReady: ['ddTable'],
+});
+const FORBIDDEN_TRANSPORT_KEYS = new Set([
+  'initialHands', 'reconnectToken', 'nextReconnectToken', 'commandCache',
+  'pendingActions', 'actionId', 'generationId', 'token', 'cache',
+]);
+
+function exactKeys(value, keys, label) {
+  assert.ok(value && typeof value === 'object' && !Array.isArray(value), label);
+  assert.deepEqual(Object.keys(value).sort(), [...keys].sort(), label);
+}
+
+function assertNoForbiddenTransportKeys(value, label) {
+  if (Array.isArray(value)) {
+    value.forEach((child, index) => assertNoForbiddenTransportKeys(child, `${label}[${index}]`));
+    return;
+  }
+  if (value === null || typeof value !== 'object') return;
+  for (const [key, child] of Object.entries(value)) {
+    assert.equal(FORBIDDEN_TRANSPORT_KEYS.has(key), false, `${label}.${key}`);
+    assertNoForbiddenTransportKeys(child, `${label}.${key}`);
+  }
+}
+
+function sameSide(left, right) {
+  return left !== null && right !== null && (left === right || PARTNER[left] === right);
+}
+
+function expectedAuction(history, viewerSeat, { legacy = false } = {}) {
+  return history.map(entry => {
+    const bid = legacy && entry.bid === 'X' ? 'Double'
+      : legacy && entry.bid === 'XX' ? 'Redouble' : entry.bid;
+    if (viewerSeat !== null && viewerSeat !== entry.seat && sameSide(viewerSeat, entry.seat)) {
+      return { seat: entry.seat, bid };
+    }
+    return {
+      seat: entry.seat, bid, alert: entry.alert, explain: entry.explain,
+      qa: clone(entry.qa),
+    };
+  });
+}
 
 test('classic parity transcripts are fixed transport-neutral fixtures', () => {
   const fixtures = DOCUMENT;
@@ -45,6 +124,14 @@ test('classic parity transcripts are fixed transport-neutral fixtures', () => {
       assert.deepEqual(Object.keys(item.expected).sort(), ['name', 'phase']);
     }
   }
+  const nextDeal = fixtures.transcripts.find(fixture => fixture.id === 'next-deal');
+  assert.notEqual(JSON.stringify(nextDeal.deals[0]), JSON.stringify(nextDeal.deals[1]));
+});
+
+test('transport expectations do not call production event or view composers', () => {
+  const source = readFileSync(__filename, 'utf8');
+  assert.equal(source.includes(['composeClassic', 'EventFrame'].join('')), false);
+  assert.equal(source.includes(['classic', 'ViewFor'].join('')), false);
 });
 
 test('maximum auction contains exactly 319 legal calls and terminates only on the last call', () => {
@@ -146,6 +233,18 @@ function assertCoverageOutcome(fixture, state) {
   }
 }
 
+function assertSecondDealIndexing(fixture, pure, node, worker) {
+  if (fixture.id !== 'next-deal' || pure.dealNumber !== 2) return;
+  for (const [label, state] of [
+    ['pure', pure], ['Node', node], ['Worker', worker],
+  ]) {
+    assert.deepEqual(state.hands, fixture.deals[1], `${label} deal 2 hands`);
+    assert.deepEqual(state.initialHands, fixture.deals[1], `${label} deal 2 initialHands`);
+    assert.notEqual(JSON.stringify(state.hands), JSON.stringify(fixture.deals[0]),
+      `${label} must index deals by dealNumber - 1`);
+  }
+}
+
 function dealFor(fixture, dealNumber) {
   const hands = fixture.deals[dealNumber - 1];
   assert.ok(hands, `${fixture.id}: missing deal ${dealNumber}`);
@@ -154,6 +253,79 @@ function dealFor(fixture, dealNumber) {
 
 function actorFor(seat) {
   return { role: seat === 'N' ? 'OWNER' : 'PLAYER', seat };
+}
+
+function expectedWorkerEvent(event, viewerSeat) {
+  const payload = clone(event.payload);
+  if (Object.hasOwn(payload, 'biddingHistory')) {
+    payload.biddingHistory = expectedAuction(event.payload.biddingHistory, viewerSeat);
+  }
+  return payload;
+}
+
+function assertWorkerEventFrame(frame, event, revision, viewer, label) {
+  exactKeys(frame, ['v', 'type', 'name', 'payload'], `${label} outer`);
+  assert.equal(frame.v, 1);
+  assert.equal(frame.type, 'event');
+  assert.equal(frame.name, event.name);
+  exactKeys(frame.payload, ['revision', 'event'], `${label} payload`);
+  assert.equal(frame.payload.revision, revision);
+  const eventKeys = event.name === 'classic.finished'
+    ? (event.payload.reason === 'passed-out'
+      ? ['reason', 'dealNumber', 'score']
+      : ['reason', 'dealNumber', 'contract', 'declarer', 'nsTricks', 'ewTricks', 'score'])
+    : WORKER_EVENT_KEYS[event.name];
+  assert.ok(eventKeys, `${label} unknown event ${event.name}`);
+  exactKeys(frame.payload.event, eventKeys, `${label} event`);
+  assert.deepEqual(frame.payload.event, expectedWorkerEvent(event, viewer.seat));
+  assertNoForbiddenTransportKeys(frame, label);
+}
+
+function expectedVisibleHands(state, viewer) {
+  return Object.fromEntries(SEATS.map(seat => [seat,
+    viewer.seat === seat || (state.dummyRevealed && state.dummy === seat)
+      ? clone(state.hands[seat]) : null]));
+}
+
+function assertProjectedScores(scores, state, viewerSeat, label) {
+  assert.equal(scores.length, state.boardScores.length, `${label} score count`);
+  scores.forEach((score, index) => {
+    const canonical = state.boardScores[index];
+    const keys = canonical.passedOut
+      ? ['dealNumber', 'boardNumber', 'score', 'passedOut', 'ddTable', 'biddingHistory']
+      : [
+        'dealNumber', 'boardNumber', 'passedOut', 'contract', 'declarer', 'dummy',
+        'declarerTricks', 'needed', 'score', 'made', 'diff', 'vulnerability',
+        'biddingHistory', 'completedTricks', 'ddTable', 'claim',
+      ];
+    exactKeys(score, keys, `${label} score ${index}`);
+    assert.deepEqual(score.biddingHistory, expectedAuction(canonical.biddingHistory, viewerSeat));
+    for (const key of keys.filter(key => key !== 'biddingHistory')) {
+      assert.deepEqual(score[key], canonical[key], `${label} score ${index} ${key}`);
+    }
+  });
+}
+
+function assertWorkerSnapshot(snapshot, state, viewer, revision, playerNames, label) {
+  exactKeys(snapshot, ROOM_SNAPSHOT_KEYS, `${label} room snapshot`);
+  assert.equal(snapshot.schemaVersion, 1);
+  assert.equal(snapshot.revision, revision);
+  assert.equal(snapshot.status, 'ACTIVE');
+  assert.deepEqual(snapshot.viewer, viewer);
+  assert.deepEqual(snapshot.playerNames, playerNames);
+  exactKeys(snapshot.classic, CLASSIC_VIEW_KEYS, `${label} classic view`);
+  for (const key of [
+    'schemaVersion', 'mode', 'phase', 'dealNumber', 'boardInfo', 'readyStatus',
+    'currentBidder', 'currentContract', 'consecutivePasses', 'declarer', 'dummy',
+    'leader', 'currentPlayer', 'currentTrick', 'nsTricks', 'ewTricks',
+    'dummyRevealed', 'claimSettlement', 'ddTable', 'ddsStatus',
+  ]) assert.deepEqual(snapshot.classic[key], state[key], `${label} ${key}`);
+  assert.equal(snapshot.classic.completedCount, state.completedTricks.length);
+  assert.deepEqual(snapshot.classic.biddingHistory,
+    expectedAuction(state.biddingHistory, viewer.seat));
+  assert.deepEqual(snapshot.classic.hands, expectedVisibleHands(state, viewer));
+  assertProjectedScores(snapshot.classic.boardScores, state, viewer.seat, label);
+  assertNoForbiddenTransportKeys(snapshot, label);
 }
 
 function createNodePath(fixture) {
@@ -193,7 +365,7 @@ function invokeNode(node, item) {
   assert.fail(`unsupported Node transcript command ${item.command.name}`);
 }
 
-function expectedNodeEventNames(events, phase) {
+function expectedNodeDeliveryPlan(node, events, phase) {
   const auctionFinished = events.some(event => (
     event.name === 'classic.bidding-ended'
       || (event.name === 'classic.finished' && event.payload.reason === 'passed-out')
@@ -202,13 +374,15 @@ function expectedNodeEventNames(events, phase) {
   const playFinished = events.some(event => (
     event.name === 'classic.finished' && event.payload.reason !== 'passed-out'
   ));
-  const names = [];
+  const plan = [];
+  const players = name => SEATS.forEach(seat => plan.push({ name, target: node.sockets[seat] }));
   for (const event of events) {
     let name = null;
     if (event.name === 'classic.started') name = 'gameStart';
     else if (event.name === 'classic.bidding-updated' && !auctionFinished) name = 'biddingUpdate';
     else if (event.name === 'classic.bidding-ended') {
-      names.push(...Array(4).fill('biddingEnd'), ...Array(4).fill('playUpdate'));
+      players('biddingEnd');
+      players('playUpdate');
       continue;
     } else if (event.name === 'classic.finished') name = 'gameEnd';
     else if (event.name === 'classic.dummy-revealed') name = 'dummyRevealed';
@@ -216,32 +390,84 @@ function expectedNodeEventNames(events, phase) {
     else if (event.name === 'classic.trick-ended') name = 'trickEnd';
     else if (event.name === 'classic.ready-updated') name = 'nextDealUpdate';
     else if (event.name === 'classic.dd-table-ready' && phase === 'SCORING') {
-      names.push('ddTableReady');
+      plan.push({ name: 'ddTableReady', target: node.room.id });
       continue;
     }
-    if (name) names.push(...Array(4).fill(name));
+    if (name) players(name);
   }
-  if (hasPlayedCard && !playFinished) names.push(...Array(4).fill('playUpdate'));
-  return names;
+  if (hasPlayedCard && !playFinished) players('playUpdate');
+  return plan;
 }
 
 function assertNodeTransport(node, state, coreEvents, emissions) {
-  assert.deepEqual(emissions.map(emission => emission.name),
-    expectedNodeEventNames(coreEvents, state.phase));
+  assert.deepEqual(emissions.map(({ name, target }) => ({ name, target })),
+    expectedNodeDeliveryPlan(node, coreEvents, state.phase));
   for (const emission of emissions) {
+    const keys = emission.name === 'gameEnd'
+      ? (emission.payload.passedOut
+        ? ['passedOut', 'score', 'boardScores', 'ddTable', 'hands']
+        : [
+          'passedOut', 'contract', 'declarer', 'dummy', 'declarerTricks', 'needed',
+          'score', 'made', 'diff', 'vulnerability', 'boardScores', 'ddTable', 'hands',
+        ])
+      : NODE_PAYLOAD_KEYS[emission.name];
+    assert.ok(keys, `unknown Node event ${emission.name}`);
+    exactKeys(emission.payload, keys, `Node ${emission.name}`);
+    const seat = SEATS.find(candidate => node.sockets[candidate] === emission.target) || null;
     if (emission.name === 'gameStart') {
-      const seat = SEATS.find(candidate => node.sockets[candidate] === emission.target);
       assert.ok(seat);
       assert.deepEqual(emission.payload.hand, state.hands[seat]);
-      assert.equal(Object.hasOwn(emission.payload, 'hands'), false);
-      assert.equal(Object.hasOwn(emission.payload, 'initialHands'), false);
-    }
-    if (state.phase !== 'SCORING') {
-      assert.equal(Object.hasOwn(emission.payload, 'initialHands'), false);
-      if (emission.name !== 'dummyRevealed') {
-        assert.equal(Object.hasOwn(emission.payload, 'hands'), false);
+      assert.deepEqual(emission.payload.boardInfo, state.boardInfo);
+      assert.equal(emission.payload.seat, seat);
+      assert.deepEqual(emission.payload.playerNames, node.room.playerNames);
+    } else if (emission.name === 'biddingUpdate') {
+      assert.deepEqual(emission.payload.history,
+        expectedAuction(state.biddingHistory, seat, { legacy: true }));
+      assert.equal(emission.payload.currentBidder, state.currentBidder);
+      assert.deepEqual(emission.payload.currentContract, state.currentContract);
+      assert.equal(emission.payload.consecutivePasses, state.consecutivePasses);
+    } else if (emission.name === 'biddingEnd') {
+      assert.deepEqual(emission.payload.biddingHistory,
+        expectedAuction(state.biddingHistory, seat, { legacy: true }));
+      assert.deepEqual(emission.payload.contract, state.currentContract);
+      for (const key of ['declarer', 'dummy', 'leader']) {
+        assert.equal(emission.payload[key], state[key]);
       }
+      assert.equal(emission.payload.declarerControlledBy, null);
+    } else if (emission.name === 'playUpdate') {
+      assert.equal(emission.payload.currentPlayer, state.currentPlayer);
+      assert.deepEqual(emission.payload.currentTrick, state.currentTrick);
+      assert.equal(emission.payload.completedCount, state.completedTricks.length);
+      for (const key of ['nsTricks', 'ewTricks', 'dummyRevealed', 'dummy', 'declarer']) {
+        assert.equal(emission.payload[key], state[key]);
+      }
+      assert.equal(emission.payload.declarerControlledBy, null);
+      assert.equal(emission.payload.teachingCurrentSeat, null);
+      assert.equal(emission.payload.teachingCurrentHand, null);
+    } else if (emission.name === 'dummyRevealed') {
+      assert.equal(emission.payload.dummy, state.dummy);
+      assert.deepEqual(emission.payload.dummyHand, state.hands[state.dummy]);
+    } else if (emission.name === 'cardPlayed') {
+      const event = coreEvents.find(candidate => candidate.name === 'classic.card-played');
+      assert.deepEqual(emission.payload, event.payload);
+    } else if (emission.name === 'trickEnd') {
+      const event = coreEvents.find(candidate => candidate.name === 'classic.trick-ended');
+      assert.deepEqual(emission.payload, event.payload);
+    } else if (emission.name === 'nextDealUpdate') {
+      const event = coreEvents.find(candidate => candidate.name === 'classic.ready-updated');
+      assert.deepEqual(emission.payload.readyStatus, event.payload.readyStatus);
+      assert.deepEqual(emission.payload.playerNames, node.room.playerNames);
+    } else if (emission.name === 'ddTableReady') {
+      assert.equal(emission.target, node.room.id);
+      assert.deepEqual(emission.payload.ddTable, state.ddTable);
+    } else if (emission.name === 'gameEnd') {
+      const score = state.boardScores.at(-1);
+      assert.equal(emission.payload.passedOut, score.passedOut);
+      assert.equal(emission.payload.score, score.score);
+      assert.deepEqual(emission.payload.ddTable, score.ddTable);
+      assert.deepEqual(emission.payload.hands, score.initialHands);
     }
+    assert.equal(Object.hasOwn(emission.payload, 'initialHands'), false);
   }
 }
 
@@ -272,9 +498,10 @@ async function post(runtime, route, body) {
 }
 
 async function setupWorkerRoom(runtime, label, nextId) {
+  const playerNames = Object.fromEntries(SEATS.map(seat => [seat, `${label}-${seat}`]));
   const ownerToken = token();
   const created = await post(runtime, '/api/rooms', {
-    v: 1, requestId: nextId(`${label}-create`), displayName: `${label}-N`,
+    v: 1, requestId: nextId(`${label}-create`), displayName: playerNames.N,
     reconnectToken: ownerToken,
   });
   assert.equal(created.status, 200, created.text);
@@ -283,13 +510,22 @@ async function setupWorkerRoom(runtime, label, nextId) {
   for (const seat of ['E', 'S', 'W']) {
     const reconnectToken = token();
     const joined = await post(runtime, `/api/rooms/${room.roomCode}/join`, {
-      v: 1, requestId: nextId(`${label}-join-${seat}`), displayName: `${label}-${seat}`,
+      v: 1, requestId: nextId(`${label}-join-${seat}`), displayName: playerNames[seat],
       reconnectToken, requestedRole: 'player',
     });
     assert.equal(joined.status, 200, joined.text);
     sessions.push({ ...joined.body, reconnectToken });
   }
+  const spectatorToken = token();
+  const spectatorResponse = await post(runtime, `/api/rooms/${room.roomCode}/join`, {
+    v: 1, requestId: nextId(`${label}-join-spectator`),
+    displayName: `${label.slice(0, 24)}-watch`,
+    reconnectToken: spectatorToken, requestedRole: 'spectator',
+  });
+  assert.equal(spectatorResponse.status, 200, spectatorResponse.text);
+  sessions.push({ ...spectatorResponse.body, reconnectToken: spectatorToken });
   const bySeat = new Map();
+  const recipients = [];
   for (const session of sessions) {
     const socket = await runtime.openWebSocket(
       `/api/rooms/${room.roomCode}/${room.incarnation}/ws`,
@@ -300,9 +536,12 @@ async function setupWorkerRoom(runtime, label, nextId) {
     });
     const hello = JSON.parse(await socket.nextMessage());
     assert.equal(hello.type, 'hello-ok');
-    bySeat.set(session.seat, { socket, session });
+    const viewer = { role: session.role, seat: session.seat };
+    const authenticated = { socket, session, viewer };
+    recipients.push(authenticated);
+    if (session.seat !== null) bySeat.set(session.seat, authenticated);
   }
-  return { bySeat, room };
+  return { bySeat, playerNames, recipients, room };
 }
 
 async function inspectWorker(runtime, worker) {
@@ -313,7 +552,7 @@ async function inspectWorker(runtime, worker) {
   return response.body.value;
 }
 
-async function sendWorker(runtime, worker, item, nextId, coreResult, composeClassicEventFrame) {
+async function sendWorker(runtime, worker, item, nextId, coreResult) {
   const before = await inspectWorker(runtime, worker);
   const expectedRevision = before.roomState.revision;
   const frame = {
@@ -335,10 +574,17 @@ async function sendWorker(runtime, worker, item, nextId, coreResult, composeClas
   assert.equal(reply.name, item.expected.name);
   const revision = reply.payload.revision;
   assert.equal(revision, expectedRevision + 1);
+  exactKeys(reply, ['v', 'type', 'id', 'name', 'payload'], 'Worker reply outer');
+  exactKeys(reply.payload, ['revision', 'snapshot'], 'Worker reply payload');
+  assertWorkerSnapshot(reply.payload.snapshot, coreResult.state, actorFor(item.actor), revision,
+    worker.playerNames, 'Worker command reply');
   assert.equal(reply.payload.snapshot.classic.phase, item.expected.phase);
+  assertNoForbiddenTransportKeys(reply, 'Worker command reply');
 
-  const framesBySeat = new Map();
-  for (const [seat, authenticated] of worker.bySeat) {
+  const framesByRecipient = [];
+  for (const authenticated of worker.recipients) {
+    const { viewer } = authenticated;
+    const recipient = viewer.seat === null ? 'spectator' : viewer.seat;
     const frames = [];
     let observed;
     try {
@@ -347,20 +593,26 @@ async function sendWorker(runtime, worker, item, nextId, coreResult, composeClas
         frames.push(observed);
       } while (observed.name !== 'room.snapshot');
     } catch (error) {
-      error.message = `seat ${seat} after ${JSON.stringify(frames.map(value => value.name))}: ${error.message}`;
+      error.message = `recipient ${recipient} after ${JSON.stringify(frames.map(value => value.name))}: ${error.message}`;
       throw error;
     }
-    framesBySeat.set(seat, frames);
-    const viewer = actorFor(seat);
-    const expectedEvents = coreResult.events.map(event => (
-      composeClassicEventFrame(event, revision, viewer)
-    ));
-    assert.deepEqual(frames.slice(0, -1), expectedEvents);
-    assert.deepEqual(frames.at(-1).payload.snapshot.classic,
-      classicViewFor(coreResult.state, viewer));
-    assert.equal(JSON.stringify(frames).includes('initialHands'), false);
+    framesByRecipient.push({ viewer, frames });
+    assert.equal(frames.length, coreResult.events.length + 1);
+    coreResult.events.forEach((event, index) => {
+      assertWorkerEventFrame(frames[index], event, revision, viewer,
+        `Worker ${recipient} event ${index}`);
+    });
+    const snapshotFrame = frames.at(-1);
+    exactKeys(snapshotFrame, ['v', 'type', 'name', 'payload'], `Worker ${recipient} snapshot frame`);
+    assert.equal(snapshotFrame.v, 1);
+    assert.equal(snapshotFrame.type, 'event');
+    assert.equal(snapshotFrame.name, 'room.snapshot');
+    exactKeys(snapshotFrame.payload, ['revision', 'snapshot'], `Worker ${recipient} snapshot payload`);
+    assert.equal(snapshotFrame.payload.revision, revision);
+    assertWorkerSnapshot(snapshotFrame.payload.snapshot, coreResult.state, viewer, revision,
+      worker.playerNames, `Worker ${recipient}`);
   }
-  return { framesBySeat, reply };
+  return { framesByRecipient, reply };
 }
 
 async function waitForNodeDds(node) {
@@ -368,8 +620,7 @@ async function waitForNodeDds(node) {
     'timed out waiting for paused Node DDS');
 }
 
-async function settleCheckpoint({ checkpoint, document, node, pureState, runtime, worker,
-  composeClassicEventFrame }) {
+async function settleCheckpoint({ checkpoint, document, node, pureState, runtime, worker }) {
   const table = document.tables[checkpoint.table];
   assert.ok(table, checkpoint.name);
   assert.equal(pureState.ddsStatus, 'PENDING', checkpoint.name);
@@ -378,13 +629,17 @@ async function settleCheckpoint({ checkpoint, document, node, pureState, runtime
   });
   assert.equal(pureResult.ok, true);
 
+  const nodeEmissionStart = node.emissions.length;
   const pausedNode = await waitForNodeDds(node);
   pausedNode.resolve(clone(table));
   node.dds.shift();
   await waitFor(() => node.room.ddsStatus === 'READY' && node.room,
     { wait: ms => new Promise(resolve => setTimeout(resolve, ms)) },
     'timed out waiting for Node DDS settlement');
+  const nodeDdsEmissions = node.emissions.slice(nodeEmissionStart);
+  assertNodeTransport(node, projectClassicState(node.room), pureResult.events, nodeDdsEmissions);
 
+  const workerBefore = await inspectWorker(runtime, worker);
   await waitFor(async () => {
     const response = await runtime.room('inspectRoomClassicDds', {
       code: worker.room.roomCode, incarnation: worker.room.incarnation,
@@ -402,16 +657,22 @@ async function settleCheckpoint({ checkpoint, document, node, pureState, runtime
   }, runtime, 'timed out waiting for Worker DDS settlement');
 
   const workerRevision = settledWorker.roomState.revision;
-  for (const [seat, authenticated] of worker.bySeat) {
+  assert.equal(workerRevision, workerBefore.roomState.revision + 1);
+  for (const authenticated of worker.recipients) {
+    const { viewer } = authenticated;
+    const recipient = viewer.seat === null ? 'spectator' : viewer.seat;
     const event = JSON.parse(await authenticated.socket.nextMessage());
     const snapshot = JSON.parse(await authenticated.socket.nextMessage());
-    const viewer = actorFor(seat);
-    assert.deepEqual(event,
-      composeClassicEventFrame(pureResult.events[0], workerRevision, viewer));
+    assertWorkerEventFrame(event, pureResult.events[0], workerRevision, viewer,
+      `Worker ${recipient} DDS`);
+    exactKeys(snapshot, ['v', 'type', 'name', 'payload'], `Worker ${recipient} DDS snapshot frame`);
+    assert.equal(snapshot.v, 1);
+    assert.equal(snapshot.type, 'event');
     assert.equal(snapshot.name, 'room.snapshot');
-    assert.deepEqual(snapshot.payload.snapshot.classic,
-      classicViewFor(pureResult.state, viewer));
-    assert.equal(JSON.stringify(snapshot).includes('initialHands'), false);
+    exactKeys(snapshot.payload, ['revision', 'snapshot'], `Worker ${recipient} DDS snapshot payload`);
+    assert.equal(snapshot.payload.revision, workerRevision);
+    assertWorkerSnapshot(snapshot.payload.snapshot, pureResult.state, viewer, workerRevision,
+      worker.playerNames, `Worker ${recipient} DDS snapshot`);
   }
   assertCanonicalParity(`${checkpoint.name} DDS`, pureResult.state,
     projectClassicState(node.room), settledWorker.classicState);
@@ -420,10 +681,9 @@ async function settleCheckpoint({ checkpoint, document, node, pureState, runtime
 
 test('fixed transcripts stay byte-identical across pure core, Node adapter, and real Durable Object',
   { timeout: 180_000 }, async () => {
-    const [{ createRoomWorkerRuntime }, { composeClassicEventFrame }] = await Promise.all([
-      import('../workers/test/helpers/room-worker-runtime.mjs'),
-      import('../workers/src/room-foundation/room-view.mjs'),
-    ]);
+    const { createRoomWorkerRuntime } = await import(
+      '../workers/test/helpers/room-worker-runtime.mjs'
+    );
     const runtime = await createRoomWorkerRuntime({
       vars: {
         CLASSIC_TEST_DEALS_JSON: JSON.stringify(DOCUMENT.transcripts[0].deals.concat(
@@ -468,8 +728,7 @@ test('fixed transcripts stay byte-identical across pure core, Node adapter, and 
             node.emissions.slice(emissionStart));
 
           try {
-            await sendWorker(runtime, worker, item, nextId, pureResult,
-              composeClassicEventFrame);
+            await sendWorker(runtime, worker, item, nextId, pureResult);
           } catch (error) {
             error.message = `${fixture.id} item ${consumed + 1} ${item.command.name}: ${error.message}`;
             throw error;
@@ -477,6 +736,8 @@ test('fixed transcripts stay byte-identical across pure core, Node adapter, and 
           const workerObserved = await inspectWorker(runtime, worker);
           assertCanonicalParity(`${fixture.id} item ${consumed + 1}`, pureState,
             projectClassicState(node.room), workerObserved.classicState);
+          assertSecondDealIndexing(fixture, pureState, projectClassicState(node.room),
+            workerObserved.classicState);
           if (pureState.dealNumber > 0 && item.ddsCheckpoint === undefined
               && !fixture.commands.some(candidate => candidate.ddsCheckpoint)) {
             assert.equal(pureState.ddsStatus, 'PENDING');
@@ -486,7 +747,7 @@ test('fixed transcripts stay byte-identical across pure core, Node adapter, and 
           if (item.ddsCheckpoint) {
             pureState = await settleCheckpoint({
               checkpoint: item.ddsCheckpoint, document: DOCUMENT, node, pureState,
-              runtime, worker, composeClassicEventFrame,
+              runtime, worker,
             });
           }
         }
