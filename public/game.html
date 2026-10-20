@@ -135,6 +135,10 @@
 <div id="teach-panel" class="hidden">
   <div id="teach-panel-label"></div>
   <div id="teach-hand-area"></div>
+  <div id="teach-decl-hand" class="hidden">
+    <div id="teach-decl-label"></div>
+    <div id="teach-decl-area"></div>
+  </div>
   <div id="teach-bid-area" class="hidden"></div>
   <div id="teach-play-confirm" class="hidden">
     <button class="btn btn-primary" id="teach-btn-play" onclick="teachConfirmPlay()">出牌</button>
@@ -226,6 +230,11 @@
   <div class="modal modal-wide">
     <h3 class="modal-title" id="end-title"></h3>
     <div id="end-content"></div>
+    <div id="end-hands" class="end-hands"></div>
+    <div id="end-review">
+      <div id="end-bidding"></div>
+      <div id="end-replay"></div>
+    </div>
     <div id="end-dd-table"></div>
     <div id="end-history"></div>
     <div class="modal-btn-row" style="flex-direction:column;gap:.5rem;align-items:center">

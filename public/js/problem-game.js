@@ -147,6 +147,7 @@ function applyProblemState(data, options = {}) {
   $('topbar-vul').textContent = data.vulnerability || 'NONE';
   $('topbar-name').textContent = data.problemName || '';
   $('flavor-bg').textContent = data.flavorText || '';
+  G.auction = data.auction || null;
   renderAuction(data.auction || []);
 
   rebuildPlayedCards();
@@ -206,12 +207,8 @@ function bidHtml(bid) {
   return `<span class="prob-auction-bid">${level}</span><span class="${cls}">${sym}</span>`;
 }
 
-function renderAuction(auction) {
-  const panel = $('prob-mini-auction');
-  const body  = $('prob-auction-body');
-  if (!panel || !body) return;
-  if (!auction || auction.length === 0) { panel.classList.add('hidden'); return; }
-
+// 叫牌表 HTML（游戏内叫牌面板与结算回顾共用）
+function auctionTableHtml(auction) {
   const dealer = auction[0].seat;
   const startIdx = SEAT_ORDER.indexOf(dealer);
 
@@ -240,10 +237,26 @@ function renderAuction(auction) {
     html += `<tr>${row}</tr>`;
   }
   html += '</tbody></table>';
+  return html;
+}
 
-  body.innerHTML = html;
+function renderAuction(auction) {
+  const panel = $('prob-mini-auction');
+  const body  = $('prob-auction-body');
+  if (!panel || !body) return;
+  if (!auction || auction.length === 0) { panel.classList.add('hidden'); return; }
+  body.innerHTML = auctionTableHtml(auction);
   body.scrollTop = body.scrollHeight;
   panel.classList.remove('hidden');
+}
+
+// 结算页叫牌回顾
+function renderResultAuction() {
+  const el = $('result-auction');
+  if (!el) return;
+  const auction = G.auction;
+  if (!auction || auction.length === 0) { el.innerHTML = ''; return; }
+  el.innerHTML = '<div class="result-section-title">叫牌回顾</div>' + auctionTableHtml(auction);
 }
 
 // ── 手牌渲染 ──────────────────────────────────────────────────
@@ -620,36 +633,53 @@ function showResult(data) {
   `;
 
   renderResultHands(data.initialHands, data.finalHands);
+  renderResultAuction();
   renderResultTricks(data.completedTricks);
 
   showScreen('result');
 }
 
-function handToStr(hand, suit) {
-  const cards = (hand || []).filter(c => c.suit === suit).sort((a,b) => b.rank - a.rank);
-  if (cards.length === 0) return '<span class="result-void">—</span>';
-  return cards.map(c => `<span>${RANK_LABEL[c.rank] || c.rank}</span>`).join('');
-}
-
-function handCellHtml(hand) {
-  return ['S','H','D','C'].map(suit => {
-    const color = (suit === 'H' || suit === 'D') ? ' red' : '';
-    return `<div class="rh-suit${color}">${SUIT_SYMBOL[suit]}${handToStr(hand, suit)}</div>`;
-  }).join('');
-}
-
+// 结算页四手牌：罗盘布局，每花色一行，用持牌图像（复用牌桌 prob-card 元素）展示
 function renderResultHands(hands, finalHands) {
   const el = $('result-hands');
   if (!el) return;
   const h = finalHands || hands;
   if (!h) { el.innerHTML = ''; return; }
-  el.innerHTML = `
-    <div class="rh-compass">
-      <div class="rh-cell rh-north"><div class="rh-seat-label">N</div>${handCellHtml(h.N)}</div>
-      <div class="rh-cell rh-west" ><div class="rh-seat-label">W</div>${handCellHtml(h.W)}</div>
-      <div class="rh-cell rh-east" ><div class="rh-seat-label">E</div>${handCellHtml(h.E)}</div>
-      <div class="rh-cell rh-south"><div class="rh-seat-label">S</div>${handCellHtml(h.S)}</div>
-    </div>`;
+
+  const compass = document.createElement('div');
+  compass.className = 'rh-compass';
+  const CELL_POS = { N: 'north', W: 'west', E: 'east', S: 'south' };
+
+  for (const s of ['N', 'W', 'E', 'S']) {
+    const cell = document.createElement('div');
+    cell.className = `rh-cell rh-${CELL_POS[s]}`;
+    const label = document.createElement('div');
+    label.className = 'rh-seat-label';
+    label.textContent = `${SEAT_LABEL[s]} ${s}`;
+    cell.appendChild(label);
+
+    // 单行展示：按花色分组（将牌优先、黑红交替）、组内从大到小，
+    // 与牌桌手牌显示一致，避免按花色分行导致结果区过高
+    const suits = getSuitOrder();
+    const cards = (h[s] || []).slice()
+      .sort((a, b) => (suits.indexOf(a.suit) - suits.indexOf(b.suit)) || (b.rank - a.rank));
+    const row = document.createElement('div');
+    row.className = 'rh-hand-row';
+    if (cards.length === 0) {
+      row.innerHTML = '<span class="result-void">—</span>';
+    } else {
+      cards.forEach(c => {
+        const cardEl = makeCardEl(c.suit, c.rank);
+        cardEl.classList.add('rh-card');
+        row.appendChild(cardEl);
+      });
+    }
+    cell.appendChild(row);
+    compass.appendChild(cell);
+  }
+
+  el.innerHTML = '';
+  el.appendChild(compass);
 }
 
 function renderResultTricks(tricks) {
@@ -931,7 +961,7 @@ socket.on('probTCStart', (data) => {
   if (data.startTime) startTimer(data.startTime);
 
   // 覆盖叫牌区（若本测试点有独立叫牌）
-  if (data.auction) renderAuction(data.auction);
+  if (data.auction) { G.auction = data.auction; renderAuction(data.auction); }
   // 测试点提示消息
   if (data.message) showToast(data.message, 4000);
   showScreen('game');

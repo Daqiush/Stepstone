@@ -120,6 +120,12 @@ function generateRoomId() {
   return String(Math.floor(Math.random() * 1000)).padStart(3, '0');
 }
 
+// 座位令牌：开局时为每个座位签发，随 gameStart 下发前端存 sessionStorage，
+// 换线/刷新后凭令牌重新认领座位（防止仅凭昵称顶座）
+function generateSeatToken() {
+  return Math.random().toString(36).slice(2, 12) + Math.random().toString(36).slice(2, 12);
+}
+
 // ────────────────────────────────────────────────────────────────
 // 计分（定约桥牌，每副独立计分）
 // ────────────────────────────────────────────────────────────────
@@ -262,6 +268,7 @@ function makeRoom(id) {
     sockets:       { N:null, E:null, S:null, W:null },
     playerNames:   { N:null, E:null, S:null, W:null },
     readyStatus:   { N:false, E:false, S:false, W:false }, // 仅用于下一副准备
+    seatTokens:    { N:null, E:null, S:null, W:null },    // 每座位换线认领令牌
     ownerSocketId: null, // 创建房间的玩家（房主）
     phase: 'LOBBY',  // LOBBY | BIDDING | PLAYING | SCORING
     dealNumber: 1,
@@ -662,7 +669,7 @@ function sendReconnectState(room, seat, sock) {
     const ls = room.boardScores[room.boardScores.length - 1];
     if (ls) {
       const payload = ls.passedOut
-        ? { passedOut: true, score: 0, boardScores: room.boardScores, ddTable: ls.ddTable || null }
+        ? { passedOut: true, score: 0, boardScores: room.boardScores, ddTable: ls.ddTable || null, hands: ls.initialHands || null }
         : {
             passedOut: false,
             contract:       ls.contract,
@@ -676,6 +683,7 @@ function sendReconnectState(room, seat, sock) {
             vulnerability:  ls.vulnerability,
             boardScores:    room.boardScores,
             ddTable:        ls.ddTable || null,
+            hands:          ls.initialHands || null,
           };
       sock.emit('gameEnd', payload);
     }
@@ -729,6 +737,10 @@ function sendTeachingReconnectState(room, sock) {
   if (room.phase === 'PLAYING') {
     const teachingCurrentSeat = room.ownerControlledSeats.includes(room.currentPlayer)
       ? room.currentPlayer : null;
+    // 庄明均归房主、轮到明手出牌：重连时同样公开庄家手牌
+    const teachingDeclarerHand = (teachingCurrentSeat === room.dummy
+      && room.ownerControlledSeats.includes(room.declarer))
+      ? room.hands[room.declarer] : null;
     sock.emit('playUpdate', {
       currentPlayer:        room.currentPlayer,
       currentTrick:         room.currentTrick,
@@ -741,15 +753,16 @@ function sendTeachingReconnectState(room, sock) {
       declarerControlledBy: room.declarerControlledBy,
       teachingCurrentSeat,
       teachingCurrentHand:  teachingCurrentSeat ? room.hands[teachingCurrentSeat] : null,
+      teachingDeclarerHand,
     });
   } else {
     const ls = room.boardScores[room.boardScores.length - 1];
     if (ls) {
       const payload = ls.passedOut
-        ? { passedOut: true, score: 0, boardScores: room.boardScores, ddTable: ls.ddTable || null }
+        ? { passedOut: true, score: 0, boardScores: room.boardScores, ddTable: ls.ddTable || null, hands: ls.initialHands || null }
         : { passedOut: false, contract: ls.contract, declarer: ls.declarer, dummy: room.dummy,
             declarerTricks: ls.declarerTricks, needed: ls.needed, score: ls.score,
-            made: ls.made, diff: ls.diff, vulnerability: ls.vulnerability, boardScores: room.boardScores, ddTable: ls.ddTable || null };
+            made: ls.made, diff: ls.diff, vulnerability: ls.vulnerability, boardScores: room.boardScores, ddTable: ls.ddTable || null, hands: ls.initialHands || null };
       sock.emit('gameEnd', payload);
     }
   }
@@ -819,6 +832,10 @@ function bcastPlay(room) {
     && room.ownerControlledSeats.includes(room.currentPlayer)
     && !ownerYieldsDummy
     ? room.currentPlayer : null;
+  // 教学模式：庄家与明手均归房主控制、轮到明手出牌时，同时向房主公开庄家手牌（庄家视角）
+  const teachingDeclarerHand = (teachingCurrentSeat === room.dummy
+    && room.ownerControlledSeats.includes(room.declarer))
+    ? room.hands[room.declarer] : null;
   io.to(room.id).emit('playUpdate', {
     currentPlayer:       room.currentPlayer,
     currentTrick:        room.currentTrick,
@@ -831,6 +848,7 @@ function bcastPlay(room) {
     declarerControlledBy: room.declarerControlledBy,
     teachingCurrentSeat,
     teachingCurrentHand: teachingCurrentSeat ? room.hands[teachingCurrentSeat] : null,
+    teachingDeclarerHand,
   });
 }
 
@@ -868,6 +886,10 @@ function startGame(room) {
   room.claimReq = room.viewReq = null;
 
   // 每位牌手只收到自己的手牌（教学模式：房主统一接收一个合并事件）
+  // 同时为每个在席座位签发换线认领令牌
+  for (const s of SEATS) {
+    if (room.sockets[s]) room.seatTokens[s] = generateSeatToken();
+  }
   const ownerSock = room.teachingMode ? room.ownerSocketId : null;
   let ownerSent = false;
   for (const s of SEATS) {
@@ -882,6 +904,7 @@ function startGame(room) {
           hand:          room.hands[primarySeat],
           boardInfo:     room.boardInfo,
           seat:          primarySeat,
+          seatToken:     room.seatTokens[primarySeat],
           playerNames:   room.playerNames,
           teachingMode:  true,
           teachingSeats: room.ownerControlledSeats,
@@ -894,6 +917,7 @@ function startGame(room) {
         hand:        room.hands[s],
         boardInfo:   room.boardInfo,
         seat:        s,
+        seatToken:   room.seatTokens[s],
         playerNames: room.playerNames,
         boardScores: room.boardScores,
       });
@@ -928,6 +952,7 @@ function finishBidding(room) {
       score:       0,
       boardScores: room.boardScores,
       ddTable:     room.ddTable || null,
+      hands:       room.initialHands || null,
     });
     return;
   }
@@ -1024,6 +1049,14 @@ function processPlay(room, effectiveSeat, card) {
   bcastPlay(room);
 }
 
+// 声称于墩中途被接受时，把未完成的这一墩记入历史（按声称结果记为声称方赢墩）。
+// 注意：endGame 的 forced 计分已包含该墩，此处不重复计入 ns/ewTricks。
+function recordClaimedPartialTrick(room, claimer) {
+  if (!room.currentTrick || room.currentTrick.length === 0) return;
+  room.completedTricks.push({ cards: [...room.currentTrick], winner: claimer, claimed: true });
+  room.currentTrick = [];
+}
+
 function endGame(room, forcedNS, forcedEW) {
   const ns = forcedNS !== undefined ? forcedNS : room.nsTricks;
   const ew = forcedEW !== undefined ? forcedEW : room.ewTricks;
@@ -1076,6 +1109,7 @@ function endGame(room, forcedNS, forcedEW) {
     vulnerability: vul,
     boardScores:   room.boardScores,
     ddTable:       room.ddTable || null,
+    hands:         room.initialHands || null,
   });
 }
 
@@ -1143,16 +1177,20 @@ io.on('connection', socket => {
     // 非 LOBBY 阶段：只加入 socket.io 房间，等 chooseSeat 再恢复游戏状态
   });
 
-  socket.on('chooseSeat', ({ seat, playerName }) => {
+  socket.on('chooseSeat', ({ seat, playerName, seatToken }) => {
     const roomId = sockRoom[socket.id];
     const room   = rooms[roomId];
     if (!room) return;
+    // 座位令牌校验 / 持有者存活检测（io.sockets.sockets 为当前已连接 socket 集合）
+    const tokenOkFor  = (s) => !!(seatToken && room.seatTokens && room.seatTokens[s] === seatToken);
+    const holderAlive = (s) => !!room.sockets[s] && io.sockets.sockets.has(room.sockets[s]);
     if (room.mode === 'complex') {
       const side = complexSideForLobbySeat(seat);
       if (!side) { socket.emit('appError', { msg: '复数桥牌请选择南北方或东西方' }); return; }
       const [first, second] = complexSideSeats(side);
       const wasOwnerController = room.sockets[first] === room.ownerSocketId;
-      const isOwnPageTransition = room.phase !== 'LOBBY' && room.playerNames[first] === playerName;
+      const isOwnPageTransition = room.phase !== 'LOBBY'
+        && (tokenOkFor(first) || !holderAlive(first));
       if (room.sockets[first] && room.sockets[first] !== socket.id && !isOwnPageTransition) {
         socket.emit('appError', { msg: '该方已有人操控' }); return;
       }
@@ -1179,8 +1217,12 @@ io.on('connection', socket => {
       return;
     }
     // 教学模式：房主重连 — 恢复所有控制座位
+    // 凭主座位令牌识别；持有者已死线时也允许恢复（房主崩溃后重新进入的唯一途径，
+    // 房间号即信任凭据，能进入房间的玩家视为已获信任）
     if (room.teachingMode && room.ownerControlledSeats.includes(seat)
-        && (room.ownerSocketId === socket.id || !room.sockets[seat])) {
+        && (room.ownerSocketId === socket.id || !room.sockets[seat]
+            || !holderAlive(seat)
+            || (room.phase !== 'LOBBY' && tokenOkFor(seat)))) {
       if (room.phase !== 'LOBBY') {
         room.ownerSocketId = socket.id;
         for (const ts of room.ownerControlledSeats) room.sockets[ts] = socket.id;
@@ -1189,7 +1231,20 @@ io.on('connection', socket => {
         return;
       }
     }
-    if (room.sockets[seat]) { socket.emit('appError', { msg: '该座位已被占用' }); return; }
+    // 页面跳转换线：游戏开始后跳转到 game.html/ult.html 会建立新 socket，
+    // 旧 socket 的 disconnect 可能晚于新 socket 的 chooseSeat 到达（心跳超时未到）。
+    // 凭座位令牌接管（令牌随 gameStart 下发，存于前端 sessionStorage）；
+    // 持有者已死线（断线未被清理）时也允许接管，用于崩溃后无令牌重入。
+    const isOwnPageTransition = room.phase !== 'LOBBY'
+      && room.sockets[seat] !== socket.id
+      && (tokenOkFor(seat) || !holderAlive(seat));
+    if (room.sockets[seat] && room.sockets[seat] !== socket.id && !isOwnPageTransition) {
+      socket.emit('appError', { msg: '该座位已被占用' }); return;
+    }
+    if (isOwnPageTransition) {
+      // 接管的座位若属于房主，所有权一并移交给新 socket
+      if (room.ownerSocketId === room.sockets[seat]) room.ownerSocketId = socket.id;
+    }
     if (room.teachingMode && socket.id === room.ownerSocketId) {
       socket.emit('appError', { msg: '教学模式下房主不入座，游戏会自动填充空位' }); return;
     }
@@ -1244,6 +1299,40 @@ io.on('connection', socket => {
     socket.emit('seatLeft');
   });
 
+  // 房主移除其他玩家的入座状态（仅 LOBBY 阶段）
+  socket.on('ownerKickSeat', ({ seat }) => {
+    const roomId = sockRoom[socket.id];
+    const room   = rooms[roomId];
+    if (!room || room.phase !== 'LOBBY') return;
+    if (room.ownerSocketId !== socket.id) {
+      socket.emit('appError', { msg: '只有房主可以移除座位' }); return;
+    }
+    if (!SEATS.includes(seat)) return;
+
+    if (room.mode === 'complex') {
+      const side = sideOf(seat);
+      const targetId = room.sockets[seat];
+      if (!targetId || targetId === socket.id) return;
+      for (const s of complexSideSeats(side)) {
+        room.sockets[s] = null;
+        room.playerNames[s] = null;
+        room.readyStatus[s] = false;
+      }
+      if (room.complexSides?.[side]) room.complexSides[side].socketId = null;
+      delete sockSeat[targetId];
+      io.to(targetId).emit('kickedFromSeat');
+    } else {
+      const targetId = room.sockets[seat];
+      if (!targetId || targetId === socket.id) return;
+      room.sockets[seat] = null;
+      room.playerNames[seat] = null;
+      room.readyStatus[seat] = false;
+      delete sockSeat[targetId];
+      io.to(targetId).emit('kickedFromSeat');
+    }
+    io.to(roomId).emit('roomUpdate', roomState(room));
+  });
+
   socket.on('ownerStartGame', () => {
     const roomId = sockRoom[socket.id];
     const room   = rooms[roomId];
@@ -1274,10 +1363,7 @@ io.on('connection', socket => {
         }
 
         if (room.teachingMode) {
-          const realSeated = SEATS.filter(s => room.sockets[s]);
-          if (realSeated.length === 0) {
-            socket.emit('appError', { msg: '教学模式下需要至少1名玩家就座' }); return;
-          }
+          // 教学模式：允许无人入座，房主一人控制全部四家
           const ownerSeats = [];
           for (const s of SEATS) {
             if (!room.sockets[s]) {
@@ -1497,10 +1583,14 @@ io.on('connection', socket => {
       ({ tricksToWin, reason } = normalized);
     }
     let seat = sockSeat[socket.id];
-    // 教学模式：房主以庄家（或其搭档）座位声称
+    // 教学模式：房主以庄家座位声称；庄家为真实玩家时退而取其搭档（明手），
+    // 再否则取任一自控座位（防守方可让牌）。注意必须先判庄家——
+    // find 按座位顺序扫描会先命中明手（搭档），导致"明手不能声称"误报
     if (room.teachingMode && socket.id === room.ownerSocketId) {
-      seat = room.ownerControlledSeats.find(s => s === room.declarer || s === partner(room.declarer))
-          || room.ownerControlledSeats[0];
+      const oc = room.ownerControlledSeats;
+      seat = oc.includes(room.declarer) ? room.declarer
+           : oc.includes(partner(room.declarer)) ? partner(room.declarer)
+           : oc[0];
     }
     if (!seat) { socket.emit('appError', { msg: '无法确定声称座位' }); return; }
     if (seat === room.dummy) { socket.emit('appError', { msg: '明手不能声称' }); return; }
@@ -1553,6 +1643,7 @@ io.on('connection', socket => {
           io.to(room.id).emit('claimResult', { accepted: true, tricksToWin, claimer: seat });
           room.lastClaim = { claimer: seat, tricksToWin, reason: reason || '' };
           room.claimReq = null;
+          recordClaimedPartialTrick(room, seat);
           const nsAdd = claimerSide === 'NS' ? tricksToWin : (remaining - tricksToWin);
           const ewAdd = claimerSide === 'EW' ? tricksToWin : (remaining - tricksToWin);
           endGame(room, room.nsTricks + nsAdd, room.ewTricks + ewAdd);
@@ -1610,6 +1701,7 @@ io.on('connection', socket => {
           const remaining = 13 - room.completedTricks.length;
           const tw = req.tricksToWin;
           const claimerSide = sideOf(req.claimer);
+          recordClaimedPartialTrick(room, req.claimer);
           const nsAdd = claimerSide === 'NS' ? tw : (remaining - tw);
           const ewAdd = claimerSide === 'EW' ? tw : (remaining - tw);
           endGame(room, room.nsTricks + nsAdd, room.ewTricks + ewAdd);
@@ -1818,7 +1910,9 @@ io.on('connection', socket => {
         standard: (classicRoom, request) => (
           classicAdapter.clearReadyForDisconnect(classicRoom, request)
         ),
-        legacy: () => { room.readyStatus[seat] = false; },
+        legacy: () => {
+          if (room.sockets[seat] === socket.id) room.readyStatus[seat] = false;
+        },
       });
       if (room.mode === 'complex') {
         if (room.sockets[seat] === socket.id) {
@@ -1832,9 +1926,13 @@ io.on('connection', socket => {
           io.to(roomId).emit('roomUpdate', roomState(room));
         }
       } else {
-      room.sockets[seat]     = null;
-      room.playerNames[seat] = null;
-      io.to(roomId).emit('playerDisconnected', { seat });
+        // 座位可能已被换线的新 socket 接管，只清理仍归属本 socket 的座位
+        if (room.sockets[seat] === socket.id) {
+          room.sockets[seat]     = null;
+          room.playerNames[seat] = null;
+          room.readyStatus[seat] = false;
+          io.to(roomId).emit('playerDisconnected', { seat });
+        }
       }
       if (room.phase === 'LOBBY' && SEATS.every(s => !room.sockets[s])) {
         delete rooms[roomId];
@@ -2159,8 +2257,10 @@ function startUltGame(room) {
   for (const s of SEATS) {
     const sock = room.sockets[s];
     if (!sock) continue;
+    room.seatTokens[s] = generateSeatToken();
     io.to(sock).emit('ultCharOptions', {
       seat:         s,
+      seatToken:    room.seatTokens[s],
       seatOptions:  room.charOptions,
       playerNames:  room.playerNames,
       vulnerability: room.boardInfo.vul,
@@ -3984,6 +4084,7 @@ function complexSnapshot(room, side) {
     side,
     phase: room.phase,
     hands: { [seats[0]]: room.hands?.[seats[0]] || [], [seats[1]]: room.hands?.[seats[1]] || [] },
+    seatToken: room.seatTokens?.[seats[0]] || null,
     playerNames: room.playerNames,
     bids: room.complexBids?.NS && room.complexBids?.EW
       ? room.complexBids
@@ -4016,6 +4117,9 @@ function startComplexGame(room) {
   const deck = shuffle(complexRules.createComplexDeck());
   room.hands = { N: deck.slice(0, 13), E: deck.slice(13, 26), S: deck.slice(26, 39), W: deck.slice(39, 52) };
   room.initialHands = { N: [...room.hands.N], E: [...room.hands.E], S: [...room.hands.S], W: [...room.hands.W] };
+  // 每方签发一枚共用令牌（chooseSeat 以 first 座位校验）
+  const nsToken = generateSeatToken(), ewToken = generateSeatToken();
+  room.seatTokens = { N: nsToken, S: nsToken, E: ewToken, W: ewToken };
   room.phase = 'COMPLEX_BIDDING';
   room.complexBids = {};
   room.currentContract = null;

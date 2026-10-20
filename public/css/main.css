@@ -262,6 +262,13 @@ input, textarea { font-family: var(--font); }
 }
 .seat-slot.mine .seat-leave { display: block; }
 .seat-leave:hover { background: #7f1d1d; color: #fff; transform: scale(1.08); }
+.seat-kick {
+  display: none; position: absolute; top: -7px; left: -7px; z-index: 3;
+  width: 19px; height: 19px; padding: 0; border-radius: 50%;
+  border: 1px solid rgba(224,92,92,.85); background: #4b1d22; color: #fecaca;
+  font-size: 13px; line-height: 15px; cursor: pointer;
+}
+.seat-kick:hover { background: #7f1d1d; color: #fff; transform: scale(1.08); }
 .seat-slot.ready-done .seat-ready::after { content: '✓'; color: var(--green); font-size: .8rem; }
 
 .seat-icon svg { width: clamp(14px, 2.2vw, 22px); height: clamp(14px, 2.2vw, 22px); color: var(--text-muted); }

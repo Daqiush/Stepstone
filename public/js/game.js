@@ -17,11 +17,15 @@ const _seatsArr = ['N','E','S','W'];
 const _myIdx    = _seatsArr.indexOf(MY_SEAT);
 const SEAT_TO_VISUAL = {};
 const VISUAL_TO_SEAT = {};
-for (const [vis, off] of [['S',0],['N',2],['W',1],['E',3]]) {
-  const actual = _seatsArr[(_myIdx + off) % 4];
-  SEAT_TO_VISUAL[actual] = vis;
-  VISUAL_TO_SEAT[vis]    = actual;
+function setPerspective(seat) {
+  const idx = _seatsArr.indexOf(seat);
+  for (const [vis, off] of [['S',0],['N',2],['W',1],['E',3]]) {
+    const actual = _seatsArr[(idx + off) % 4];
+    SEAT_TO_VISUAL[actual] = vis;
+    VISUAL_TO_SEAT[vis]    = actual;
+  }
 }
+setPerspective(MY_SEAT);
 
 const socket = io();
 
@@ -61,6 +65,7 @@ const G = {
   teachingHands:        {},
   teachingCurrentSeat:  null,
   teachingCurrentHand:  null,
+  teachingDeclarerHand: null,
   // 明手代控庄家
   declarerControlledBy: null,
   declarerHand:         null,
@@ -74,7 +79,7 @@ const G = {
 // ────────────────────────────────────────────────────────────────
 socket.on('connect', () => {
   socket.emit('joinRoom', { roomId: MY_ROOM, playerName: MY_NAME });
-  socket.emit('chooseSeat', { seat: MY_SEAT, playerName: MY_NAME });
+  socket.emit('chooseSeat', { seat: MY_SEAT, playerName: MY_NAME, seatToken: sessionStorage.getItem('ss_seatToken') });
 });
 
 window.addEventListener('resize', fitTeachPanel);
@@ -88,6 +93,8 @@ socket.on('gameStart', (data) => {
   G.boardInfo    = data.boardInfo;
   G.playerNames  = data.playerNames;
   G.phase        = 'BIDDING';
+  // 每副牌重新签发的座位令牌，刷新本地存储（换线认领凭据）
+  if (data.seatToken) sessionStorage.setItem('ss_seatToken', data.seatToken);
   if (data.boardScores) G.boardScores = data.boardScores;
   G.dummyHand    = null;
   G.dummy        = null;
@@ -99,6 +106,10 @@ socket.on('gameStart', (data) => {
   G.teachingHands       = data.teachingHands || {};
   G.teachingCurrentSeat = null;
   G.teachingCurrentHand = null;
+  G.teachingDeclarerHand = null;
+  // 教学模式房主固定"南家在下"的标准罗盘视角
+  // （房主的 MY_SEAT 是第一个控制座位，常为 N，默认旋转会把桌面转 180°）
+  if (G.teachingMode) setPerspective('S');
   G.declarerControlledBy = null;
   G.declarerHand         = null;
   G.declarerSelectedCard = null;
@@ -200,6 +211,11 @@ socket.on('cardPlayed', ({ seat, card, currentTrick }) => {
     G.teachingHands[seat] = G.teachingHands[seat].filter(
       c => !(c.suit === card.suit && c.rank === card.rank));
   }
+  // 教学模式：庄明均归房主时同步庄家参考手牌
+  if (G.teachingDeclarerHand && seat === G.declarer) {
+    G.teachingDeclarerHand = G.teachingDeclarerHand.filter(
+      c => !(c.suit === card.suit && c.rank === card.rank));
+  }
   // 明手代控庄家：更新庄家手牌
   if (G.declarerHand && seat === G.declarer) {
     G.declarerHand = G.declarerHand.filter(c => !(c.suit === card.suit && c.rank === card.rank));
@@ -236,6 +252,9 @@ socket.on('playUpdate', (data) => {
     if (G.teachingCurrentSeat && G.teachingCurrentHand) {
       G.teachingHands[G.teachingCurrentSeat] = G.teachingCurrentHand;
     }
+    // 庄明均归房主、轮到明手出牌：同步庄家手牌
+    G.teachingDeclarerHand = data.teachingDeclarerHand
+      ? BR.sortHand(data.teachingDeclarerHand, G.currentContract?.suit) : null;
   }
   renderTrickBadges();
   renderNameplates();
@@ -515,7 +534,11 @@ function renderPlayerHand(seat) {
   const wrap = document.getElementById('hand-' + SEAT_TO_VISUAL[seat]);
   if (!wrap) return;
 
-  const isMine     = seat === MY_SEAT;
+  // 教学模式：房主的主座位（ownerControlledSeats[0]）不常驻正面显示——
+  // 房主只能看到当前行动座位的手牌（teach-panel 跟随轮次），
+  // 其余座位（含主座位）一律显示牌背；明手摊牌仍按规则对所有人公开。
+  const isMine     = seat === MY_SEAT
+    && !(G.teachingMode && G.teachingSeats.includes(seat));
   const isDummy    = seat === G.dummy && G.dummyRevealed;
   const visPos     = SEAT_TO_VISUAL[seat];
   const isEastWest = visPos === 'E' || visPos === 'W';
@@ -762,7 +785,10 @@ function renderNameplates() {
   for (const s of ['N','E','S','W']) {
     const el = document.getElementById('nameplate-' + SEAT_TO_VISUAL[s]);
     if (!el) continue;
-    const name = G.playerNames[s] || BR.SEAT_LABEL[s];
+    const seatLabel = BR.SEAT_LABEL[s];
+    const rawName   = G.playerNames[s] || '';
+    // 名牌显示"方位·昵称"；空位仅显示方位
+    const name = rawName && rawName !== seatLabel ? `${seatLabel}·${rawName}` : seatLabel;
     let cls = 'player-nameplate';
     const isActive = G.phase === 'BIDDING' ? s === G.currentBidder :
                      G.phase === 'PLAYING' ? (s === G.currentPlayer || (s === G.dummy && G.currentPlayer === G.dummy)) : false;
@@ -1109,7 +1135,7 @@ function renderScoreHistory(scores) {
       const sc = s.score;
       const cls = sc > 0 ? 'pos' : sc < 0 ? 'neg' : '';
       const diff = s.diff ?? (s.declarerTricks - s.needed);
-      const diffTxt = diff > 0 ? `+${diff}` : diff < 0 ? `${diff}` : '=';
+      const diffTxt = diff > 0 ? `+${diff}` : diff < 0 ? `${diff}` : '±0';
       html += `<tr>
         <td>${s.dealNumber}</td>
         <td>${contractText(s.contract)}</td>
@@ -1458,7 +1484,7 @@ function renderHistoryBoard(container, s, boardIdx) {
   }
   const diff = s.diff ?? (s.declarerTricks - s.needed);
   const cls  = s.score > 0 ? 'pos' : s.score < 0 ? 'neg' : '';
-  const dTxt = diff > 0 ? `+${diff}` : diff < 0 ? `${diff}` : '=';
+  const dTxt = diff > 0 ? `+${diff}` : diff < 0 ? `${diff}` : '±0';
   const suit = s.contract.suit;
   const sym  = suit === 'NT' ? 'NT' : SUIT_SYM_H[suit];
   const col  = (suit === 'H' || suit === 'D') ? 'suit-red' : '';
@@ -1579,10 +1605,10 @@ function drawReplayTable(cid, plays, upTo, dummy, declarer, initialHands) {
     const slot = document.createElement('div');
     slot.style.cssText = `grid-column:${gc};grid-row:${gr};display:flex;flex-direction:column;align-items:center;gap:2px;min-width:0;`;
 
-    // \u5ea7\u4f4d\u6807\u7b7e
+    // 座位标签（仅方位，不标庄/明）
     const lbl = document.createElement('div');
     lbl.style.cssText = 'font-size:.62rem;color:var(--text-muted);white-space:nowrap;margin-bottom:1px';
-    lbl.textContent = BR.SEAT_LABEL[seat] + (seat === dummy ? '\u660e' : seat === declarer ? '\u5e84' : '');
+    lbl.textContent = BR.SEAT_LABEL[seat];
     slot.appendChild(lbl);
 
     // \u672c\u58a9\u51fa\u724c
@@ -1677,15 +1703,17 @@ function showEndModal(data) {
     contentEl.innerHTML = '<div class="end-score-big score-zero" style="color:var(--text-muted)">0 分</div>';
   } else {
     const scoreClass = data.score > 0 ? 'score-pos' : data.score < 0 ? 'score-neg' : 'score-zero';
-    const madeStr    = data.made ? `成约 +${data.diff} 超额` : `宕 ${Math.abs(data.diff)} 墩`;
     titleEl.textContent = data.made ? '✓ 成约' : '✗ 宕约';
     titleEl.style.color = data.made ? 'var(--green)' : 'var(--red-soft)';
 
+    // 紧凑结果行：<局况(相对庄家方)> <庄家座次> <定约> <结果差值>
+    const decSide = BR.sideOf(data.declarer);
+    const isVul   = data.vulnerability === 'BOTH' || data.vulnerability === decSide;
+    const diffTxt = data.diff > 0 ? `+${data.diff}` : data.diff < 0 ? `${data.diff}` : '±0';
     contentEl.innerHTML =
-      `<div class="end-contract-row">${contractText(data.contract, true)} &nbsp; 庄：${BR.SEAT_LABEL[data.declarer]}</div>` +
-      `<div class="end-detail">${madeStr} · 赢 ${data.declarerTricks} 墩 · 需 ${data.needed} 墩 · ${vulLabel(data.vulnerability)}</div>` +
+      `<div class="end-contract-row">${isVul ? 'Vul' : 'NVul'}&nbsp;${data.declarer}&nbsp;${contractText(data.contract, true)}&nbsp;<span class="${scoreClass}">${diffTxt}</span></div>` +
       `<div class="end-score-big ${scoreClass}">${data.score > 0 ? '+' : ''}${data.score}</div>` +
-      `<div class="end-detail" style="margin-top:.2rem">${BR.sideOf(data.declarer)}方得 ${Math.abs(data.score)} 分</div>`;
+      `<div class="end-detail" style="margin-top:.2rem">${decSide}方得 ${Math.abs(data.score)} 分</div>`;
   }
 
   // 历史
@@ -1698,7 +1726,7 @@ function showEndModal(data) {
       } else {
         const cls  = s.score > 0 ? 'pos' : s.score < 0 ? 'neg' : '';
         const diff = s.diff ?? (s.declarerTricks - s.needed);
-        const diffTxt = diff > 0 ? `+${diff}` : diff < 0 ? `${diff}` : '=';
+        const diffTxt = diff > 0 ? `+${diff}` : diff < 0 ? `${diff}` : '±0';
         html += `<tr><td>${s.dealNumber}</td><td>${s.boardNumber}</td><td>${contractText(s.contract)}</td><td>${BR.SEAT_LABEL[s.declarer]}</td><td class="${cls}">${diffTxt}</td><td class="${cls}">${s.score > 0 ? '+' : ''}${s.score}</td></tr>`;
       }
     });
@@ -1713,7 +1741,96 @@ function showEndModal(data) {
   const ddSrc = data.ddTable || G.ddTable;
   if (ddEl) ddEl.innerHTML = ddSrc ? renderDDTable(ddSrc) : '';
 
+  // 本副四手牌复盘（持牌图像格式，与双明手表同屏；按将牌优先的标准花色序排列）
+  renderEndHands(data.hands, data.declarer, data.dummy, data.contract?.suit);
+
+  // 本副叫牌回顾 + 出牌回放（复用对局历史弹窗的组件）
+  renderEndReview(data);
+
   showModal('modal-game-end');
+}
+
+// ── 结算回顾：叫牌回顾 + 出牌回放 ──────────────────────────────
+function renderEndReview(data) {
+  const bidEl = document.getElementById('end-bidding');
+  const repEl = document.getElementById('end-replay');
+  if (!bidEl || !repEl) return;
+
+  const scores = data.boardScores || [];
+  const ls     = scores[scores.length - 1] || {};
+  const bidding = ls.biddingHistory || [];
+  const tricks  = ls.completedTricks || [];
+
+  bidEl.innerHTML = '';
+  if (bidding.length) {
+    bidEl.innerHTML =
+      '<div class="hist-section-title">叫牌回顾</div>' +
+      renderHistoryBidding(bidding, bidding[0]?.seat);
+  }
+
+  repEl.innerHTML = '';
+  if (tricks.length) {
+    const REP_ID = 'end-replay-box';
+    // 上一副的自动播放定时器若仍在运行，先停掉，避免串到新一副
+    const oldSt = replayStates[REP_ID];
+    if (oldSt?.timer) { clearInterval(oldSt.timer); oldSt.timer = null; }
+    const title = document.createElement('div');
+    title.className = 'hist-section-title';
+    title.textContent = `出牌回放（共${tricks.length}墩）`;
+    repEl.appendChild(title);
+    const box = document.createElement('div');
+    box.id = REP_ID;
+    repEl.appendChild(box);
+    renderReplay(REP_ID, tricks, ls.dummy ?? data.dummy, ls.declarer ?? data.declarer,
+      ls.initialHands || data.hands || null);
+  }
+}
+
+// ── 结算四手牌：罗盘布局，每人单行持牌图像展示 ──────────────────
+function renderEndHands(hands, declarer, dummy, trump) {
+  const el = document.getElementById('end-hands');
+  if (!el) return;
+  el.innerHTML = '';
+  if (!hands) return;
+
+  const compass = document.createElement('div');
+  compass.className = 'eh-compass';
+  const CELL_POS = { N: 'north', W: 'west', E: 'east', S: 'south' };
+  // 与牌桌手牌/明手显示一致的标准顺序：将牌花色在最前，其余黑红交替
+  const suits = BR.suitOrder(trump);
+  // 经典模式 rank 为字符串（'2'~'9','T','J','Q','K','A'），须映射为点数才能比较
+  const RANK_PRI = { '2':2,'3':3,'4':4,'5':5,'6':6,'7':7,'8':8,'9':9,'T':10,'J':11,'Q':12,'K':13,'A':14 };
+  const rankVal = r => (typeof r === 'number' ? r : (RANK_PRI[r] || 0));
+
+  for (const s of ['N', 'W', 'E', 'S']) {
+    const cell = document.createElement('div');
+    cell.className = `eh-cell eh-${CELL_POS[s]}`;
+    const label = document.createElement('div');
+    label.className = 'eh-seat-label';
+    let labelText = `${BR.SEAT_LABEL[s]} ${s}`;
+    if (s === declarer) labelText += ' ★庄';
+    else if (s === dummy) labelText += ' ★明';
+    label.textContent = labelText;
+    cell.appendChild(label);
+
+    // 单行展示：按花色分组（将牌优先）、组内从大到小
+    const cards = (hands[s] || []).slice()
+      .sort((a, b) => (suits.indexOf(a.suit) - suits.indexOf(b.suit)) || (rankVal(b.rank) - rankVal(a.rank)));
+    const row = document.createElement('div');
+    row.className = 'eh-hand-row';
+    if (cards.length === 0) {
+      row.innerHTML = '<span class="eh-void">—</span>';
+    } else {
+      cards.forEach(c => {
+        const cardEl = makeCardEl(c);
+        cardEl.classList.add('card-inert', 'eh-card');
+        row.appendChild(cardEl);
+      });
+    }
+    cell.appendChild(row);
+    compass.appendChild(cell);
+  }
+  el.appendChild(compass);
 }
 
 // ── 双明手分析表渲染 ──────────────────────────────────────────────
@@ -1828,7 +1945,22 @@ function fitTeachPanel() {
     const r  = panel.getBoundingClientRect();
     const over = Math.max(r.width / vw, r.height / vh);
     if (over > 1) panel.style.zoom = 1 / over;
+    updateTeachTopOffset();
   });
+}
+
+// 教学面板停靠顶部（data-vis="N"）时，把面板高度写入 CSS 变量，
+// 供叫牌进程栏/选项栏下移避让；面板隐藏或停靠其他边时归零。
+function updateTeachTopOffset() {
+  const panel = document.getElementById('teach-panel');
+  const dockedTop = panel && !panel.classList.contains('hidden') && panel.dataset.vis === 'N';
+  if (dockedTop) {
+    document.body.classList.add('teach-top');
+    document.body.style.setProperty('--teach-top-h', Math.ceil(panel.getBoundingClientRect().height) + 'px');
+  } else {
+    document.body.classList.remove('teach-top');
+    document.body.style.removeProperty('--teach-top-h');
+  }
 }
 
 // 教学面板：在打牌/叫牌阶段显示当前教学座位的手牌或声称操作
@@ -1844,6 +1976,8 @@ function renderTeachPanel() {
 
   if (!isPanelNeeded) {
     panel.classList.add('hidden');
+    updateTeachTopOffset();
+    updateTeachDeclarerHand();
     return;
   }
   panel.classList.remove('hidden');
@@ -1855,6 +1989,7 @@ function renderTeachPanel() {
   if (activeSeat) panel.dataset.vis = SEAT_TO_VISUAL[activeSeat];
 
   fitTeachPanel();
+  updateTeachTopOffset();
 
   const labelEl = document.getElementById('teach-panel-label');
   const handEl  = document.getElementById('teach-hand-area');
@@ -1864,6 +1999,7 @@ function renderTeachPanel() {
   handEl.innerHTML = '';
   bidEl.classList.add('hidden');
   playBtn.classList.add('hidden');
+  updateTeachDeclarerHand();
 
   // 明手代控庄家出牌
   if (G.declarerControlledBy === MY_SEAT && G.phase === 'PLAYING'
@@ -1940,22 +2076,44 @@ function renderTeachHand(hand, seat) {
 }
 
 // 渲染教学面板中的纯展示手牌（叫牌阶段）
-function renderTeachHandDisplay(hand) {
-  const handEl = document.getElementById('teach-hand-area');
-  if (!handEl) return;
-  handEl.innerHTML = '';
+// 庄明均归房主、轮到明手出牌时，在面板中额外展示庄家手牌（只读参考）
+function updateTeachDeclarerHand() {
+  const wrap = document.getElementById('teach-decl-hand');
+  if (!wrap) return;
+  const show = G.teachingMode && G.phase === 'PLAYING'
+    && G.teachingCurrentSeat === G.dummy && G.teachingDeclarerHand;
+  if (!show) { wrap.classList.add('hidden'); return; }
+  wrap.classList.remove('hidden');
+  const labelEl = document.getElementById('teach-decl-label');
+  if (labelEl) {
+    const dn = G.playerNames[G.declarer] || G.declarer;
+    labelEl.textContent = `庄家 ${BR.SEAT_LABEL[G.declarer]}（${dn}）`;
+  }
+  const areaEl = document.getElementById('teach-decl-area');
+  if (areaEl) renderTeachCardsInto(areaEl, G.teachingDeclarerHand);
+}
+
+// 将手牌按花色分组渲染进指定容器（只读展示）
+function renderTeachCardsInto(el, hand) {
+  el.innerHTML = '';
   const groups = BR.groupBySuit(hand);
   for (const suit of BR.suitOrder(G.currentContract?.suit)) {
     if (!groups[suit].length) continue;
     const grp = document.createElement('div');
     grp.className = 'teach-suit-group';
     for (const card of groups[suit]) {
-      const el = makeCardEl(card, false);
-      el.classList.add('teach-card', 'card-inert');
-      grp.appendChild(el);
+      const c = makeCardEl(card, false);
+      c.classList.add('teach-card', 'card-inert');
+      grp.appendChild(c);
     }
-    handEl.appendChild(grp);
+    el.appendChild(grp);
   }
+}
+
+function renderTeachHandDisplay(hand) {
+  const handEl = document.getElementById('teach-hand-area');
+  if (!handEl) return;
+  renderTeachCardsInto(handEl, hand);
 }
 
 function teachSelectCard(card, seat) {

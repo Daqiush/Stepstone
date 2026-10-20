@@ -160,6 +160,7 @@
           <div class="seat-col seat-top">
             <div class="seat-slot" id="seat-N" onclick="chooseSeat('N')">
               <button class="seat-leave" onclick="event.stopPropagation(); leaveSeat()" title="离开座位" aria-label="离开座位">×</button>
+              <button class="seat-kick" onclick="event.stopPropagation(); ownerKickSeat('N')" title="移除该玩家" aria-label="移除该玩家">×</button>
               <div class="seat-icon"><i data-lucide="user"></i></div>
               <div class="seat-pos">北</div>
               <div class="seat-name" id="name-N">空位</div>
@@ -168,6 +169,7 @@
           <div class="seat-row-mid">
             <div class="seat-slot" id="seat-W" onclick="chooseSeat('W')">
               <button class="seat-leave" onclick="event.stopPropagation(); leaveSeat()" title="离开座位" aria-label="离开座位">×</button>
+              <button class="seat-kick" onclick="event.stopPropagation(); ownerKickSeat('W')" title="移除该玩家" aria-label="移除该玩家">×</button>
               <div class="seat-icon"><i data-lucide="user"></i></div>
               <div class="seat-pos">西</div>
               <div class="seat-name" id="name-W">空位</div>
@@ -180,6 +182,7 @@
             </div>
             <div class="seat-slot" id="seat-E" onclick="chooseSeat('E')">
               <button class="seat-leave" onclick="event.stopPropagation(); leaveSeat()" title="离开座位" aria-label="离开座位">×</button>
+              <button class="seat-kick" onclick="event.stopPropagation(); ownerKickSeat('E')" title="移除该玩家" aria-label="移除该玩家">×</button>
               <div class="seat-icon"><i data-lucide="user"></i></div>
               <div class="seat-pos">东</div>
               <div class="seat-name" id="name-E">空位</div>
@@ -188,6 +191,7 @@
           <div class="seat-col seat-bottom">
             <div class="seat-slot" id="seat-S" onclick="chooseSeat('S')">
               <button class="seat-leave" onclick="event.stopPropagation(); leaveSeat()" title="离开座位" aria-label="离开座位">×</button>
+              <button class="seat-kick" onclick="event.stopPropagation(); ownerKickSeat('S')" title="移除该玩家" aria-label="移除该玩家">×</button>
               <div class="seat-icon"><i data-lucide="user"></i></div>
               <div class="seat-pos">南</div>
               <div class="seat-name" id="name-S">空位</div>

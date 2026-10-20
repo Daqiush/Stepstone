@@ -71,6 +71,12 @@ function chooseSeat(seat) {
   socket.emit('chooseSeat', { seat, playerName: myName });
 }
 
+// 房主移除其他玩家的入座状态
+function ownerKickSeat(seat) {
+  if (!myRoomId || !isOwner) return;
+  socket.emit('ownerKickSeat', { seat });
+}
+
 function ownerStartGame() {
   socket.emit('ownerStartGame');
 }
@@ -162,18 +168,27 @@ socket.on('seatLeft', () => {
   updateOwnerUI(null);
 });
 
-socket.on('gameStart', ({ seat }) => {
+// 被房主移出座位
+socket.on('kickedFromSeat', () => {
+  mySeat = null;
+  showToast('你已被房主移出座位');
+  updateOwnerUI(null);
+});
+
+socket.on('gameStart', ({ seat, seatToken }) => {
   sessionStorage.setItem('ss_roomId', myRoomId);
   sessionStorage.setItem('ss_seat',   seat);
   sessionStorage.setItem('ss_name',   myName);
+  if (seatToken) sessionStorage.setItem('ss_seatToken', seatToken);
   window.location.href = 'game.html';
 });
 
 // 新流程：ultCharOptions 触发跳转（含 seat）
-socket.on('ultCharOptions', ({ seat }) => {
+socket.on('ultCharOptions', ({ seat, seatToken }) => {
   sessionStorage.setItem('ss_roomId', myRoomId);
   sessionStorage.setItem('ss_seat',   seat);
   sessionStorage.setItem('ss_name',   myName);
+  if (seatToken) sessionStorage.setItem('ss_seatToken', seatToken);
   window.location.href = 'ult.html';
 });
 
@@ -185,10 +200,11 @@ socket.on('ultGameStart', ({ seat }) => {
   window.location.href = 'ult.html';
 });
 
-socket.on('complexGameStart', ({ side }) => {
+socket.on('complexGameStart', ({ side, seatToken }) => {
   sessionStorage.setItem('ss_complex_roomId', myRoomId);
   sessionStorage.setItem('ss_complex_side', side);
   sessionStorage.setItem('ss_complex_name', myName);
+  if (seatToken) sessionStorage.setItem('ss_complex_seatToken', seatToken);
   window.location.href = 'complex.html';
 });
 
@@ -207,6 +223,7 @@ function updateSeats(playerNames) {
   SEATS.forEach(s => {
     const nameEl = document.getElementById('name-' + s);
     const slotEl = document.getElementById('seat-' + s);
+    const kickEl = slotEl ? slotEl.querySelector('.seat-kick') : null;
     const name   = playerNames[s];
     if (name) {
       seatedCount++;
@@ -216,9 +233,12 @@ function updateSeats(playerNames) {
         if (!nextMySeat) nextMySeat = s;
         slotEl.classList.add('mine');
       }
+      // 房主可移除其他玩家的座位（自己以外）
+      if (kickEl) kickEl.style.display = (isOwner && name !== myName) ? 'block' : 'none';
     } else {
       nameEl.textContent = '空位';
       slotEl.classList.remove('occupied', 'mine');
+      if (kickEl) kickEl.style.display = 'none';
     }
   });
   mySeat = nextMySeat;
@@ -272,9 +292,9 @@ function updateOwnerUI(seatedCount) {
     if (isProblem) {
       hintEl.textContent = '做题模式：点击开始进入选题';
     } else if (isTeaching) {
-      hintEl.textContent = canStart
+      hintEl.textContent = seatedCount > 0
         ? `已就座 ${seatedCount}/4，房主填充剩余座位`
-        : '教学模式：需至少1名玩家入座';
+        : '已就座 0/4，房主将一人控制全部四家';
     } else {
       hintEl.textContent = canStart
         ? '4人已就座，可以开始游戏'

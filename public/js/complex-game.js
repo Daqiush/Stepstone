@@ -27,7 +27,7 @@ document.getElementById('complex-submit-bid').onclick = () => socket.emit('compl
 
 socket.on('connect', () => {
   socket.emit('joinRoom', { roomId: ROOM, playerName: NAME });
-  socket.emit('chooseSeat', { seat: SIDE === 'NS' ? 'N' : 'E', playerName: NAME });
+  socket.emit('chooseSeat', { seat: SIDE === 'NS' ? 'N' : 'E', playerName: NAME, seatToken: sessionStorage.getItem('ss_complex_seatToken') });
 });
 socket.on('complexGameStart', applyState);
 socket.on('complexState', applyState);
@@ -37,6 +37,8 @@ socket.on('appError', ({ msg }) => toast(msg));
 function applyState(data) {
   const wasPlaying = state.phase === 'COMPLEX_PLAYING';
   Object.assign(state, data);
+  // 每局重新签发的座位令牌，刷新本地存储（换线认领凭据）
+  if (data.seatToken) sessionStorage.setItem('ss_complex_seatToken', data.seatToken);
   if (state.phase === 'COMPLEX_BIDDING') sawBidding = true;
   render();
   const contractKey = state.contract && `${state.contract.side}:${state.contract.tricks}:${state.contract.trump.axis}:${state.contract.trump.value}`;

@@ -12,7 +12,7 @@ if (!MY_ROOM || !MY_SEAT) { window.location.href = '/'; }
 // 每次连接/重连后重新加入房间，服务端会推送当前阶段状态
 socket.on('connect', () => {
   socket.emit('joinRoom',   { roomId: MY_ROOM, playerName: MY_NAME });
-  socket.emit('chooseSeat', { seat: MY_SEAT,   playerName: MY_NAME });
+  socket.emit('chooseSeat', { seat: MY_SEAT,   playerName: MY_NAME, seatToken: sessionStorage.getItem('ss_seatToken') });
 });
 
 // ── 全局状态 ──────────────────────────────────────────────────────
@@ -77,7 +77,10 @@ function hidePhaseScreens() {
 }
 
 function seatName(seat) {
-  return G.playerNames[seat] || { N:'北', E:'东', S:'南', W:'西' }[seat];
+  const label = { N:'北', E:'东', S:'南', W:'西' }[seat];
+  const raw   = G.playerNames[seat] || '';
+  // 名牌显示"方位·昵称"（视角旋转时帮助辨认绝对方位）；空位仅显示方位
+  return raw && raw !== label ? `${label}·${raw}` : label;
 }
 
 // ── 视角旋转 ──────────────────────────────────────────────────────
@@ -143,6 +146,8 @@ socket.on('ultCharOptions', data => {
   G.vulnerability = data.vulnerability || 'NONE';
   G.dealer        = data.dealer;
   G.characters    = {};
+  // 每副牌重新签发的座位令牌，刷新本地存储（换线认领凭据）
+  if (data.seatToken) sessionStorage.setItem('ss_seatToken', data.seatToken);
 
   $('ult-char-vul').textContent = `${VUL_LABEL[G.vulnerability]} · 庄位：${data.dealer}`;
 

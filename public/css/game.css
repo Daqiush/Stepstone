@@ -322,6 +322,10 @@
   /* padding-bottom 为南家手牌留出空间，南家 z-index:10 > 3 会显示在上层 */
   padding-bottom: clamp(70px, 13vh, 110px);
 }
+/* 教学面板停靠顶部时，叫牌进程栏与选项栏整体下移避让 */
+body.teach-top #trick-area.bidding-mode {
+  padding-top: calc(var(--teach-top-h, 0px) + 10px);
+}
 
 /* 叫牌历史（叫牌阶段撑至顶部，覆盖北家） */
 #bid-hist-center {
@@ -498,7 +502,7 @@
 
 /* ── 历史弹窗 ─────────────────────────────────── */
 .modal-history {
-  width: min(97vw, 900px); max-height: 90vh;
+  width: min(97vw, 1100px); max-height: 92vh;
   display: flex; flex-direction: column; padding: 0; overflow: hidden;
 }
 .modal-history-header {
@@ -526,8 +530,8 @@
 .hist-board-sections {
   display: flex; gap: 1rem; padding: .75rem 1rem; flex-wrap: wrap;
 }
-.hist-section { flex: 1 1 200px; min-width: 0; }
-.hist-section-replay { flex: 1 1 260px; }
+.hist-section { flex: 1 1 220px; min-width: 0; }
+.hist-section-replay { flex: 1.6 1 340px; }
 .hist-section-title {
   font-size: .72rem; font-weight: 700; color: var(--text-muted);
   letter-spacing: .06em; text-transform: uppercase; margin-bottom: .4rem;
@@ -560,7 +564,7 @@
 .replay-pos { font-size: .72rem; color: var(--text-muted); margin-left: .3rem; }
 .replay-timeline {
   display: flex; flex-wrap: wrap; gap: 2px; align-items: center;
-  max-height: 80px; overflow-y: auto;
+  /* 不限高：52 张牌的时间线完整平铺，免去上下翻页 */
 }
 .replay-trick-sep {
   font-size: .62rem; color: var(--text-faint); min-width: 1.2em; text-align: right;
@@ -697,6 +701,30 @@
   overflow-x: auto;
   scrollbar-width: none;
 }
+/* 庄明均归房主、轮到明手出牌时：面板内附加庄家手牌（只读参考） */
+#teach-decl-hand {
+  border-top: 1px dashed rgba(201,168,76,.35);
+  margin-top: .2rem;
+  padding-top: .25rem;
+}
+#teach-decl-label {
+  font-size: .68rem;
+  font-weight: 700;
+  color: var(--gold);
+  opacity: .8;
+  margin-bottom: .15rem;
+  letter-spacing: .04em;
+}
+#teach-decl-area {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .2rem;
+  justify-content: center;
+  align-items: flex-end;
+  max-height: calc(var(--card-h) * 2.4);
+  overflow-y: auto;
+  scrollbar-width: none;
+}
 #teach-hand-area::-webkit-scrollbar { display: none; }
 #teach-bid-area {
   display: flex;
@@ -788,3 +816,42 @@
 .dd-h { color: var(--red); }
 .dd-s { color: #e2e8f0; }
 .dd-nt { color: var(--gold); }
+
+/* ── 结算四手牌（持牌图像，与双明手表同屏） ───────────────── */
+.end-hands { width: 100%; }
+.eh-compass {
+  --card-w: clamp(18px, 2.4vw, 28px);
+  --card-h: clamp(26px, 3.4vw, 42px);
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-rows: auto auto auto;
+  width: 100%;
+  margin: .5rem 0 .3rem;
+  font-size: .78rem;
+}
+.eh-cell { padding: .25rem .5rem; text-align: left; }
+.eh-north { grid-column: 2; grid-row: 1; border-bottom: 1px solid rgba(255,255,255,.08); }
+.eh-west  { grid-column: 1; grid-row: 2; border-right:  1px solid rgba(255,255,255,.08); }
+.eh-east  { grid-column: 3; grid-row: 2; }
+.eh-south { grid-column: 2; grid-row: 3; border-top:    1px solid rgba(255,255,255,.08); }
+.eh-seat-label {
+  font-weight: 700; font-size: .7rem; color: var(--gold);
+  letter-spacing: .06em; margin-bottom: .12rem;
+}
+/* 每人单行：全部牌从左到右大→小，重叠排列 */
+.eh-hand-row {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  min-height: var(--card-h);
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.eh-card {
+  margin-right: calc(var(--card-w) * -0.52);
+  border-radius: 3px;
+  box-shadow: 0 1px 3px rgba(0,0,0,.4);
+  flex-shrink: 0;
+}
+.eh-card:last-child { margin-right: 0; }
+.eh-void { color: var(--text-faint); font-size: .7rem; }

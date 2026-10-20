@@ -632,6 +632,14 @@
   font-size: .78rem;
   line-height: 1.55;
 }
+.prob-result-auction {
+  width: 100%;
+  max-height: 170px;
+  overflow-y: auto;
+  margin-top: .3rem;
+  text-align: center;
+}
+.prob-result-auction .prob-mini-auction-table { margin: 0 auto; }
 .prob-result-tricks {
   width: 100%;
   max-height: 220px;
@@ -662,6 +670,29 @@
 .rh-suit { color: var(--text); white-space: nowrap; }
 .rh-suit.red { color: var(--prob-red); }
 .result-void { color: var(--text-faint); }
+/* 持牌图像：每人单行，全部牌从左到右大→小，重叠排列不换行 */
+.rh-hand-row {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  min-height: clamp(24px, 3.4vw, 46px);
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.rh-card {
+  width: clamp(16px, 2.2vw, 30px);
+  height: clamp(24px, 3.4vw, 46px);
+  font-size: clamp(.4rem, .68vw, .8rem);
+  border-radius: 3px;
+  cursor: default;
+  margin-right: clamp(-14px, -1.1vw, -7px);
+  flex-shrink: 0;
+}
+.rh-card:last-child { margin-right: 0; }
+.rh-card:hover { transform: none; box-shadow: none; }
+.rh-card .prob-card-suit { font-size: .95em; line-height: 1; margin-bottom: 1px; }
+.rh-card .prob-card-rank  { font-size: 1.05em; line-height: 1; }
+.rh-hand-row .result-void { font-size: .7rem; }
 /* 旧样式兼容 */
 .result-section-title {
   font-size: .72rem;
