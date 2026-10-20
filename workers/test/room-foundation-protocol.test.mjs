@@ -90,7 +90,7 @@ test('protocol version and exact design limits are exported as immutable values'
     pendingActions: 64,
     roomSnapshotBytes: 512 * 1024,
     recentCommandsPerPlayer: 128,
-    recentCommandTtlMs: 15 * 60 * 1000,
+    recentCommandTtlMs: 24 * 60 * 60 * 1000,
     creationRequests: 2_000,
     creationReplayTtlMs: 24 * 60 * 60 * 1000,
     ownerAuthExpiryMs: 10 * 60 * 1000,

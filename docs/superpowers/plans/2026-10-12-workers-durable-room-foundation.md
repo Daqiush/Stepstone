@@ -191,7 +191,7 @@ git commit -m "feat: enforce durable socket authority"
 
 - [ ] **Step 1: Write failing unit/integration tests**
 
-Cover `foundation.increment`, exact expected revision, spectator prohibition, `room.sync`, 128-entry/player and 15-minute cache pruning, one-state-row persistence, duplicate replay without mutation, canonical ID conflict, commit-before-broadcast failure, recovery rebroadcast, revision-gap sync, and full role-filtered snapshots in every reply/event.
+Cover `foundation.increment`, exact expected revision, spectator prohibition, `room.sync`, 128-entry/player and 24-hour cache pruning, one-state-row persistence, duplicate replay without mutation, canonical ID conflict, commit-before-broadcast failure, recovery rebroadcast, revision-gap sync, and full role-filtered snapshots in every reply/event.
 
 - [ ] **Step 2: Verify RED**
 

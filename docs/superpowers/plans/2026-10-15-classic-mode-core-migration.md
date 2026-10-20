@@ -1877,5 +1877,3 @@ Expected: the complete name-status list contains only milestone files; the `publ
 - [ ] **Step 10: Prepare integration handoff**
 
 Run `git diff --check` and `git status --short`; expected clean status after the documentation commit. Use `@superpowers:verification-before-completion`, then `@superpowers:finishing-a-development-branch`. Report the exact passing commands and commits. Do not deploy, create a public route, change `stepstone.hogetsu.uk`, or alter DNS in this milestone.
-
-

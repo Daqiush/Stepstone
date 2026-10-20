@@ -127,6 +127,23 @@ test('prunes expired entries from every session on writes and treats expiry as a
   assert.deepEqual(stored[SESSION_B].map((item) => item.commandId), [commandId(2)]);
 });
 
+test('retains command idempotency through the exact 24-hour TTL boundary', () => {
+  assert.equal(LIMITS.recentCommandTtlMs, 24 * 60 * 60 * 1000);
+  const cached = storeCommandResult({}, entry(), NOW);
+  const lookup = {
+    sessionId: SESSION_A,
+    commandId: commandId(1),
+    requestHash: HASH_A,
+  };
+
+  assert.equal(inspectCommandCache(cached, {
+    ...lookup, now: NOW + LIMITS.recentCommandTtlMs - 1,
+  }).kind, 'duplicate');
+  assert.deepEqual(inspectCommandCache(cached, {
+    ...lookup, now: NOW + LIMITS.recentCommandTtlMs,
+  }), { kind: 'miss' });
+});
+
 test('detects deterministic canonical reuse conflicts within one session only', async () => {
   const first = {
     v: 1,

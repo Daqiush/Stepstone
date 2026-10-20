@@ -376,6 +376,49 @@ test('validateClassicState enforces exact contract, auction, Q&A, and DDS table 
   }
 });
 
+test('validateClassicState independently closes Q&A ownership in live and archived auctions', () => {
+  const live = createClassicDealState(createClassicLobbyState(), {
+    hands: orderedDeal(), boardInfo: boardInfoFor(1),
+  });
+  live.biddingHistory.push({
+    seat: 'N', bid: '1H', alert: null, explain: null,
+    qa: [{ asker: 'E', question: 'Natural?', answer: null, answerer: null }],
+  });
+  live.currentBidder = 'E';
+  live.currentContract = {
+    level: 1, suit: 'H', seat: 'N', doubled: false, redoubled: false, doublerSeat: null,
+  };
+  assert.deepEqual(validateClassicState(live), { ok: true });
+
+  for (const corrupt of [
+    value => { value.biddingHistory[0].qa[0].asker = 'S'; },
+    value => {
+      value.biddingHistory[0].qa[0].answer = 'Yes';
+      value.biddingHistory[0].qa[0].answerer = 'E';
+    },
+  ]) {
+    const value = clone(live);
+    corrupt(value);
+    assertInvariant(() => validateClassicState(value));
+  }
+
+  const archived = makePassedOutScoringState();
+  archived.biddingHistory[0].qa = [
+    { asker: 'E', question: 'Natural?', answer: 'Yes', answerer: 'N' },
+  ];
+  archived.boardScores[0].biddingHistory = clone(archived.biddingHistory);
+  assert.deepEqual(validateClassicState(archived), { ok: true });
+
+  for (const corrupt of [
+    value => { value.boardScores[0].biddingHistory[0].qa[0].asker = 'S'; },
+    value => { value.boardScores[0].biddingHistory[0].qa[0].answerer = 'W'; },
+  ]) {
+    const value = clone(archived);
+    corrupt(value);
+    assertInvariant(() => validateClassicState(value));
+  }
+});
+
 test('validateClassicState accepts canonical PLAYING and all three SCORING variants', () => {
   const states = [
     makePlayingState(0),

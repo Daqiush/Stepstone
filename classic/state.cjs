@@ -123,13 +123,16 @@ function validateContract(contract) {
   }
 }
 
-function validateQa(qa) {
+function validateQa(qa, bidSeat) {
   invariant(hasExactOwnKeys(qa, QA_KEYS), 'auction Q&A has an invalid shape');
   invariant(SEATS.includes(qa.asker), 'auction Q&A asker is invalid');
+  invariant(sideOf(qa.asker) !== sideOf(bidSeat), 'auction Q&A asker ownership is invalid');
   invariant(isBoundedText(qa.question), 'auction Q&A question is invalid');
   invariant(qa.answer === null || isBoundedText(qa.answer), 'auction Q&A answer is invalid');
   invariant(qa.answerer === null || SEATS.includes(qa.answerer), 'auction Q&A answerer is invalid');
   invariant((qa.answer === null) === (qa.answerer === null), 'auction Q&A answer fields are inconsistent');
+  invariant(qa.answerer === null || qa.answerer === bidSeat,
+    'auction Q&A answerer ownership is invalid');
 }
 
 function validateAuction(history) {
@@ -141,7 +144,7 @@ function validateAuction(history) {
     invariant(entry.explain === null || isBoundedText(entry.explain), 'auction explanation is invalid');
     invariant(entry.alert === true || entry.explain === null, 'unalerted call cannot have an explanation');
     invariant(Array.isArray(entry.qa), 'auction Q&A must be an array');
-    entry.qa.forEach(validateQa);
+    entry.qa.forEach(qa => validateQa(qa, entry.seat));
   }
 }
 

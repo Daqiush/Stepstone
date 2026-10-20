@@ -98,7 +98,7 @@ The following limits are part of protocol version 1, not implementation defaults
 | pending actions | 64 |
 | serialized room snapshot | 512 KiB |
 | recent command entries | 128 per player session |
-| recent command TTL | 15 minutes |
+| recent command TTL | 24 hours |
 
 Sessions live until room expiry. Plan B does not reclaim seats, replace owners, or delete individual sessions. The owner is always seat `N`; additional players receive `E`, `S`, then `W`; all later sessions are spectators until capacity is reached.
 

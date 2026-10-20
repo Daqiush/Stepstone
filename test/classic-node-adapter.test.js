@@ -577,6 +577,8 @@ test('adapter start preflights authorization and occupancy before one deal and l
       return Array.from({ length: 5 }, () => [6, 7, 8, 9]);
     },
   });
+  h.room.claimReq = { stale: 'claim' };
+  h.room.viewReq = { requester: 'N', opponents: ['E', 'W'], votes: { E: true } };
 
   const result = h.adapter.start(h.room, {
     socketId: h.fixture.socketIds.N, seat: 'N',
@@ -587,6 +589,8 @@ test('adapter start preflights authorization and occupancy before one deal and l
   assert.equal(h.room.phase, 'BIDDING');
   assert.equal(h.room.dealNumber, 1);
   assert.equal(h.room.classicRevision, 1);
+  assert.equal(h.room.claimReq, null);
+  assert.equal(h.room.viewReq, null);
   assert.deepEqual(h.fixture.emissions.map(({ name }) => name), [
     'gameStart', 'gameStart', 'gameStart', 'gameStart',
     'biddingUpdate', 'biddingUpdate', 'biddingUpdate', 'biddingUpdate',
@@ -1161,11 +1165,13 @@ function readyAs(h, seat) {
 
 test('adapter readyNext toggles and untoggles one seat without consuming a deal', () => {
   const h = scoringHarness();
+  const pendingView = h.room.viewReq;
   assert.deepEqual(readyAs(h, 'N'), {
     ok: true, phase: 'SCORING', revision: 1,
   });
   assert.deepEqual(h.dealCalls, []);
   assert.deepEqual(h.room.readyStatus, { N: true, E: false, S: false, W: false });
+  assert.equal(h.room.viewReq, pendingView);
   assertPerSeatNames(h, ['nextDealUpdate']);
   for (const emission of h.fixture.named('nextDealUpdate')) {
     assert.deepEqual(Object.keys(emission.payload), ['readyStatus', 'playerNames']);
@@ -1187,6 +1193,7 @@ test('adapter readyNext toggles and untoggles one seat without consuming a deal'
   });
   assert.deepEqual(h.dealCalls, []);
   assert.deepEqual(h.room.readyStatus, { N: false, E: false, S: false, W: false });
+  assert.equal(h.room.viewReq, pendingView);
   assertPerSeatNames(h, ['nextDealUpdate']);
 });
 
@@ -1194,6 +1201,8 @@ test('adapter fourth ready consumes exactly deal N+1 and emits readiness before 
   const h = scoringHarness();
   h.room.readyStatus = { N: true, E: true, S: true, W: false };
   h.room.classicRevision = 7;
+  h.room.claimReq = { stale: 'claim' };
+  h.room.viewReq = { requester: 'N', opponents: ['E', 'W'], votes: { E: true } };
 
   assert.deepEqual(readyAs(h, 'W'), {
     ok: true, phase: 'BIDDING', revision: 8,
@@ -1201,6 +1210,11 @@ test('adapter fourth ready consumes exactly deal N+1 and emits readiness before 
   assert.deepEqual(h.dealCalls, [{ dealNumber: 2 }]);
   assert.equal(h.room.dealNumber, 2);
   assert.deepEqual(h.room.readyStatus, { N: false, E: false, S: false, W: false });
+  assert.equal(h.room.claimReq, null);
+  assert.equal(h.room.viewReq, null);
+  assert.equal(reconnectFrames(h.room, 'N').some(frame => (
+    frame.name === 'viewLastTrickRequest' || frame.name === 'viewLastTrickVoteUpdate'
+  )), false);
   assertPerSeatNames(h, ['nextDealUpdate', 'gameStart', 'biddingUpdate']);
   for (const emission of h.fixture.named('nextDealUpdate')) {
     assert.deepEqual(emission.payload.readyStatus, { N: true, E: true, S: true, W: true });

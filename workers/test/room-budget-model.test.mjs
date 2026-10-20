@@ -31,10 +31,11 @@ test('models one complete classic deal with bounded overlapping DDS recovery var
     dealStarts: 1,
     maximumLegalAuctionCalls: 319,
     cardPlays: 52,
+    readyCommands: 4,
     reconnectSnapshots: 4,
-    commandsUsed: 372,
+    commandsUsed: 376,
     commandsReserved: 1_000,
-    commandsRemaining: 628,
+    commandsRemaining: 624,
   });
   assert.deepEqual(report.dds, {
     logicalAttemptsPerDeal: 3,
@@ -300,7 +301,8 @@ test('room budget simulator runs independently and can merge an optional DDS rep
     encoding: 'utf8',
   });
   assert.equal(standalone.status, 0, standalone.stderr);
-  assert.match(standalone.stdout, /one complete classic deal.*372 of 1,000 commands/iu);
+  assert.match(standalone.stdout, /one complete classic deal.*376 of 1,000 commands/iu);
+  assert.match(standalone.stdout, /4 ready commands/iu);
   assert.match(standalone.stdout, /success after eviction.*READY/iu);
   assert.match(standalone.stdout, /attempt-3 exhaustion.*FAILED/iu);
   assert.match(standalone.stdout, /DDS.*3 logical attempts.*4 computations.*3 alarm requests/iu);

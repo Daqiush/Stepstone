@@ -106,6 +106,7 @@ console.log(
   + `${format.format(budget.commandReservation.commandsReserved)} commands `
   + `(${budget.commandReservation.maximumLegalAuctionCalls} auction calls, `
   + `${budget.commandReservation.cardPlays} plays, `
+  + `${budget.commandReservation.readyCommands} ready commands, `
   + `${budget.commandReservation.reconnectSnapshots} reconnect snapshots).`,
 );
 console.log(

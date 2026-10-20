@@ -634,6 +634,10 @@ function createClassicNodeAdapter({ io, dealFactory, calcDDTable, logger } = {})
       }
       applyClassicState(room, result.state);
       room.classicRevision += 1;
+      if (preflight.needsDeal) {
+        room.claimReq = null;
+        room.viewReq = null;
+      }
       emitClassicEvents(io, room, result.events, logger);
       launchEffects(room, result.effects);
       return compactSuccess(room, result);
@@ -779,6 +783,10 @@ function createClassicNodeAdapter({ io, dealFactory, calcDDTable, logger } = {})
       }
       applyClassicState(room, result.state);
       room.classicRevision += 1;
+      if (preflight.needsDeal) {
+        room.claimReq = null;
+        room.viewReq = null;
+      }
       emitClassicEvents(io, room, result.events, logger);
       launchEffects(room, result.effects);
       return compactSuccess(room, result);

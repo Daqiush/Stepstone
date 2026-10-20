@@ -1,8 +1,8 @@
 # Classic Mode Core Migration Design
 
-**Status:** Approved direction, implementation not started  
-**Date:** 2026-10-15  
-**Baseline:** `workers-room-foundation-v1` / `502d43d`  
+**Status:** Approved direction, implementation not started
+**Date:** 2026-10-15
+**Baseline:** `workers-room-foundation-v1` / `502d43d`
 **Branch:** `codex/migrate-classic-mode`
 
 ## 1. Goal

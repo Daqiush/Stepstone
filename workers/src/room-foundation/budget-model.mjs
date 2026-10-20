@@ -188,10 +188,11 @@ const CLASSIC_COMMAND_RESERVATION = Object.freeze({
   dealStarts: 1,
   maximumLegalAuctionCalls: 319,
   cardPlays: 52,
+  readyCommands: 4,
   reconnectSnapshots: 4,
-  commandsUsed: 372,
+  commandsUsed: 376,
   commandsReserved: 1_000,
-  commandsRemaining: 628,
+  commandsRemaining: 624,
 });
 
 const CLASSIC_DDS_COMMON_OPERATIONS = Object.freeze({
