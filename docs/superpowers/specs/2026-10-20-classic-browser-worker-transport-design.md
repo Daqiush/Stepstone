@@ -25,6 +25,8 @@ This milestone is an opt-in preview. The existing Node/Socket.IO path remains th
 - Scoring, DDS table delivery, ready-next voting, and the next deal.
 - Session-scoped credentials, reconnect-token rotation, idempotent command retry, revision recovery, refresh recovery, and connection status UI.
 - Same-origin static assets and APIs on one temporary `workers.dev` deployment.
+- A high-entropy preview admission gate, global preview rate limits, and abandoned-seat cleanup.
+- An untrusted-text rendering audit that closes stored-XSS paths before any public preview.
 - A public-room feature flag that does not enable internal test hooks.
 - GitHub Actions deployment, verification, evidence, manual cleanup, and a bounded cleanup backstop.
 
@@ -79,6 +81,16 @@ The configuration module must:
 
 No credential, reconnect token, test key, or Cloudflare token is accepted in the URL.
 
+### 4.1 Preview admission
+
+The temporary site is not an anonymous public game service. Before loading the application, it presents a minimal same-origin admission page. The tester enters a separate 32-byte base64url preview key that is already known to the tester and stored as a masked GitHub Actions secret. The deployment workflow passes that key to the temporary Worker as a secret binding; it is not derived from or equal to the Cloudflare API token.
+
+The admission request sends the key once in an HTTPS POST body. The Worker compares it in constant time and returns a short-lived, `Secure`, `HttpOnly`, `SameSite=Strict` signed preview cookie whose expiry cannot exceed the deployment expiry. JavaScript never stores the preview key or cookie. The cookie is then sent automatically on same-origin asset, API, and WebSocket requests.
+
+All application assets except the minimal admission shell, all room APIs, and every WebSocket upgrade require a valid preview cookie. Missing and invalid admission produce the same opaque response. The key and cookie are never accepted in a URL, printed in a workflow summary, logged, or persisted in an artifact.
+
+The existing singleton lobby registry also enforces conservative deployment-wide fixed-window limits for admission attempts, room creation, and room joining. Limits are sized well above the four-client functional test but low enough to bound accidental loops or a leaked credential. Rate-limit failures use an opaque capacity response and do not reveal whether a room exists.
+
 ## 5. Browser Architecture
 
 ### 5.1 Modules
@@ -128,6 +140,12 @@ The current `G` rendering model and rendering functions remain. A focused snapsh
 
 Nonclassic scripts and pages are not refactored in this milestone.
 
+### 5.5 Untrusted text rendering hard gate
+
+Every server-originated or peer-originated string is untrusted, including display names, alert explanations, questions, answers, and future chat-like fields. Before a public preview is permitted, the shared lobby and classic game UI must be audited so those values reach the DOM only through `textContent`, text nodes, or a tested escaping helper. Untrusted text must never be interpolated into `innerHTML`, event-handler attributes, style attributes, or URLs.
+
+This hardening applies to both Node and Worker transports because they share the same pages. Tests use malicious-but-valid values such as an SVG event-handler payload and verify that it is displayed as literal text, cannot create an element, cannot execute code, and cannot read `sessionStorage`.
+
 ## 6. Worker Lobby Semantics
 
 The current Worker foundation binds identity and seat during bootstrap:
@@ -140,6 +158,8 @@ The current Worker foundation binds identity and seat during bootstrap:
 The Worker lobby therefore displays the assigned seat instead of the Node seat picker. In Worker mode it hides leave-seat, change-seat, and owner-kick controls. The owner can start only after all four player seats are occupied.
 
 Creating or joining a session must cause connected clients to receive a refreshed membership snapshot. Membership may change without a classic game revision change, so clients accept a same-revision snapshot when its room identity is unchanged. A lower revision or different incarnation is never applied.
+
+A newly allocated non-owner seat receives a short first-authentication deadline just as the owner already does. If that session does not complete WebSocket hello before the deadline, the seat and bootstrap authority are released and connected clients receive a membership refresh. `classic.start` counts four live authenticated player authorities rather than four merely allocated rows, so an abandoned HTTP join cannot make a room appear ready. Once a player has authenticated successfully, the existing reconnect grace and room lifecycle rules apply.
 
 ## 7. Authoritative State and Presentation
 
@@ -158,6 +178,8 @@ Classic event frames are transient effects only:
 - `classic.dd-table-ready`
 
 The transport orders and deduplicates effects by revision. A command sender may receive a reply snapshot before the broadcast event and final snapshot for the same revision; this must update state once and show an effect at most once. Reconnect applies the latest snapshot without replaying old animations.
+
+A duplicate-command reply contains two intentionally different revision values: `payload.revision` is the revision at which that command originally committed, while `payload.snapshot.revision` is the current authoritative room state. The client matches the reply to the in-flight command by reply ID, uses `payload.revision` only as command-completion metadata, orders state exclusively by `payload.snapshot.revision`, and never creates a transient animation from a reply. This prevents a delayed retry from rolling the UI back or hiding a newer snapshot.
 
 The normalized Worker game state must cover the existing classic core UI:
 
@@ -214,10 +236,13 @@ Unexpected disconnects retry after approximately 0.5, 1, 2, 4, and 8 seconds, th
 
 Terminal handling is explicit:
 
-- `AUTH_INVALID`: clear this room credential and return to the lobby.
-- `ROOM_EXPIRED`: clear this room credential and report expiration.
-- `SESSION_REPLACED`: stop reconnecting and report that another page took over the session.
-- Protocol mismatch or malformed frames: stop automatic actions and report incompatibility.
+- close 4401 `AUTH_INVALID`: clear this room credential and return to the lobby.
+- close 4408 `AUTH_TIMEOUT`: preserve the current and pending rotation record, then retry the exact hello through the normal backoff; stop after the bounded consecutive-auth-timeout threshold and offer an explicit retry.
+- close 4409 `SESSION_REPLACED`: stop reconnecting, clear the stale local room credential, and report that another page took over the session.
+- close 4410 `ROOM_EXPIRED`: clear this room credential and report expiration.
+- close 1002 or a protocol mismatch/malformed frame: preserve diagnostic metadata but stop automatic actions and report incompatibility.
+- close 1000 after an intentional local disconnect: do not reconnect.
+- close 1006 or another abnormal network loss: preserve the pending token rotation and pending command and retry normally.
 
 Manual four-player validation uses independent browser contexts. Duplicating a tab may duplicate `sessionStorage`; the server's single-authority rule makes the latest authenticated copy replace the earlier one.
 
@@ -244,13 +269,15 @@ GET  /api/rooms/{code}/{positive-incarnation}/ws
 
 `/api/rooms/__test/registry` remains guarded only by `ROOM_FOUNDATION_TEST`. Public mode must return the same opaque 404 for every internal test path. Remote DDS harness routes must also remain disabled in the browser preview.
 
-The preview additionally requires same-origin browser requests for room POSTs and WebSocket upgrades. This is defense in depth, not a replacement for room credentials.
+The preview additionally requires a valid admission cookie and same-origin browser requests for room POSTs and WebSocket upgrades. Origin validation is defense in depth and is never treated as authentication because a nonbrowser client can forge it.
 
 ## 10. Static Asset Boundary
 
 The temporary Worker uses a Cloudflare static-assets binding backed by the existing `public` source tree, while the Worker fetch handler runs first for APIs and enforces a preview allowlist.
 
 The allowlist contains only the standard classic pages and their required CSS, JavaScript, image, icon, and font dependencies. Direct requests for `ult.html`, `problem.html`, `complex.html`, or their mode-specific scripts return 404. The lobby also hides every unsupported mode entry in Worker mode.
+
+The current pages load Google Fonts and an unpinned Lucide script from third-party CDNs. The preview must not execute third-party JavaScript in an origin that holds room credentials. Lucide is replaced with a pinned, locally served bundle whose license is retained. Fonts are either self-hosted from pinned licensed files or replaced with a system-font stack; the preview must not depend on Google Fonts. The same shared HTML remains valid on the Node path.
 
 Preview HTML and unversioned scripts use conservative cache headers so a newly deployed build does not mix old markup with new transport code. API and WebSocket paths are never handled as assets.
 
@@ -278,7 +305,7 @@ The generated name is in a distinct family such as:
 ss-classic-preview-{run_id}-{run_attempt}
 ```
 
-The generated Wrangler configuration removes custom routes and zone data, sets `workers_dev: true`, binds the approved static assets, and sets only `ROOM_FOUNDATION_PUBLIC=true`. It must not set `ROOM_FOUNDATION_TEST` or `DDS_REMOTE_TEST`.
+The generated Wrangler configuration removes custom routes and zone data, sets `workers_dev: true`, binds the approved static assets, and sets `ROOM_FOUNDATION_PUBLIC=true` plus an immutable `PREVIEW_EXPIRES_AT` timestamp no more than 24 hours after deployment. The high-entropy preview key is installed only as a secret binding. The configuration must not set `ROOM_FOUNDATION_TEST` or `DDS_REMOTE_TEST`.
 
 The workflow uses the existing GitHub Cloudflare account/token secrets without printing or persisting them.
 
@@ -292,6 +319,7 @@ The trusted deployment record binds:
 - local and remote configuration digests;
 - static asset inventory digest;
 - script ETag and `workers.dev` origin.
+- the exact preview expiry timestamp.
 
 The workflow summary may expose only the public preview URL and nonsecret build identity.
 
@@ -300,8 +328,10 @@ The workflow summary may expose only the public preview URL and nonsecret build 
 The remote gate verifies:
 
 - the classic lobby and game documents and required assets are readable;
+- access without the preview cookie is opaque and access with a valid admission succeeds;
 - unsupported pages and internal test routes return 404;
 - remote DDS harness routes remain inaccessible;
+- no executable script or font is requested from a third-party origin;
 - no custom route or domain exists;
 - the served build/version matches the deployment record;
 - a room can be created, four players can authenticate, one deterministic classic board can complete, all players can ready, and the next board can begin.
@@ -310,7 +340,9 @@ This is a functional gate, not another long DDS soak.
 
 ## 12. Cleanup
 
-Deployment failure triggers immediate cleanup. A successful preview remains available for manual browser acceptance and can be removed by a dedicated manual cleanup workflow. A maximum 24-hour backstop also requests cleanup.
+Deployment failure triggers immediate cleanup. A successful preview remains available for manual browser acceptance and can be removed by a dedicated manual cleanup workflow. A scheduled backstop also requests cleanup.
+
+The 24-hour safety boundary does not rely on GitHub scheduling or continued Cloudflare API credentials. Every request checks the manifest-bound `PREVIEW_EXPIRES_AT`. At or after expiry, the Worker returns the same opaque 404 for the admission page, assets, APIs, and new WebSocket upgrades. Existing WebSockets are denied and closed before processing the next frame, so they cannot mutate or observe live state after expiry. GitHub cleanup remains responsible for deleting the inert Worker object and confirming absence.
 
 Deletion is authorized only when all of these match the trusted deployment record:
 
@@ -333,21 +365,27 @@ Internal exception text, Cloudflare response bodies, stack traces, tokens, and p
 
 - Configuration parsing, validation, persistence, and URL cleanup.
 - Node default and explicit Worker fail-closed behavior.
+- Preview admission, signed-cookie expiry, rate limits, and secret non-disclosure.
 - Random token encoding and bootstrap replay.
 - Hello write-ahead rotation and lost-reply recovery.
 - In-flight command replay and revision-conflict handling.
+- Duplicate replies whose command revision is older than their authoritative snapshot revision.
+- Close-code handling for 1000, 1002, 1006, 4401, 4408, 4409, and 4410.
 - Snapshot ordering, same-revision membership refresh, and effect deduplication.
 - Error-code mapping and terminal reconnect behavior.
 - Worker-only UI feature hiding.
+- Malicious display names and explanations rendered only as literal text.
 
 ### 14.2 Worker integration tests
 
 - The public/test flag matrix and opaque test-path denial.
 - Static asset allowlist and API-first routing.
 - Deterministic seat allocation and capacity.
-- Live lobby membership refresh.
+- Live lobby membership refresh, first-auth timeout cleanup, and live-seat start enforcement.
+- Deployment-wide admission/create/join rate limits.
 - Four-player standard-classic lifecycle and next deal.
 - Refresh/reconnect, token rotation, idempotent retry, and revision conflict.
+- Manifest-bound expiry for assets, HTTP APIs, WebSocket upgrades, and existing socket commands.
 
 ### 14.3 Regression gates
 
@@ -361,7 +399,7 @@ The already completed 22,000/36,000-operation remote DDS soak is not repeated un
 
 ### 14.4 Manual browser acceptance
 
-Four independent browser contexts verify that the site loads exclusively from the temporary Worker, all players see the lobby, the owner starts, private hands are correct, bidding including X/XX works, declarer controls dummy, a board scores with DDS, ready-next starts another board, and a mid-board refresh restores the correct private view while the local Node service is stopped.
+Four independent browser contexts authenticate through the preview admission page and verify that executable code, fonts, and application data load exclusively from the temporary Worker; all players see the lobby, the owner starts, private hands are correct, bidding including X/XX works, declarer controls dummy, a board scores with DDS, ready-next starts another board, and a mid-board refresh restores the correct private view while the local Node service is stopped.
 
 ## 15. Definition of Done
 
@@ -371,6 +409,8 @@ This milestone is complete only when:
 - Worker transport and integration tests pass.
 - The temporary remote functional gate passes.
 - Manual browser acceptance passes without a local Node process.
+- Stored-XSS regression tests pass and no third-party executable script is loaded.
+- The preview becomes inert at its manifest-bound expiry even if GitHub cleanup is unavailable.
 - The exact temporary Worker is closed, deleted, and confirmed absent.
 - `stepstone.hogetsu.uk`, DNS, custom routes, unrelated Workers, and nonclassic modes were not changed.
 - No token or test secret was logged or committed.
