@@ -1,5 +1,7 @@
 'use strict';
 
+const { randomBytes } = require('node:crypto');
+
 const {
   CLASSIC_STATE_KEYS,
   ClassicInvariantError,
@@ -94,6 +96,7 @@ function emitStarted(io, room, event, logger) {
       hand: cloneValue(view.hands[seat]),
       boardInfo: cloneValue(projected.payload.boardInfo),
       seat,
+      seatToken: room.seatTokens?.[seat] || null,
       playerNames: cloneValue(room.playerNames),
       boardScores: legacyReplayBoardScores(room, state, viewer),
     };
@@ -263,6 +266,7 @@ function sendClassicReconnectState(room, seat, socket) {
     hand: cloneValue(view.hands[seat]),
     boardInfo: cloneValue(view.boardInfo),
     seat,
+    seatToken: room.seatTokens?.[seat] || null,
     playerNames: cloneValue(room.playerNames),
     boardScores: cloneValue(view.boardScores),
   });
@@ -333,6 +337,7 @@ function sendClassicReconnectState(room, seat, socket) {
 
   if (view.phase !== 'SCORING') return;
   const latestScore = view.boardScores.at(-1);
+  const replayHands = state.boardScores.at(-1)?.initialHands || null;
   if (!latestScore) return;
   const payload = latestScore.passedOut
     ? {
@@ -340,6 +345,7 @@ function sendClassicReconnectState(room, seat, socket) {
         score: 0,
         boardScores: cloneValue(view.boardScores),
         ddTable: cloneValue(latestScore.ddTable),
+        hands: cloneValue(replayHands),
       }
     : {
         passedOut: false,
@@ -354,6 +360,7 @@ function sendClassicReconnectState(room, seat, socket) {
         vulnerability: latestScore.vulnerability,
         boardScores: cloneValue(view.boardScores),
         ddTable: cloneValue(latestScore.ddTable),
+        hands: cloneValue(replayHands),
       };
   socket.emit('gameEnd', payload);
 }
@@ -498,7 +505,13 @@ function mapClassicNodeFailure({
   return serverFailure({ io, logger, room, socketId, method, failure });
 }
 
-function createClassicNodeAdapter({ io, dealFactory, calcDDTable, logger } = {}) {
+function createClassicNodeAdapter({
+  io,
+  dealFactory,
+  calcDDTable,
+  seatTokenFactory = () => randomBytes(16).toString('base64url'),
+  logger,
+} = {}) {
   if (!io || typeof io.to !== 'function') throw new TypeError('invalid classic Node adapter io');
   let probeOperator;
   try {
@@ -514,6 +527,9 @@ function createClassicNodeAdapter({ io, dealFactory, calcDDTable, logger } = {})
   }
   if (typeof calcDDTable !== 'function') {
     throw new TypeError('invalid classic Node adapter calcDDTable');
+  }
+  if (typeof seatTokenFactory !== 'function') {
+    throw new TypeError('invalid classic Node adapter seatTokenFactory');
   }
   if (!logger || typeof logger.error !== 'function') {
     throw new TypeError('invalid classic Node adapter logger');
@@ -543,6 +559,17 @@ function createClassicNodeAdapter({ io, dealFactory, calcDDTable, logger } = {})
 
   function occupiedSeats(room) {
     return SEATS.filter(seat => Boolean(room?.sockets?.[seat]));
+  }
+
+  function nextSeatTokens(room, dealNumber) {
+    return Object.fromEntries(SEATS.map(seat => {
+      if (!room?.sockets?.[seat]) return [seat, null];
+      const token = seatTokenFactory({ seat, dealNumber, roomId: room.id });
+      if (typeof token !== 'string' || token.length === 0) {
+        throw new ClassicInvariantError('seatTokenFactory returned an invalid token');
+      }
+      return [seat, token];
+    }));
   }
 
   function compactSuccess(room, result) {
@@ -632,9 +659,13 @@ function createClassicNodeAdapter({ io, dealFactory, calcDDTable, logger } = {})
           io, logger, room, socketId, method: 'start', seat, bid: null, failure: result,
         });
       }
+      const issuedSeatTokens = preflight.needsDeal
+        ? nextSeatTokens(room, preflight.nextDealNumber)
+        : null;
       applyClassicState(room, result.state);
       room.classicRevision += 1;
       if (preflight.needsDeal) {
+        room.seatTokens = issuedSeatTokens;
         room.claimReq = null;
         room.viewReq = null;
       }
@@ -781,9 +812,13 @@ function createClassicNodeAdapter({ io, dealFactory, calcDDTable, logger } = {})
           failure: result,
         });
       }
+      const issuedSeatTokens = preflight.needsDeal
+        ? nextSeatTokens(room, preflight.nextDealNumber)
+        : null;
       applyClassicState(room, result.state);
       room.classicRevision += 1;
       if (preflight.needsDeal) {
+        room.seatTokens = issuedSeatTokens;
         room.claimReq = null;
         room.viewReq = null;
       }

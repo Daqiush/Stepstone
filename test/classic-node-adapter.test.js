@@ -40,6 +40,7 @@ function adapterRoom(overrides = {}) {
     id: '123',
     sockets: { N: { id: 'n' }, E: null, S: null, W: null },
     playerNames: { N: 'North', E: null, S: null, W: null },
+    seatTokens: { N: 'token-N', E: null, S: null, W: null },
     ownerSocketId: 'owner',
     claimReq: { votes: {} },
     viewReq: { votes: {} },
@@ -60,7 +61,7 @@ test('projectClassicState returns only exact canonical keys without mutating a f
   assert.deepEqual(projected, createClassicLobbyState());
   assert.equal(JSON.stringify(room), before);
   for (const key of [
-    'id', 'sockets', 'playerNames', 'ownerSocketId', 'claimReq', 'viewReq', 'lastClaim',
+    'id', 'sockets', 'playerNames', 'seatTokens', 'ownerSocketId', 'claimReq', 'viewReq', 'lastClaim',
     'classicRevision', 'sentinel',
   ]) {
     assert.equal(Object.hasOwn(projected, key), false);
@@ -86,7 +87,7 @@ test('projectClassicState deeply detaches all canonical arrays and objects', () 
 test('applyClassicState updates every canonical key while preserving every adapter reference', () => {
   const room = adapterRoom();
   const adapterReferences = Object.fromEntries([
-    'sockets', 'playerNames', 'claimReq', 'viewReq', 'lastClaim', 'sentinel',
+    'sockets', 'playerNames', 'seatTokens', 'claimReq', 'viewReq', 'lastClaim', 'sentinel',
   ].map(key => [key, room[key]]));
   const proposed = deepFreeze(createClassicDealState(createClassicLobbyState(), {
     hands: orderedDeal(),
@@ -504,10 +505,13 @@ test('classic event mapping sends private gameStart frames before independently 
   ]);
   for (const seat of ['N', 'E', 'S', 'W']) {
     const start = fixture.forTarget(fixture.socketIds[seat])[0].payload;
-    assert.deepEqual(Object.keys(start), ['hand', 'boardInfo', 'seat', 'playerNames', 'boardScores']);
+    assert.deepEqual(Object.keys(start), [
+      'hand', 'boardInfo', 'seat', 'seatToken', 'playerNames', 'boardScores',
+    ]);
     assert.deepEqual(start.hand, room.hands[seat]);
     assert.notEqual(start.hand, room.hands[seat]);
     assert.equal(start.seat, seat);
+    assert.equal(start.seatToken, room.seatTokens[seat]);
     assert.deepEqual(start.boardInfo, boardInfoFor(1));
     assert.deepEqual(start.playerNames, room.playerNames);
     assert.deepEqual(start.boardScores, []);
@@ -541,11 +545,12 @@ test('classic event mapping sends private gameStart frames before independently 
   assert.equal(room.biddingHistory[0].explain, 'five hearts');
 });
 
-function adapterHarness({ dealFactory, calcDDTable } = {}) {
+function adapterHarness({ dealFactory, calcDDTable, seatTokenFactory } = {}) {
   const base = canonicalAdapterRoom();
   const dealCalls = [];
   const ddsCalls = [];
   const logs = [];
+  const seatTokenCalls = [];
   const adapter = createClassicNodeAdapter({
     io: base.fixture.io,
     dealFactory: dealFactory || (({ dealNumber }) => {
@@ -556,9 +561,14 @@ function adapterHarness({ dealFactory, calcDDTable } = {}) {
       ddsCalls.push(hands);
       return Array.from({ length: 5 }, () => [7, 7, 7, 7]);
     }),
+    seatTokenFactory: seatTokenFactory || (({ seat, dealNumber }) => {
+      const token = `token-${dealNumber}-${seat}-${seatTokenCalls.length + 1}`;
+      seatTokenCalls.push({ seat, dealNumber, token });
+      return token;
+    }),
     logger: { error: (message, metadata) => logs.push({ message, metadata }) },
   });
-  return { ...base, adapter, dealCalls, ddsCalls, logs };
+  return { ...base, adapter, dealCalls, ddsCalls, seatTokenCalls, logs };
 }
 
 async function flushAsyncEffects() {
@@ -589,6 +599,15 @@ test('adapter start preflights authorization and occupancy before one deal and l
   assert.equal(h.room.phase, 'BIDDING');
   assert.equal(h.room.dealNumber, 1);
   assert.equal(h.room.classicRevision, 1);
+  assert.deepEqual(h.seatTokenCalls.map(({ seat, dealNumber }) => ({ seat, dealNumber })), [
+    { seat: 'N', dealNumber: 1 }, { seat: 'E', dealNumber: 1 },
+    { seat: 'S', dealNumber: 1 }, { seat: 'W', dealNumber: 1 },
+  ]);
+  for (const seat of ['N', 'E', 'S', 'W']) {
+    const start = h.fixture.forTarget(h.fixture.socketIds[seat])
+      .find(emission => emission.name === 'gameStart').payload;
+    assert.equal(start.seatToken, h.room.seatTokens[seat]);
+  }
   assert.equal(h.room.claimReq, null);
   assert.equal(h.room.viewReq, null);
   assert.deepEqual(h.fixture.emissions.map(({ name }) => name), [
@@ -1212,6 +1231,10 @@ test('adapter fourth ready consumes exactly deal N+1 and emits readiness before 
   assert.deepEqual(h.room.readyStatus, { N: false, E: false, S: false, W: false });
   assert.equal(h.room.claimReq, null);
   assert.equal(h.room.viewReq, null);
+  assert.deepEqual(h.seatTokenCalls.slice(-4).map(({ seat, dealNumber }) => ({ seat, dealNumber })), [
+    { seat: 'N', dealNumber: 2 }, { seat: 'E', dealNumber: 2 },
+    { seat: 'S', dealNumber: 2 }, { seat: 'W', dealNumber: 2 },
+  ]);
   assert.equal(reconnectFrames(h.room, 'N').some(frame => (
     frame.name === 'viewLastTrickRequest' || frame.name === 'viewLastTrickVoteUpdate'
   )), false);
@@ -1220,6 +1243,7 @@ test('adapter fourth ready consumes exactly deal N+1 and emits readiness before 
     assert.deepEqual(emission.payload.readyStatus, { N: true, E: true, S: true, W: true });
   }
   for (const emission of h.fixture.named('gameStart')) {
+    assert.equal(emission.payload.seatToken, h.room.seatTokens[emission.payload.seat]);
     assert.deepEqual(emission.payload.boardScores[0].initialHands,
       h.room.boardScores[0].initialHands);
     assert.notEqual(emission.payload.boardScores[0].initialHands,
@@ -1819,6 +1843,7 @@ test('classic reconnect maps BIDDING from canonical per-seat views in legacy ord
     assert.deepEqual(frames[0].payload.hand, h.room.hands[seat]);
     assert.notEqual(frames[0].payload.hand, h.room.hands[seat]);
     assert.equal(frames[0].payload.seat, seat);
+    assert.equal(frames[0].payload.seatToken, h.room.seatTokens[seat]);
     assert.deepEqual(frames[0].payload.playerNames, h.room.playerNames);
     assert.equal(Object.hasOwn(frames[0].payload, 'hands'), false);
     assertNoReconnectArchiveLeak(frames);
@@ -1872,7 +1897,7 @@ test('classic reconnect restores PLAYING claim and last-trick metadata without p
   }
 });
 
-test('classic reconnect restores SCORING without score hands or initialHands', () => {
+test('classic reconnect restores SCORING with detached replay hands but sanitized score history', () => {
   const h = annotatedPlayingHarness();
   assert.equal(playAs(h, 'E', { suit: 'H', rank: '2' }).ok, true);
   h.room.claimReq = {
@@ -1891,7 +1916,8 @@ test('classic reconnect restores SCORING without score hands or initialHands', (
     ]);
     assert.deepEqual(frames[0].payload.hand, h.room.hands[seat]);
     assert.equal(frames[3].payload.passedOut, false);
-    assert.equal(Object.hasOwn(frames[3].payload, 'hands'), false);
+    assert.deepEqual(frames[3].payload.hands, h.room.boardScores[0].initialHands);
+    assert.notEqual(frames[3].payload.hands, h.room.boardScores[0].initialHands);
     assert.equal(Object.hasOwn(frames[3].payload.boardScores[0], 'initialHands'), false);
     assertNoReconnectArchiveLeak(frames);
   }

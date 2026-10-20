@@ -52,7 +52,7 @@ const WORKER_EVENT_KEYS = Object.freeze({
   'classic.dd-table-ready': ['dealNumber', 'ddTable'],
 });
 const NODE_PAYLOAD_KEYS = Object.freeze({
-  gameStart: ['hand', 'boardInfo', 'seat', 'playerNames', 'boardScores'],
+  gameStart: ['hand', 'boardInfo', 'seat', 'seatToken', 'playerNames', 'boardScores'],
   biddingUpdate: ['history', 'currentBidder', 'currentContract', 'consecutivePasses'],
   biddingEnd: [
     'contract', 'declarer', 'dummy', 'leader', 'biddingHistory', 'declarerControlledBy',
@@ -605,6 +605,7 @@ function createNodePath(fixture) {
     teachingMode: false,
     sockets,
     playerNames: { N: 'North', E: 'East', S: 'South', W: 'West' },
+    seatTokens: { N: null, E: null, S: null, W: null },
     ownerSocketId: sockets.N,
     classicRevision: 0,
     claimReq: null,
@@ -613,6 +614,7 @@ function createNodePath(fixture) {
   const adapter = createClassicNodeAdapter({
     io: { to: target => ({ emit: (name, payload) => emissions.push({ target, name, payload }) }) },
     dealFactory: ({ dealNumber }) => dealFor(fixture, dealNumber),
+    seatTokenFactory: ({ seat, dealNumber }) => `parity-${fixture.id}-${dealNumber}-${seat}`,
     calcDDTable: hands => new Promise((resolve, reject) => {
       dds.push({ hands: clone(hands), resolve, reject });
     }),
@@ -688,6 +690,7 @@ function assertNodeTransport(node, state, coreEvents, emissions) {
         hand: clone(state.hands[seat]),
         boardInfo: clone(state.boardInfo),
         seat,
+        seatToken: `parity-${node.room.id.slice('node-'.length)}-${state.dealNumber}-${seat}`,
         playerNames: clone(node.room.playerNames),
         boardScores: expectedNodeBoardScores(state, seat, node.room),
       };
