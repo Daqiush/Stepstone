@@ -1,9 +1,15 @@
 # Classic Mode Core Migration Design
 
-**Status:** Approved direction, implementation not started
+**Status:** Backend parity implemented, independently reviewed, and verified; not deployed
 **Date:** 2026-10-15
 **Baseline:** `workers-room-foundation-v1` / `502d43d`
 **Branch:** `codex/migrate-classic-mode`
+
+## Verified implementation evidence
+
+The shared classic engine, Node compatibility adapter, Durable Object adapter, persisted DDS recovery, privacy views, idempotent commands, cross-platform parity fixtures, and Free-plan budget model are complete through implementation commit `474bfd50d343cc82ff5b1d5bbf23c7d3e29d7d7e`.
+
+The implementation commit passed `npm test`, `npm run test:server:smoke`, `npm run test:workers`, `npm run simulate:workers-room-budget`, and `npx --no-install wrangler deploy --dry-run --config workers/wrangler.jsonc`. Node/Socket.IO remains the production browser path. No Worker endpoint, route, custom domain, or DNS change was published by this milestone.
 
 ## 1. Goal
 
