@@ -89,6 +89,8 @@ The admission request sends the key once in an HTTPS POST body. The Worker compa
 
 All application assets except the minimal admission shell, all room APIs, and every WebSocket upgrade require a valid preview cookie. Missing and invalid admission produce the same opaque response. The key and cookie are never accepted in a URL, printed in a workflow summary, logged, or persisted in an artifact.
 
+The admission shell is returned at the originally requested same-origin URL. After a successful admission POST sets the cookie, its inline bootstrap reloads that exact path and query, without adding the preview key. This preserves the first `transport=worker&endpoint=...` load so the configuration module can validate and store it before removing those parameters from the address bar.
+
 The existing singleton lobby registry also enforces conservative deployment-wide fixed-window limits for admission attempts, room creation, and room joining. Limits are sized well above the four-client functional test but low enough to bound accidental loops or a leaked credential. Rate-limit failures use an opaque capacity response and do not reveal whether a room exists.
 
 ## 5. Browser Architecture
@@ -161,9 +163,11 @@ Creating or joining a session must cause connected clients to receive a refreshe
 
 A newly allocated non-owner seat receives a short first-authentication deadline just as the owner already does. If that session does not complete WebSocket hello before the deadline, the seat and bootstrap authority are released and connected clients receive a membership refresh. `classic.start` counts four live authenticated player authorities rather than four merely allocated rows, so an abandoned HTTP join cannot make a room appear ready. Once a player has authenticated successfully, the existing reconnect grace and room lifecycle rules apply.
 
+Room snapshots add a nonsecret `connectedSeats` array derived only from authoritative current WebSocket attachments. `playerNames` continues to describe allocated seats; `connectedSeats` describes which allocated players are currently authenticated and live. The room broadcasts a same-revision membership snapshot after first hello success, authoritative disconnect, session replacement, and first-auth timeout cleanup. The Worker lobby enables the start button only when N/E/S/W are both allocated and connected. A replacement connection produces a single final live view rather than a false permanent disconnect.
+
 ## 7. Authoritative State and Presentation
 
-`room.snapshot` is the sole authoritative browser state. It supplies room identity, viewer identity, player names, the per-viewer classic state, visible hands, auction, current trick, score history, ready state, and DDS state.
+`room.snapshot` is the sole authoritative browser state. It supplies room identity, viewer identity, player names, connected seats, the per-viewer classic state, visible hands, auction, current trick, score history, ready state, and DDS state.
 
 Classic event frames are transient effects only:
 
@@ -252,12 +256,14 @@ The current `ROOM_FOUNDATION_TEST` flag must no longer be required for public ro
 
 The routing matrix becomes:
 
-| Configuration | Player room routes | Internal room test bridge |
-|---|---:|---:|
-| neither flag | closed | closed |
-| `ROOM_FOUNDATION_PUBLIC=true` | open | closed |
-| `ROOM_FOUNDATION_TEST=true` | open | open |
-| both flags | open | open; test environments only |
+| Configuration | Player room routes | Internal room test bridge | Admission/rate limit semantics |
+|---|---:|---:|---|
+| neither flag | closed | closed | none |
+| `ROOM_FOUNDATION_PUBLIC=true`, test flag absent | open only with valid preview configuration and cookie | closed | preview admission and preview-only limits required |
+| `ROOM_FOUNDATION_TEST=true`, public flag absent | open | open | existing test behavior; no preview cookie or preview limits |
+| both flags | closed | closed | invalid configuration; fail closed and fail deployment readiness |
+
+`ROOM_FOUNDATION_PUBLIC=true` is valid only when the preview secret and a future, bounded `PREVIEW_EXPIRES_AT` are both present and valid. A missing, malformed, expired, or overlong configuration closes all preview assets and room routes. Preview admission/create/join counters run only in valid public-preview mode and must not change existing test behavior, SQL-accounting expectations, or room-budget fixtures.
 
 Player room routes are limited to:
 
@@ -342,7 +348,9 @@ This is a functional gate, not another long DDS soak.
 
 Deployment failure triggers immediate cleanup. A successful preview remains available for manual browser acceptance and can be removed by a dedicated manual cleanup workflow. A scheduled backstop also requests cleanup.
 
-The 24-hour safety boundary does not rely on GitHub scheduling or continued Cloudflare API credentials. Every request checks the manifest-bound `PREVIEW_EXPIRES_AT`. At or after expiry, the Worker returns the same opaque 404 for the admission page, assets, APIs, and new WebSocket upgrades. Existing WebSockets are denied and closed before processing the next frame, so they cannot mutate or observe live state after expiry. GitHub cleanup remains responsible for deleting the inert Worker object and confirming absence.
+The 24-hour safety boundary does not rely on GitHub scheduling or continued Cloudflare API credentials. Every request checks the manifest-bound `PREVIEW_EXPIRES_AT`. At or after expiry, the Worker returns the same opaque 404 for the admission page, assets, APIs, and new WebSocket upgrades.
+
+The Durable Object enforces the same boundary in both directions for existing sockets. Every inbound frame is checked before processing, and the centralized outbound send/broadcast path checks again before any reply, snapshot, classic event, lifecycle notification, or asynchronously completed DDS result is delivered. At expiry it closes the socket instead of sending the frame. Tests specifically hold a DDS completion until after expiry and prove that neither its event nor its snapshot is observable. GitHub cleanup remains responsible for deleting the inert Worker object and confirming absence.
 
 Deletion is authorized only when all of these match the trusted deployment record:
 
@@ -381,11 +389,11 @@ Internal exception text, Cloudflare response bodies, stack traces, tokens, and p
 - The public/test flag matrix and opaque test-path denial.
 - Static asset allowlist and API-first routing.
 - Deterministic seat allocation and capacity.
-- Live lobby membership refresh, first-auth timeout cleanup, and live-seat start enforcement.
+- Live lobby `connectedSeats` refresh after hello, disconnect, replacement, and first-auth timeout cleanup, plus live-seat start enforcement.
 - Deployment-wide admission/create/join rate limits.
 - Four-player standard-classic lifecycle and next deal.
 - Refresh/reconnect, token rotation, idempotent retry, and revision conflict.
-- Manifest-bound expiry for assets, HTTP APIs, WebSocket upgrades, and existing socket commands.
+- Manifest-bound expiry for assets, HTTP APIs, WebSocket upgrades, existing socket commands, and asynchronous outbound DDS/broadcast delivery.
 
 ### 14.3 Regression gates
 
