@@ -28,6 +28,12 @@ function resolveDdsPaths(options = {}) {
     }
     binaryDir = path.join(absoluteRoot, 'dds', 'Build', 'bin', `darwin-${arch}`, 'Release', 'current');
     extension = '';
+  } else if (platform === 'linux') {
+    if (!['arm64', 'x64'].includes(arch)) {
+      throw new Error(`Unsupported DDS architecture on linux: ${arch}`);
+    }
+    binaryDir = path.join(absoluteRoot, 'bin');
+    extension = '';
   } else {
     throw new Error(`Unsupported DDS platform: ${platform}`);
   }

@@ -2,7 +2,7 @@
 
 const childProcess = require('node:child_process');
 
-function runDdsProcess(programPath, input, spawnImpl = childProcess.spawn, {
+function runDdsProcessUnqueued(programPath, input, spawnImpl = childProcess.spawn, {
   timeoutMs,
   killGraceMs = 1_000,
 } = {}) {
@@ -128,4 +128,54 @@ function runDdsProcess(programPath, input, spawnImpl = childProcess.spawn, {
   });
 }
 
-module.exports = { runDdsProcess };
+function createDdsProcessRunner({
+  maxConcurrency = 1,
+  processRunner = runDdsProcessUnqueued,
+} = {}) {
+  const parsedConcurrency = typeof maxConcurrency === 'string'
+    ? Number(maxConcurrency.trim())
+    : maxConcurrency;
+  if (!Number.isInteger(parsedConcurrency) || parsedConcurrency < 1) {
+    throw new Error('maxConcurrency must be a positive integer');
+  }
+
+  let active = 0;
+  const queue = [];
+
+  function start(task) {
+    active += 1;
+    let result;
+    try {
+      result = processRunner(...task.args);
+    } catch (error) {
+      active -= 1;
+      task.reject(error);
+      drain();
+      return;
+    }
+
+    Promise.resolve(result).then(task.resolve, task.reject).finally(() => {
+      active -= 1;
+      drain();
+    });
+  }
+
+  function drain() {
+    while (active < parsedConcurrency && queue.length > 0) start(queue.shift());
+  }
+
+  return (...args) => new Promise((resolve, reject) => {
+    const task = { args, resolve, reject };
+    if (active < parsedConcurrency) start(task);
+    else queue.push(task);
+  });
+}
+
+const runDdsProcess = createDdsProcessRunner({
+  maxConcurrency: process.env.DDS_MAX_CONCURRENCY ?? 1,
+});
+
+module.exports = {
+  createDdsProcessRunner,
+  runDdsProcess,
+};

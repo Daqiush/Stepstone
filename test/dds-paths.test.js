@@ -32,6 +32,13 @@ test('Darwin x64 resolves the calc binary', () => {
   assert.equal(resolved.calc, path.join(ROOT, 'dds', 'Build', 'bin', 'darwin-x64', 'Release', 'current', 'dds_calc'));
 });
 
+test('Linux x64 resolves the container DDS binaries', () => {
+  const resolved = resolveDdsPaths({ rootDir: ROOT, platform: 'linux', arch: 'x64', env: {} });
+
+  assert.equal(resolved.calc, path.join(ROOT, 'bin', 'dds_calc'));
+  assert.equal(resolved.solve, path.join(ROOT, 'bin', 'dds_solve'));
+});
+
 test('calc-only relative override retains the default solve path and reports override flags', () => {
   const resolved = resolveDdsPaths({
     rootDir: ROOT,

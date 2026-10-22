@@ -26,6 +26,10 @@ const server = http.createServer(app);
 const io     = new Server(server, { cors: { origin: '*' } });
 const PORT   = process.env.PORT || 3000;
 
+app.get('/healthz', (_request, response) => {
+  response.status(200).json({ status: 'ok' });
+});
+
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ────────────────────────────────────────────────────────────────

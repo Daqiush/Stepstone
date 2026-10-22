@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const test = require('node:test');
 
-const { runDdsProcess } = require('../dds-process');
+const { createDdsProcessRunner, runDdsProcess } = require('../dds-process');
 
 function controlledChild() {
   const child = new EventEmitter();
@@ -144,4 +144,40 @@ test('empty stderr reports the path and code, and synchronous spawn throws have 
     },
   );
   assert.deepEqual(signals, ['SIGTERM', 'SIGKILL']);
+});
+
+test('DDS process runner enforces a shared FIFO concurrency limit', async () => {
+  const children = [];
+  const runner = createDdsProcessRunner({ maxConcurrency: 1 });
+  const spawnImpl = () => {
+    const child = controlledChild();
+    children.push(child);
+    return child;
+  };
+
+  const first = runner('dds_calc', 'first', spawnImpl);
+  const second = runner('dds_solve', 'second', spawnImpl);
+
+  assert.equal(children.length, 1);
+  assert.equal(children[0].stdin.input, 'first');
+
+  children[0].stdout.emit('data', 'first-result');
+  children[0].emit('close', 0);
+  assert.equal(await first, 'first-result');
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(children.length, 2);
+  assert.equal(children[1].stdin.input, 'second');
+  children[1].stdout.emit('data', 'second-result');
+  children[1].emit('close', 0);
+  assert.equal(await second, 'second-result');
+});
+
+test('DDS process runner rejects invalid concurrency limits', () => {
+  for (const value of [0, -1, 1.5, 'two']) {
+    assert.throws(
+      () => createDdsProcessRunner({ maxConcurrency: value }),
+      /maxConcurrency.*positive integer/i,
+    );
+  }
 });
